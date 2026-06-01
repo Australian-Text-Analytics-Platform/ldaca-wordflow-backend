@@ -979,24 +979,6 @@ class DataFrameNode(BaseModel):
     )
 
 
-class NodeLineage(BaseModel):
-    """API schema used by routes and generated clients for node lineage.
-
-    Used by:
-    - backend request/response models because they need a stable JSON contract shared by
-      route handlers, generated clients, and tests.
-
-    Flow: validate incoming API fields, apply defaults or validators, and serialize route
-        responses in the shape expected by frontend clients and tests.
-    """
-
-    node_id: str
-    ancestors: List[str]
-    descendants: List[str]
-    depth: int
-    lineage_path: List[str]
-
-
 class DataFrameInfo(BaseModel):
     """Metadata schema used by API responses to describe data frame info.
 
@@ -1307,61 +1289,6 @@ class DataFrameOperationRequest(BaseModel):
     parent_node_id: str
     operation: DataOperation
     result_name: Optional[str] = None
-
-
-# =============================================================================
-# TEXT ANALYSIS MODELS
-# =============================================================================
-
-
-class TextSetupRequest(BaseModel):
-    """Request schema used by API routes and generated clients for text setup request.
-
-    Used by:
-    - backend request/response models because they need a stable JSON contract shared by
-      route handlers, generated clients, and tests.
-
-    Flow: validate incoming API fields, apply defaults or validators, and serialize route
-        responses in the shape expected by frontend clients and tests.
-    """
-
-    document_column: str
-    content_column: Optional[str] = None
-    auto_detect: bool = True
-
-
-class DTMRequest(BaseModel):
-    """Request schema used by API routes and generated clients for d t m request.
-
-    Used by:
-    - backend request/response models because they need a stable JSON contract shared by
-      route handlers, generated clients, and tests.
-
-    Flow: validate incoming API fields, apply defaults or validators, and serialize route
-        responses in the shape expected by frontend clients and tests.
-    """
-
-    max_features: Optional[int] = 1000
-    min_df: float = 0.01
-    max_df: float = 0.95
-    ngram_range: tuple = (1, 2)
-    use_tfidf: bool = False
-
-
-class KeywordExtractionRequest(BaseModel):
-    """Request schema used by API routes and generated clients for keyword extraction request.
-
-    Used by:
-    - backend request/response models because they need a stable JSON contract shared by
-      route handlers, generated clients, and tests.
-
-    Flow: validate incoming API fields, apply defaults or validators, and serialize route
-        responses in the shape expected by frontend clients and tests.
-    """
-
-    method: str  # 'tfidf', 'count', 'custom'
-    top_k: int = 20
-    by_document: bool = False
 
 
 class ConcordanceAnalysisRequest(BaseModel):
@@ -2163,27 +2090,6 @@ class PaginatedResponse(BaseModel):
     total_items: int
     total_pages: int
     has_more: bool
-
-
-class ErrorResponse(BaseModel):
-    """Error response model
-
-    Used by:
-    - backend request/response models, core workspace and worker services because they need
-      a stable JSON contract shared by route handlers, generated clients, and tests.
-
-    Flow: validate incoming API fields, apply defaults or validators, and serialize route
-        responses in the shape expected by frontend clients and tests.
-    """
-
-    error: str
-    detail: str
-    status_code: int
-
-
-# =============================================================================
-# FILTER AND SLICE MODELS
-# =============================================================================
 
 
 # =============================================================================

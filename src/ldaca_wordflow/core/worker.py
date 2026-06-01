@@ -12,8 +12,6 @@ Flow: configure the child-process environment, delegate to the registered task
 
 from __future__ import annotations
 
-import importlib
-import importlib.util
 import logging
 import os
 import time
@@ -33,6 +31,7 @@ from .worker_tasks_quotation import (
 )
 from .worker_tasks_token import run_token_frequencies_task
 from .worker_tasks_topic import run_topic_modeling_task
+from .worker_utils import configure_worker_environment
 
 logger = logging.getLogger(__name__)
 
@@ -97,44 +96,6 @@ def _build_progress_callback(
     return _cb
 
 
-def _configure_worker_environment() -> None:
-    """Initialize worker process runtime environment.
-
-    Called by:
-    - Local helpers, route handlers, or service methods in this module because they need a
-      backend boundary that validates inputs before delegating to workspace or worker state.
-
-    Flow: configure the child-process environment, delegate to the registered task
-        implementation, translate progress callbacks, and keep pool lifecycle concerns
-        outside API routes.
-    """
-    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
-
-    # Numba threading layer selection: prefer Intel TBB when installed (fastest
-    # on multi-core), otherwise fall back to the workqueue layer which is
-    # pure-Python and always available. The TBB import is wrapped because
-    # `find_spec` may succeed for a partially-installed distribution and the
-    # subsequent import can still fail.
-    tbb_available = False
-    try:
-        if importlib.util.find_spec("tbb"):
-            importlib.import_module("tbb")
-            tbb_available = True
-        elif importlib.util.find_spec("tbb4py"):
-            importlib.import_module("tbb4py")
-            tbb_available = True
-    except Exception:
-        tbb_available = False
-
-    if tbb_available:
-        os.environ.setdefault("NUMBA_THREADING_LAYER_PRIORITY", "tbb workqueue omp")
-        os.environ.setdefault("NUMBA_THREADING_LAYER", "tbb")
-    else:
-        os.environ.setdefault("NUMBA_THREADING_LAYER", "workqueue")
-        os.environ.setdefault("NUMBA_THREADING_LAYER_PRIORITY", "workqueue omp tbb")
-        os.environ.setdefault("NUMBA_NUM_THREADS", "1")
-
-
 def ldaca_import_task(
     user_id: str,
     workspace_id: str,
@@ -157,7 +118,7 @@ def ldaca_import_task(
 
     cb = _build_progress_callback(progress_queue, progress_callback)
     return run_ldaca_import_task(
-        _configure_worker_environment,
+        configure_worker_environment,
         user_id,
         workspace_id,
         url,
@@ -187,7 +148,7 @@ def workspace_download_task(
 
     cb = _build_progress_callback(progress_queue, progress_callback)
     return run_workspace_download_task(
-        _configure_worker_environment,
+        configure_worker_environment,
         user_id,
         workspace_id,
         target_workspace_dir,
@@ -231,7 +192,7 @@ def concordance_detach_task(
 
     cb = _build_progress_callback(progress_queue, progress_callback)
     return run_concordance_detach_task(
-        _configure_worker_environment,
+        configure_worker_environment,
         workspace_dir,
         node_corpus,
         parent_node_id,
@@ -294,7 +255,7 @@ def concordance_dispersion_detach_task(
 
     cb = _build_progress_callback(progress_queue, progress_callback)
     return run_concordance_dispersion_detach_task(
-        _configure_worker_environment,
+        configure_worker_environment,
         workspace_dir,
         node_corpus,
         parent_node_id,
@@ -357,7 +318,7 @@ def concordance_materialize_task(
 
     cb = _build_progress_callback(progress_queue, progress_callback)
     return run_concordance_materialize_task(
-        _configure_worker_environment,
+        configure_worker_environment,
         workspace_dir,
         node_corpus,
         child_task_id,
@@ -409,7 +370,7 @@ def quotation_detach_task(
 
     cb = _build_progress_callback(progress_queue, progress_callback)
     return run_quotation_detach_task(
-        _configure_worker_environment,
+        configure_worker_environment,
         workspace_dir,
         node_corpus,
         parent_node_id,
@@ -453,7 +414,7 @@ def quotation_materialize_task(
 
     cb = _build_progress_callback(progress_queue, progress_callback)
     return run_quotation_materialize_task(
-        _configure_worker_environment,
+        configure_worker_environment,
         workspace_dir,
         node_corpus,
         child_task_id,
@@ -499,7 +460,7 @@ def topic_modeling_task(
 
     cb = _build_progress_callback(progress_queue, progress_callback)
     return run_topic_modeling_task(
-        configure_worker_environment=_configure_worker_environment,
+        configure_worker_environment=configure_worker_environment,
         user_id=user_id,
         workspace_id=workspace_id,
         workspace_dir=workspace_dir,
@@ -547,7 +508,7 @@ def token_frequencies_task(
 
     cb = _build_progress_callback(progress_queue, progress_callback)
     return run_token_frequencies_task(
-        configure_worker_environment=_configure_worker_environment,
+        configure_worker_environment=configure_worker_environment,
         user_id=user_id,
         workspace_id=workspace_id,
         node_corpora=node_corpora,
