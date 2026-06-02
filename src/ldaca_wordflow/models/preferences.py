@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from . import QuotationEngineConfig, QuotationEngineType
+from .quotation import QuotationEngineConfig, QuotationEngineType
 
 DEFAULT_HIDDEN_VIEWS: list[str] = ["ai-annotator"]
 

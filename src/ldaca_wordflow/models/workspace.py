@@ -4,9 +4,13 @@ Split from models/__init__.py.
 """
 
 from __future__ import annotations
+
 from typing import Literal, Optional
+
 from pydantic import BaseModel, ConfigDict, Field
+
 from .files import FilesTaskMetadataResponse
+
 
 class WorkspaceInfo(BaseModel):
     """Metadata schema used by API responses to describe workspace info.
@@ -27,7 +31,6 @@ class WorkspaceInfo(BaseModel):
     total_nodes: int
     root_nodes: int = 0
     leaf_nodes: int = 0
-
 
 
 class WorkspaceSummary(BaseModel):
@@ -54,7 +57,6 @@ class WorkspaceSummary(BaseModel):
     folder_name: Optional[str] = None
 
 
-
 class CurrentWorkspaceResponse(BaseModel):
     """Response schema returned by API routes and consumed by generated clients for current workspace response.
 
@@ -67,7 +69,6 @@ class CurrentWorkspaceResponse(BaseModel):
     """
 
     id: str | None = None
-
 
 
 class SetCurrentWorkspaceResponse(BaseModel):
@@ -85,7 +86,6 @@ class SetCurrentWorkspaceResponse(BaseModel):
     id: str | None = None
 
 
-
 class DtypeNormalizationChange(BaseModel):
     """API schema used by routes and generated clients for dtype normalization change.
 
@@ -101,7 +101,6 @@ class DtypeNormalizationChange(BaseModel):
     from_dtype: str
     to_dtype: str
     reason: str
-
 
 
 class WorkspaceNodeInfo(BaseModel):
@@ -132,7 +131,6 @@ class WorkspaceNodeInfo(BaseModel):
     tokenizer_models: dict[str, str] = Field(default_factory=dict)
 
 
-
 class NodeDocumentColumnUpdateRequest(BaseModel):
     """Request schema used by API routes and generated clients for node document column update request.
 
@@ -145,7 +143,6 @@ class NodeDocumentColumnUpdateRequest(BaseModel):
     """
 
     document_column: str | None = None
-
 
 
 class NodeTokenizationPreferenceRequest(BaseModel):
@@ -164,7 +161,6 @@ class NodeTokenizationPreferenceRequest(BaseModel):
     language: str | None = None
 
 
-
 class TokenizerModelInfo(BaseModel):
     """Metadata schema used by API responses to describe tokenizer model info.
 
@@ -181,7 +177,6 @@ class TokenizerModelInfo(BaseModel):
     languages: list[str]
 
 
-
 class TokenizerModelsResponse(BaseModel):
     """Response schema returned by API routes and consumed by generated clients for tokenizer models response.
 
@@ -194,7 +189,6 @@ class TokenizerModelsResponse(BaseModel):
     """
 
     models: list[TokenizerModelInfo]
-
 
 
 class WorkspaceGraphEdge(BaseModel):
@@ -215,7 +209,6 @@ class WorkspaceGraphEdge(BaseModel):
     label: str | None = None
 
 
-
 class WorkspaceGraphResponse(BaseModel):
     """Response schema returned by API routes and consumed by generated clients for workspace graph response.
 
@@ -233,7 +226,6 @@ class WorkspaceGraphResponse(BaseModel):
     edges: list[WorkspaceGraphEdge]
 
 
-
 class WorkspaceNodesResponse(BaseModel):
     """Response schema returned by API routes and consumed by generated clients for workspace nodes response.
 
@@ -246,7 +238,6 @@ class WorkspaceNodesResponse(BaseModel):
     """
 
     nodes: list[WorkspaceNodeInfo]
-
 
 
 class WorkspaceCreateRequest(BaseModel):
@@ -262,7 +253,6 @@ class WorkspaceCreateRequest(BaseModel):
 
     name: str
     description: Optional[str] = None
-
 
 
 class WorkspaceSaveRequest(BaseModel):
@@ -281,7 +271,6 @@ class WorkspaceSaveRequest(BaseModel):
     description: Optional[str] = None
 
 
-
 class WorkspaceActionResponse(BaseModel):
     """Response schema returned by API routes and consumed by generated clients for workspace action response.
 
@@ -298,7 +287,6 @@ class WorkspaceActionResponse(BaseModel):
     id: str | None = None
 
 
-
 class WorkspaceTaskStartResponse(BaseModel):
     """Response schema returned by API routes and consumed by generated clients for workspace task start response.
 
@@ -313,7 +301,6 @@ class WorkspaceTaskStartResponse(BaseModel):
     state: Literal["running"]
     message: str
     metadata: FilesTaskMetadataResponse
-
 
 
 class WorkspaceUploadResponse(BaseModel):
@@ -334,6 +321,3 @@ class WorkspaceUploadResponse(BaseModel):
 # =============================================================================
 # DATAFRAME MODELS
 # =============================================================================
-
-
-
