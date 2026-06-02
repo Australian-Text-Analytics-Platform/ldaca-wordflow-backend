@@ -105,12 +105,6 @@ class TopicModelingRequest(BaseModel):
     # Topic size mode: controls how min_topic_size is derived
     topic_size_mode: Optional[Literal["target", "min", "exact"]] = "target"
     topic_size_value: Optional[int] = 25
-    # Controls the per-topic LABEL stage's CountVectorizer stopword filter (not
-    # the clustering stage). Default ``None`` falls back to
-    # ``effective_language(...)`` per node. English uses sklearn's "english"
-    # list; other languages get ``None`` so Chinese function words aren't
-    # English-filtered (and so don't dominate every topic label).
-    language: Optional[str] = None
 
     # Pydantic v2 model config
     model_config = ConfigDict(

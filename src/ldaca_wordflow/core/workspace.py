@@ -334,6 +334,13 @@ class WorkspaceManager:
             "path": current_path,
         }
         self.ensure_workspace_artifacts_dir(user_id, workspace_id)
+        # Rehydrate persisted analysis task records so task ids referenced by
+        # persisted tabs (tabs.json) resolve again after this load.
+        restore_dir = self.get_workspace_dir(user_id, workspace_id)
+        if restore_dir is not None:
+            from ..analysis.persistence import load_workspace_analysis_tasks
+
+            load_workspace_analysis_tasks(user_id, workspace_id, restore_dir)
         return True
 
     def list_user_workspaces_summaries(self, user_id: str) -> list[dict[str, Any]]:
@@ -593,6 +600,15 @@ class WorkspaceManager:
             cleanup_workspace_caches(user_id, cid)
         except Exception as exc:  # pragma: no cover — defensive
             logger.debug("Failed to sweep analysis caches on unload: %s", exc)
+        # Snapshot analysis task records to disk BEFORE clearing the in-memory
+        # store, so task ids referenced by persisted tabs (tabs.json) stay
+        # resolvable after reload. Concordance rebuilds results from the stored
+        # request + on-disk node parquet, so the request alone is sufficient.
+        workspace_dir = self.get_workspace_dir(user_id, cid)
+        if workspace_dir is not None:
+            from ..analysis.persistence import save_workspace_analysis_tasks
+
+            save_workspace_analysis_tasks(user_id, cid, workspace_dir)
         self._clear_workspace_tasks(user_id, cid)
         self._current.pop(user_id, None)
         return True

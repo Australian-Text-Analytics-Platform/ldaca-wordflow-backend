@@ -19,7 +19,6 @@ from typing import Any, Optional, cast
 
 import polars as pl
 
-from ....core.i18n import effective_language
 from ....core.utils import stringify_unsafe_integers
 from ....core.workspace import workspace_manager
 from .concordance_tokens_mode import (
@@ -41,38 +40,6 @@ from .generated_columns import (
 )
 from .page_size_estimation import DEFAULT_PAGE_SIZE_CANDIDATES, estimate_page_size
 from ....core.exceptions import NotFoundError
-
-# CJK languages — whole-word (``\b``-style) regex semantics don't apply
-# meaningfully because there's no whitespace word boundary between
-# tokens. Bug 4 asks us to *suppress* the whole_word toggle for these
-# languages on a per-node basis, while leaving it active for any EN
-# nodes in the same selection so mixed EN + CJK requests still work
-# correctly on the EN side.
-_CJK_LANGUAGES: frozenset[str] = frozenset({"zh", "ja", "ko"})
-
-
-def _whole_word_active_for_language(
-    whole_word_request: bool,
-    language: Optional[str],
-) -> bool:
-    """Decide whether the whole_word toggle applies for a given node language.
-
-    Returns True only when the user ticked whole_word AND the node is not
-    in a CJK language. The toggle stays UI-active for the request as a
-    whole — per-node suppression lives here so a mixed selection (EN + JA)
-    still wraps the pattern with ``\b`` on the EN node.
-
-    Steps:
-    - Normalize caller input into the representation this module expects.
-    - Delegate stateful, expensive, or validating work to the owning manager/helper when needed.
-    - Return the compact value the caller uses for artifacts, validation, or response shaping.
-
-    Called by:
-    - Local helpers, route handlers, or service methods in this module because they need this unit's "Decide whether the whole_word toggle applies for a given node language" behavior.
-    """
-    if not whole_word_request or language is None:
-        return whole_word_request
-    return language.strip().lower() not in _CJK_LANGUAGES
 
 
 logger = logging.getLogger(__name__)
@@ -198,7 +165,6 @@ def build_concordance_lazyframe(
         request["search_word"],
         regex=bool(request["regex"]),
         whole_word=bool(request.get("whole_word", False)),
-        language=request.get("node_language") or request.get("language"),
     )
 
     expr = pt.concordance(
@@ -217,16 +183,8 @@ def build_concordance_search_pattern(
     *,
     regex: bool,
     whole_word: bool,
-    language: Optional[str] = None,
 ) -> tuple[str, bool]:
     """Return the effective concordance pattern and whether regex mode is needed.
-
-    When ``language`` is one of the CJK codes (``zh`` / ``ja`` / ``ko``)
-    the ``whole_word`` flag is suppressed because ``\b`` word boundary
-    semantics don't apply to languages without whitespace token
-    boundaries. This lets the UI keep the toggle active for mixed
-    selections (EN + ZH) — the EN node still gets the wrapped pattern;
-    the ZH node falls through to the plain pattern automatically.
 
     Steps:
     - Normalize caller input into the representation this module expects.
@@ -236,7 +194,7 @@ def build_concordance_search_pattern(
     Used by:
     - backend API routes, backend tests, core workspace and worker services because they need this unit's "Return the effective concordance pattern and whether regex mode is needed" behavior.
     """
-    if not _whole_word_active_for_language(whole_word, language):
+    if not whole_word:
         return search_word, regex
 
     base_pattern = search_word if regex else re.escape(search_word)
@@ -436,13 +394,11 @@ def resolve_node_sources(
         tokenization_column: Optional[str] = None
         if hasattr(node, "find_tokenization_column"):
             tokenization_column = node.find_tokenization_column(column)
-        node_language = effective_language(request.get("language"), node)
         node_sources[node_id] = {
             "lf": node_data,
             "column": column,
             "label": node_label,
             "tokenization_column": tokenization_column,
-            "language": node_language,
             "node": node,
             "user_id": user_id,
         }
@@ -566,11 +522,7 @@ def compute_node_concordance_page(
     tokenization_column = src.get("tokenization_column")
     search_mode = str(request.get("search_mode") or "regex")
 
-    # Per-node copy of the request with ``node_language`` injected. The
-    # original request's ``language`` field stays untouched (we may still
-    # need it as the global hint elsewhere); ``node_language`` is what the
-    # whole_word-suppression path inspects in build_concordance_search_pattern.
-    node_request: dict[str, Any] = {**request, "node_language": src.get("language")}
+    node_request: dict[str, Any] = dict(request)
 
     if search_mode == "tokens" and tokenization_column:
         token_node = src.get("node")

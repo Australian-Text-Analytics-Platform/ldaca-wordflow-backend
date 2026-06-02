@@ -20,7 +20,7 @@ from fastapi import APIRouter
 from ...core.workspace import (
     workspace_manager,
 )
-from . import base, lifecycle, ui_state
+from . import base, lifecycle, tabs, ui_state
 from . import (
     nodes_concat,
     nodes_crud,
@@ -56,5 +56,6 @@ router.include_router(concordance.router)
 router.include_router(topic_modeling.router)
 router.include_router(ai_annotation.router)
 router.include_router(ui_state.router)
+router.include_router(tabs.router)
 
 __all__ = ["router", "workspace_manager"]

@@ -35,12 +35,13 @@ class ConcordanceAnalysisRequest(BaseModel):
     # word-aware semantics CJK users want once Tokenise has been run.
     # Falls back to regex behaviour if no tokenization column exists.
     search_mode: Literal["regex", "tokens"] = "regex"
-    # Lets the frontend tell the backend what language to assume.
-    # ``None`` defers to the active node's tokenization metadata then ``"en"``.
-    language: Optional[str] = None
     # Sorting parameters
     sort_by: Optional[str] = None  # column name to sort by
     descending: bool = True
+    # Analysis-tab association. When provided, the resulting task becomes the
+    # current task for this tab, superseding (and cleaning up) the tab's prior
+    # task. ``None`` falls back to the analysis-type key for backward compat.
+    tab_id: Optional[str] = None
 
     model_config = ConfigDict(extra="forbid")
 
@@ -140,7 +141,6 @@ class ConcordanceMaterializeRequest(BaseModel):
     # engine the user actually searched with. Defaults to ``"regex"`` so
     # existing English flows are byte-identical.
     search_mode: Literal["regex", "tokens"] = "regex"
-    language: Optional[str] = None
     parent_task_id: str
 
 

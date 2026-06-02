@@ -5,7 +5,7 @@ Used by:
 
 Flow:
 - FastAPI mounts these routes through the workspace package router.
-- Route handlers lock per user/workspace, validate language/node state, and submit topic tasks.
+- Route handlers lock per user/workspace, validate node state, and submit topic tasks.
 - Helpers read artifacts, reaggregate topics, manage embedding cache state, and detach columns.
 - Responses return topic data, task metadata, cache summaries, or saved workspace updates.
 """
@@ -30,7 +30,6 @@ from ....analysis.manager import get_task_manager
 from ....analysis.models import AnalysisStatus, AnalysisTask
 from ....analysis.results import GenericAnalysisResult
 from ....core.auth import get_current_user
-from ....core.i18n import effective_language
 from ....core.utils import get_user_cache_folder
 from ....core.worker_tasks_topic_result import reaggregate_exact_topic_modeling_result
 from ....core.workspace import workspace_manager
@@ -546,13 +545,6 @@ async def run_topic_modeling(
         artifact_dir, artifact_prefix = _prepare_topic_artifact_target(
             user_id, workspace_id
         )
-        # Resolve a single effective language for the label-stage
-        # CountVectorizer. Explicit request param wins; otherwise we read
-        # from the first node's tokenization metadata. Multi-language corpora
-        # are left to the user — the frontend should send "multi" or the
-        # union language label when mixing nodes.
-        first_node = ws.nodes[request.node_ids[0]]
-        topic_language = effective_language(request.language, first_node)
         worker_task = await tm.submit_task(
             user_id=user_id,
             workspace_id=workspace_id,
@@ -571,7 +563,6 @@ async def run_topic_modeling(
                 "sample_fractions": request.sample_fractions,
                 "topic_size_mode": request.topic_size_mode,
                 "topic_size_value": request.topic_size_value,
-                "language": topic_language,
             },
             task_name="Topic Modeling",
         )

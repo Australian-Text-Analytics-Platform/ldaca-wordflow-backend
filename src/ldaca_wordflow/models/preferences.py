@@ -66,8 +66,6 @@ class UserPreferences(BaseModel):
     hidden_views: list[str] = Field(default_factory=lambda: list(DEFAULT_HIDDEN_VIEWS))
     favorite_workspaces: list[str] = Field(default_factory=list)
     quotation: QuotationPreferences = Field(default_factory=QuotationPreferences)
-    # ``None`` falls back to the per-request resolution chain.
-    default_language: str | None = None
     default_tokenizer_model: str | None = None
     ldaca_oni_api_token: str | None = None
 
@@ -107,7 +105,6 @@ class UserPreferencesUpdate(BaseModel):
     hidden_views: list[str] | None = None
     favorite_workspaces: list[str] | None = None
     quotation: QuotationPreferences | None = None
-    default_language: str | None = None
     default_tokenizer_model: str | None = None
     ldaca_oni_api_token: str | None = None
 

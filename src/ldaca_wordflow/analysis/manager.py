@@ -20,6 +20,7 @@ from typing import Any
 from uuid import uuid4
 
 from .models import AnalysisStatus, AnalysisTask, BaseAnalysisRequest
+from .results import GenericAnalysisResult
 
 logger = logging.getLogger(__name__)
 
@@ -474,6 +475,100 @@ class TaskManager:
         if isinstance(request, BaseAnalysisRequest):
             return request
         return BaseAnalysisRequest.model_validate(request)
+
+    def serialize_workspace(self, workspace_id: str) -> dict[str, Any]:
+        """Serialize analysis task records + current-tab pointers for a workspace.
+
+        Why:
+        - The analysis tab system keeps task ids on persisted tabs (``tabs.json``).
+          For those task ids to stay resolvable after a workspace unload/reload
+          (or a server restart), the underlying ``AnalysisTask`` records must be
+          written to disk and restored on load. Concordance (the pilot) rebuilds
+          its result table from the stored ``request`` + on-disk node parquet, so
+          persisting the request is enough; the readiness ``result`` marker is
+          round-tripped through ``GenericAnalysisResult`` for generality.
+
+        Called by:
+        - `analysis.persistence.save_workspace_analysis_tasks` because workspace
+          unload needs a JSON-safe snapshot of the per-user task store scoped to
+          one workspace.
+
+        Flow: collect workspace-scoped tasks, JSON-encode request/result/status,
+            and emit the current-task-id pointers that drive supersede behavior.
+        """
+        tasks_payload: list[dict[str, Any]] = []
+        workspace_task_ids: set[str] = set()
+        for task in self.store.get_all_tasks():
+            if task.workspace_id != workspace_id:
+                continue
+            workspace_task_ids.add(task.task_id)
+            result_payload = task.result.to_json() if task.result is not None else None
+            tasks_payload.append(
+                {
+                    "task_id": task.task_id,
+                    "user_id": task.user_id,
+                    "workspace_id": task.workspace_id,
+                    "status": task.status.value,
+                    "created_at": task.created_at.isoformat(),
+                    "updated_at": task.updated_at.isoformat(),
+                    "request": task.request.model_dump() if task.request else {},
+                    "result": result_payload,
+                    "error": task.error,
+                    "parent_task_id": task.parent_task_id,
+                    "child_task_ids": list(task.child_task_ids),
+                }
+            )
+        current_pointers = {
+            tab: task_id
+            for tab, task_id in self.store.current_task_ids.items()
+            if task_id in workspace_task_ids
+        }
+        return {"tasks": tasks_payload, "current_task_ids": current_pointers}
+
+    def restore_workspace(self, data: dict[str, Any]) -> None:
+        """Rehydrate analysis task records + current-tab pointers from disk.
+
+        Counterpart to `serialize_workspace`. Reconstructs each ``AnalysisTask``
+        with a generic ``BaseAnalysisRequest`` (``extra=allow`` preserves every
+        field) and a ``GenericAnalysisResult`` wrapper, then restores the
+        current-task pointers so per-tab supersede continues to work.
+
+        Called by:
+        - `analysis.persistence.load_workspace_analysis_tasks` because workspace
+          load needs to make persisted tab task ids resolvable again.
+
+        Flow: rebuild typed task records, save them into the per-user store, and
+            replay the current-task-id pointers.
+        """
+        for record in data.get("tasks", []):
+            try:
+                result_dict = record.get("result")
+                task = AnalysisTask(
+                    task_id=record["task_id"],
+                    user_id=record["user_id"],
+                    workspace_id=record["workspace_id"],
+                    status=AnalysisStatus(record.get("status", "completed")),
+                    created_at=datetime.fromisoformat(record["created_at"]),
+                    updated_at=datetime.fromisoformat(record["updated_at"]),
+                    request=BaseAnalysisRequest.model_validate(
+                        record.get("request") or {}
+                    ),
+                    result=(
+                        GenericAnalysisResult(result_dict)
+                        if isinstance(result_dict, dict)
+                        else None
+                    ),
+                    error=record.get("error"),
+                    parent_task_id=record.get("parent_task_id"),
+                    child_task_ids=list(record.get("child_task_ids", [])),
+                )
+            except (KeyError, ValueError) as exc:
+                logger.warning("Skipping malformed persisted analysis task: %s", exc)
+                continue
+            self.store.save_task(task)
+        for tab, task_id in (data.get("current_task_ids") or {}).items():
+            if self.store.get_task(task_id) is not None:
+                self.store.current_task_ids[tab] = task_id
 
 
 def get_task_manager(user_id: str) -> TaskManager:

@@ -175,7 +175,6 @@ def concordance_detach_task(
     extra_columns_data: dict[str, list] | None = None,
     extra_columns_dtypes: dict[str, Any] | None = None,
     materialized_path: str | None = None,
-    language: str | None = None,
     progress_callback: Callable[[float, str], None] | None = None,
     progress_queue: Any | None = None,
 ) -> dict[str, Any]:
@@ -209,7 +208,6 @@ def concordance_detach_task(
         extra_columns_data=extra_columns_data,
         extra_columns_dtypes=extra_columns_dtypes,
         materialized_path=materialized_path,
-        language=language,
         progress_callback=cb,
     )
 
@@ -238,7 +236,6 @@ def concordance_dispersion_detach_task(
     total_bins: int | None = None,
     selected_matched_texts: list[str] | None = None,
     match_case_insensitive: bool = False,
-    language: str | None = None,
     progress_callback: Callable[[float, str], None] | None = None,
     progress_queue: Any | None = None,
 ) -> dict[str, Any]:
@@ -277,7 +274,6 @@ def concordance_dispersion_detach_task(
         total_bins=total_bins,
         selected_matched_texts=selected_matched_texts,
         match_case_insensitive=match_case_insensitive,
-        language=language,
         progress_callback=cb,
     )
 
@@ -301,7 +297,6 @@ def concordance_materialize_task(
     extra_columns_dtypes: dict[str, Any] | None = None,
     search_mode: str = "regex",
     node_tokens: list[Any] | None = None,
-    language: str | None = None,
     progress_callback: Callable[[float, str], None] | None = None,
     progress_queue: Any | None = None,
 ) -> dict[str, Any]:
@@ -335,7 +330,6 @@ def concordance_materialize_task(
         extra_columns_dtypes=extra_columns_dtypes,
         search_mode=search_mode,
         node_tokens=node_tokens,
-        language=language,
         progress_callback=cb,
     )
 
@@ -445,7 +439,6 @@ def topic_modeling_task(
     sample_fractions: list[float | None] | None = None,
     topic_size_mode: str | None = "target",
     topic_size_value: int | None = 25,
-    language: str | None = None,
 ) -> dict[str, Any]:
     """Run the topic modeling task background job submitted by API routes.
 
@@ -476,7 +469,6 @@ def topic_modeling_task(
         sample_fractions=sample_fractions,
         topic_size_mode=topic_size_mode,
         topic_size_value=topic_size_value,
-        language=language,
     )
 
 

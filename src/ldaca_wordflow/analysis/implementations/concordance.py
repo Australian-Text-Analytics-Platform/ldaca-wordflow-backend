@@ -45,8 +45,6 @@ class ConcordanceRequest(BaseAnalysisRequest):
     # exact-token matches with N-actual-token context. Persisted on the task
     # so hydration replays the same engine.
     search_mode: Literal["regex", "tokens"] = "regex"
-    # Resolver chain falls back to tokenization metadata then "en" when this is None.
-    language: str | None = None
     # node_id -> parquet path holding flattened occurrence rows.
     # Populated when a materialize background task completes for that node.
     materialized_paths: dict[str, str] | None = None

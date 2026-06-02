@@ -38,15 +38,12 @@ from .worker_tasks_topic_embedding import (
     _EMBEDDING_CHUNK_SIZE,
     _TOPIC_EMBEDDER_REPO_ID,
     _TOPIC_EMBEDDER_REVISION,
-    _TOPIC_EMBEDDERS_BY_LANGUAGE,
     _embed_documents,
     _embedder_cache_label,
     _encode_embeddings_in_chunks,
     _get_embedder,
-    _select_embedder,
 )
 from .worker_tasks_topic_pipeline import (
-    _bertopic_language_kwarg,
     _build_classic_pipeline,
     _build_label_vectorizer,
     _compute_min_topic_size,
@@ -59,7 +56,6 @@ from .worker_tasks_topic_result import (
     _build_empty_topic_payload,
     _build_topic_result_payload,
     _count_non_outlier_topics,
-    _language_resolution_meta,
     _persist_exact_reduction_artifact,
     _resolve_exact_reduce_topics_target,
     reaggregate_exact_topic_modeling_result,
@@ -224,7 +220,6 @@ def _compute_topic_payload(
     node_infos: list[dict[str, Any]],
     corpora: list[list[str]],
     vectorizer_corpora: list[list[str] | None],
-    tokens_columns_per_node: list[str | None],
     artifact_root: Path,
     artifact_prefix: str,
     random_seed: int,
@@ -234,7 +229,6 @@ def _compute_topic_payload(
     sample_fractions: list[float | None] | None,
     topic_size_mode: str | None,
     topic_size_value: int | None,
-    language: str | None,
 ) -> dict[str, Any]:
     """Run the full topic-modeling pipeline: sample, embed, fit, and build
     the result payload.
@@ -279,7 +273,6 @@ def _compute_topic_payload(
 
     embedded = _embed_documents(
         all_docs=sampled.all_docs,
-        language=language,
         embedding_cache_dir=embedding_cache_dir,
         progress_callback=progress_callback,
         progress_start=0.08,
@@ -293,7 +286,6 @@ def _compute_topic_payload(
         effective_min_topic_size=effective_min_topic_size,
         random_state=random_state,
         embedder=embedded.embedder,
-        language=language,
         top_n_words=top_n_words,
         progress_callback=progress_callback,
         progress_fraction=0.65,
@@ -359,12 +351,6 @@ def _compute_topic_payload(
                 if sample_fractions is not None
                 else {}
             ),
-            **_language_resolution_meta(
-                language=language,
-                node_infos=node_infos,
-                tokens_columns_per_node=tokens_columns_per_node,
-                any_pretokenised=sampled.any_pretokenised,
-            ),
         }
     )
     if raw_total_topics is not None:
@@ -397,7 +383,6 @@ def run_topic_modeling_task(
     sample_fractions: list[float | None] | None = None,
     topic_size_mode: str | None = "target",
     topic_size_value: int | None = 25,
-    language: str | None = None,
 ) -> dict[str, Any]:
     """Execute topic modeling in a worker process.
 
@@ -445,7 +430,6 @@ def run_topic_modeling_task(
             node_infos=node_infos,
             corpora=prepared_payload.corpora,
             vectorizer_corpora=prepared_payload.vectorizer_corpora,
-            tokens_columns_per_node=prepared_payload.tokens_columns_per_node,
             artifact_root=prepared_payload.artifact_root,
             artifact_prefix=artifact_prefix,
             random_seed=random_seed,
@@ -455,7 +439,6 @@ def run_topic_modeling_task(
             sample_fractions=sample_fractions,
             topic_size_mode=topic_size_mode,
             topic_size_value=topic_size_value,
-            language=language,
         )
 
         if progress_callback:

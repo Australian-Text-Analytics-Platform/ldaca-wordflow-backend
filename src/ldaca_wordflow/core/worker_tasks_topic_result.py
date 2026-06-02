@@ -32,7 +32,6 @@ from ..api.workspaces.analyses.generated_columns import (
     TOPIC_MEANING_COLUMN,
 )
 from .worker_tasks_topic_types import _SampledTopicCorpora
-from .worker_tasks_topic_pipeline import _bertopic_language_kwarg
 
 
 def _make_reagg_path(old_path: Path) -> Path:
@@ -663,59 +662,4 @@ def _build_empty_topic_payload(
             "nodes": node_artifacts,
         },
         "meta": {},
-    }
-
-
-def _language_resolution_meta(
-    *,
-    language: str | None,
-    node_infos: list[dict[str, Any]],
-    tokens_columns_per_node: list[str | None],
-    any_pretokenised: bool,
-) -> dict[str, Any]:
-    """Build a metadata block describing how language routing resolved for
-    the current topic modeling run.
-
-    Called by:
-    - ``_compute_topic_payload`` in ``worker_tasks_topic``.
-
-    Flow: load workspace corpora, choose sampling and embedding settings, reuse embedding
-        caches when possible, build topic payloads, and report artifacts back to the task
-        manager.
-    """
-    resolved_language_code = (language or "en").strip().lower() or "en"
-    per_node_label_source: list[dict[str, str | None]] = []
-    for index, node_info in enumerate(node_infos):
-        tokens_column = (
-            tokens_columns_per_node[index]
-            if index < len(tokens_columns_per_node)
-            else None
-        )
-        per_node_label_source.append(
-            {
-                "node_id": str(node_info.get("node_id") or ""),
-                "text_column": str(node_info.get("text_column") or ""),
-                "tokens_column": tokens_column,
-                "label_source": "pretokenised" if tokens_column else "raw_text",
-            }
-        )
-
-    if resolved_language_code == "en":
-        label_vectorizer_mode = "english_default"
-    elif any_pretokenised:
-        label_vectorizer_mode = (
-            "pretokenised"
-            if all(entry["tokens_column"] for entry in per_node_label_source)
-            else "pretokenised_mixed"
-        )
-    else:
-        label_vectorizer_mode = "raw_text_fallback"
-
-    return {
-        "language_resolution": {
-            "language": resolved_language_code,
-            "bertopic_language": _bertopic_language_kwarg(language),
-            "label_vectorizer_mode": label_vectorizer_mode,
-            "nodes": per_node_label_source,
-        }
     }

@@ -199,17 +199,6 @@ def test_regex_and_tokens_builders_agree_on_english_word_boundary_case() -> None
     assert regex_df.height == tokens_df.height == 4
 
 
-def test_concordance_materialize_request_accepts_language_hint() -> None:
-    request = ConcordanceMaterializeRequest(
-        column="text",
-        parent_task_id="parent-task",
-        search_word="hello",
-        language="en",
-    )
-
-    assert request.language == "en"
-
-
 @pytest.mark.asyncio
 async def test_tokens_materialize_route_selects_tokenization_column_once(
     tmp_path, monkeypatch: pytest.MonkeyPatch

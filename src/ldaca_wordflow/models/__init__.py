@@ -1318,12 +1318,13 @@ class ConcordanceAnalysisRequest(BaseModel):
     # word-aware semantics CJK users want once Tokenise has been run.
     # Falls back to regex behaviour if no tokenization column exists.
     search_mode: Literal["regex", "tokens"] = "regex"
-    # Lets the frontend tell the backend what language to assume.
-    # ``None`` defers to the active node's tokenization metadata then ``"en"``.
-    language: Optional[str] = None
     # Sorting parameters
     sort_by: Optional[str] = None  # column name to sort by
     descending: bool = True
+    # Analysis-tab association. When provided, the resulting task becomes the
+    # current task for this tab, superseding (and cleaning up) the tab's prior
+    # task. ``None`` falls back to the analysis-type key for backward compat.
+    tab_id: Optional[str] = None
 
     model_config = ConfigDict(extra="forbid")
 
@@ -1420,7 +1421,6 @@ class ConcordanceMaterializeRequest(BaseModel):
     # engine the user actually searched with. Defaults to ``"regex"`` so
     # existing English flows are byte-identical.
     search_mode: Literal["regex", "tokens"] = "regex"
-    language: Optional[str] = None
     parent_task_id: str
 
 
@@ -1520,12 +1520,6 @@ class QuotationRequest(BaseModel):
     sort_by: Optional[str] = None  # column name to sort by
     descending: bool = True
     engine: Optional[QuotationEngineConfig] = None
-    # Quotation is English-only. The route resolves an effective language and
-    # rejects non-EN with a typed UnsupportedLanguageError so users see a clear
-    # "English-only" message rather than garbage output.
-    # ``None`` falls back to the node's tokenization metadata (if it's been
-    # tokenised) and then ``"en"``.
-    language: Optional[str] = None
 
     model_config = ConfigDict(extra="forbid")
 
@@ -1547,7 +1541,6 @@ class QuotationDetachRequest(BaseModel):
     engine: Optional[QuotationEngineConfig] = None
     selected_columns: Optional[list[str]] = None
     materialized_path: Optional[str] = None  # Reuse existing flattened parquet
-    language: Optional[str] = None
 
     model_config = ConfigDict(extra="forbid")
 
@@ -1566,7 +1559,6 @@ class QuotationMaterializeRequest(BaseModel):
     column: str
     engine: Optional[QuotationEngineConfig] = None
     parent_task_id: str
-    language: Optional[str] = None
 
     model_config = ConfigDict(extra="forbid")
 
@@ -2726,11 +2718,6 @@ class AiAnnotationRequest(BaseAnalysisRequest):
     top_p: float = Field(default=1.0, gt=0, le=1.0)
     seed: Optional[int] = 42
     batch_size: int = Field(default=100, ge=1)
-    # When set, the classification system prompt gains a line like
-    # "Texts are in Chinese." so the LLM doesn't mistake CJK for noise.
-    # ``None`` falls back to ``effective_language(None, node)`` per node,
-    # which keeps existing English flows unchanged (default = "en").
-    language: Optional[str] = None
 
     page: int = 1
     page_size: int = 20
@@ -2786,9 +2773,6 @@ class AiAnnotationDetachRequest(BaseModel):
     top_p: float = Field(default=1.0, gt=0, le=1.0)
     seed: Optional[int] = 42
     batch_size: int = Field(default=100, ge=1)
-    # Optional language hint surfaced to the LLM prompt; falls back to the
-    # node's tokenization metadata then to ``"en"``.
-    language: Optional[str] = None
 
 
 class AiAnnotationEdit(BaseModel):
@@ -3015,12 +2999,6 @@ class TopicModelingRequest(BaseModel):
     # Topic size mode: controls how min_topic_size is derived
     topic_size_mode: Optional[Literal["target", "min", "exact"]] = "target"
     topic_size_value: Optional[int] = 25
-    # Controls the per-topic LABEL stage's CountVectorizer stopword filter (not
-    # the clustering stage). Default ``None`` falls back to
-    # ``effective_language(...)`` per node. English uses sklearn's "english"
-    # list; other languages get ``None`` so Chinese function words aren't
-    # English-filtered (and so don't dominate every topic label).
-    language: Optional[str] = None
 
     # Pydantic v2 model config
     model_config = ConfigDict(

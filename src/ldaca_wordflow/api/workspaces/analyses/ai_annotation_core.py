@@ -13,12 +13,10 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Optional
+from typing import Any
 
 from openai import AsyncOpenAI
 from pydantic import BaseModel
-
-from ....core.i18n import DEFAULT_LANGUAGE, language_label
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +34,6 @@ class ClassificationResult(BaseModel):
 def _build_system_prompt(
     classes: list[dict[str, str]],
     examples: list[dict[str, str]] | None = None,
-    language: Optional[str] = None,
 ) -> str:
     """Build system prompt values used by AI annotation prompt building.
 
@@ -59,12 +56,6 @@ def _build_system_prompt(
         "Classify each piece of text into exactly one of the following categories.\n\n"
         f"Categories:\n{class_descriptions}\n\n"
     )
-
-    # Surface the corpus language so the LLM doesn't mistake CJK or other
-    # non-Latin scripts for noise / encoding errors. Only added for
-    # non-default languages so the existing English prompt is byte-identical.
-    if language and language.lower() != DEFAULT_LANGUAGE:
-        base += f"Texts to classify are in {language_label(language)}.\n\n"
 
     if examples:
         example_lines = "\n".join(
@@ -133,7 +124,6 @@ async def classify_texts(
     seed: int | None = 42,
     batch_size: int = 100,
     text_column_name: str = "text",
-    language: str | None = None,
 ) -> list[dict[str, Any]]:
     """Classify a list of texts using the OpenAI chat completions API.
 
@@ -154,7 +144,7 @@ async def classify_texts(
         base_url=base_url or None,
     )
 
-    system_prompt = _build_system_prompt(classes, examples, language=language)
+    system_prompt = _build_system_prompt(classes, examples)
     class_names = [c["name"] for c in classes]
 
     all_results: list[dict[str, Any]] = []

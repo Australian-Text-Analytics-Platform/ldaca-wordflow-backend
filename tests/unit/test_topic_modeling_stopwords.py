@@ -1,17 +1,9 @@
-"""Label-stage CountVectorizer stop_words is language-routed.
+"""Label-stage CountVectorizer stop_words coverage.
 
 BERTopic's clustering stage works on document embeddings (no stopwords
 involved), but the per-topic label stage uses a CountVectorizer to pick
-"topic-distinguishing" terms via c-TF-IDF. A language-agnostic English
-stopword setting on a Chinese corpus is wrong in two ways:
-
-1. It silently keeps every Chinese function word (的 / 是 / 了 / 在 / 我 /
-   你) as a candidate, so they dominate every topic label.
-2. It looks like stopword filtering is happening when it isn't.
-
-The new behaviour: ``"english"`` only when the resolved language is
-English; ``None`` (no filter) otherwise. Future work can wire in
-per-language stopword lists at no API change.
+"topic-distinguishing" terms via c-TF-IDF. The label vectorizer uses
+sklearn's built-in English stoplist.
 """
 
 from __future__ import annotations
@@ -19,7 +11,6 @@ from __future__ import annotations
 import pytest
 
 from ldaca_wordflow.core.worker_tasks_topic_pipeline import (
-    _bertopic_language_kwarg,
     _build_classic_pipeline,
     _build_label_vectorizer,
     _resolve_top_n_words,
@@ -47,69 +38,24 @@ def _vectorizer(topic_model):
 
 
 # ---------------------------------------------------------------------------
-# Classic-pipeline + label-vectorizer coverage for the multilingual fix.
-# Before the fix, the classic pipeline passed no ``vectorizer_model`` so
-# BERTopic defaulted to ``CountVectorizer(stop_words="english")`` whose
-# ``\b\w\w+\b`` regex can't segment CJK. After the fix, the classic
-# pipeline picks the language-aware vectorizer and forwards
-# ``language="multilingual"`` to BERTopic.
+# Classic-pipeline + label-vectorizer coverage.
 # ---------------------------------------------------------------------------
 
 
 def test_label_vectorizer_english_uses_sklearn_english_stoplist() -> None:
-    vec = _build_label_vectorizer("en")
+    vec = _build_label_vectorizer()
     assert vec.stop_words == "english"
 
 
-def test_label_vectorizer_chinese_drops_stopwords_and_uses_unicode_word_regex() -> None:
-    vec = _build_label_vectorizer("zh")
-    assert vec.stop_words is None
-    assert vec.token_pattern == r"(?u)\b\w+\b"
-
-
-def test_label_vectorizer_segments_space_joined_chinese_tokens() -> None:
-    """Sanity check: the Unicode-word regex segments pre-tokenised, space-
-    joined Chinese into the original tokens. Documents the contract the
-    multilingual path relies on — feed BERTopic ``"中文 分词 测试"`` and
-    c-TF-IDF sees three distinct words, not one ideograph blob."""
-    import re
-
-    vec = _build_label_vectorizer("zh")
-    pattern = re.compile(vec.token_pattern)
-    assert pattern.findall("中文 分词 测试") == ["中文", "分词", "测试"]
-
-
-def test_classic_pipeline_attaches_multilingual_vectorizer_for_chinese() -> None:
+def test_classic_pipeline_uses_english_stoplist() -> None:
     model = _build_classic_pipeline(
         min_topic_size=10,
         random_state=42,
         embedder=_make_dummy_embedder(),
-        language="zh",
-    )
-    vec = _vectorizer(model)
-    assert vec is not None
-    assert vec.stop_words is None
-    assert vec.token_pattern == r"(?u)\b\w+\b"
-
-
-def test_classic_pipeline_keeps_english_default_for_english() -> None:
-    model = _build_classic_pipeline(
-        min_topic_size=10,
-        random_state=42,
-        embedder=_make_dummy_embedder(),
-        language="en",
     )
     vec = _vectorizer(model)
     assert vec is not None
     assert vec.stop_words == "english"
-
-
-def test_bertopic_language_kwarg_maps_to_multilingual_for_non_en() -> None:
-    assert _bertopic_language_kwarg("en") == "english"
-    assert _bertopic_language_kwarg(None) == "english"
-    assert _bertopic_language_kwarg("zh") == "multilingual"
-    assert _bertopic_language_kwarg("ja") == "multilingual"
-    assert _bertopic_language_kwarg("multi") == "multilingual"
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +88,6 @@ def test_classic_pipeline_forwards_top_n_words_to_bertopic() -> None:
         min_topic_size=10,
         random_state=42,
         embedder=_make_dummy_embedder(),
-        language="zh",
         top_n_words=70,
     )
     assert getattr(model, "top_n_words", None) == 70

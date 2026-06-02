@@ -160,43 +160,9 @@ def _compute_min_topic_size(
     return max(2, n_eff // (int(topic_size_value) * 10))
 
 
-def _bertopic_language_kwarg(language: str | None) -> str:
-    """Map our internal language code to BERTopic's ``language`` kwarg.
-
-    BERTopic accepts ``"english"`` or ``"multilingual"`` and uses it for
-    some default heuristics (label word filtering, default embedder
-    selection when none is passed). We always pass an explicit
-    ``embedding_model``, but the flag still influences post-fit behavior,
-    so route non-English to ``"multilingual"`` per BERTopic's API.
-
-    Called by:
-    - ``_build_classic_pipeline`` (this module).
-    - ``_language_resolution_meta`` in ``worker_tasks_topic_result``.
-
-    Flow: load workspace corpora, choose sampling and embedding settings, reuse embedding
-        caches when possible, build topic payloads, and report artifacts back to the task
-        manager.
-    """
-    return "english" if (language or "en").strip().lower() == "en" else "multilingual"
-
-
-def _build_label_vectorizer(language: str | None, *, online: bool = False) -> Any:
+def _build_label_vectorizer(*, online: bool = False) -> Any:
     """Return the CountVectorizer (or OnlineCountVectorizer) used for the
-    label/c-TF-IDF stage.
-
-    English: sklearn's built-in English stoplist + default regex — unchanged
-    from the legacy behavior.
-
-    Non-English: callers feed BERTopic pre-tokenised, space-joined docs
-    (built from the node's registered token spec), so the vectorizer just
-    needs to split on Unicode word
-    characters. ``\\b\\w+\\b`` with the Unicode flag matches CJK runs that
-    sit between non-word characters (the inserted spaces), which gives us
-    meaningful per-token c-TF-IDF without bringing jieba into this stage.
-
-    Stopwords are deliberately NOT applied here — they get filtered in the
-    frontend after the user inspects topic labels (decision recorded in
-    the multilingual fix discussion).
+    label/c-TF-IDF stage with sklearn's built-in English stoplist.
 
     Called by:
     - ``_build_classic_pipeline`` (this module).
@@ -205,23 +171,13 @@ def _build_label_vectorizer(language: str | None, *, online: bool = False) -> An
         caches when possible, build topic payloads, and report artifacts back to the task
         manager.
     """
-    code = (language or "en").strip().lower()
-    if code == "en":
-        if online:
-            from bertopic.vectorizers import OnlineCountVectorizer
-
-            return OnlineCountVectorizer(stop_words="english", decay=0.01)
-        from sklearn.feature_extraction.text import CountVectorizer
-
-        return CountVectorizer(stop_words="english")
-
     if online:
         from bertopic.vectorizers import OnlineCountVectorizer
 
-        return OnlineCountVectorizer(token_pattern=r"(?u)\b\w+\b", decay=0.01)
+        return OnlineCountVectorizer(stop_words="english", decay=0.01)
     from sklearn.feature_extraction.text import CountVectorizer
 
-    return CountVectorizer(token_pattern=r"(?u)\b\w+\b")
+    return CountVectorizer(stop_words="english")
 
 
 def _resolve_top_n_words(representative_words_count: int | None) -> int:
@@ -260,7 +216,6 @@ def _build_classic_pipeline(
     min_topic_size: int,
     random_state: int,
     embedder: Any,
-    language: str | None = None,
     top_n_words: int = 50,
 ) -> Any:
     """Build a standard BERTopic pipeline with UMAP + HDBSCAN.
@@ -286,8 +241,7 @@ def _build_classic_pipeline(
             metric="cosine",
             random_state=random_state,
         ),
-        vectorizer_model=_build_label_vectorizer(language, online=False),
-        language=_bertopic_language_kwarg(language),
+        vectorizer_model=_build_label_vectorizer(online=False),
         top_n_words=top_n_words,
     )
 
@@ -299,7 +253,6 @@ def _run_classic_pipeline(
     effective_min_topic_size: int,
     random_state: int,
     embedder: Any,
-    language: str | None,
     top_n_words: int,
     progress_callback: Callable[[float, str], None] | None,
     progress_fraction: float,
@@ -322,7 +275,6 @@ def _run_classic_pipeline(
         effective_min_topic_size,
         random_state,
         embedder,
-        language=language,
         top_n_words=top_n_words,
     )
     assigned_topics, _ = topic_model.fit_transform(

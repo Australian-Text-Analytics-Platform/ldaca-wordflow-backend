@@ -19,48 +19,10 @@ from .worker_tasks_topic_types import _EmbeddedTopicDocuments
 _EMBEDDER_CACHE: dict[tuple[str, str], Any] = {}
 _EMBEDDING_CHUNK_SIZE = 512
 
-# Language → (repo_id, revision) for the topic-modeling embedder. English keeps
-# the pinned MiniLM-L6 the topic-modeling team has been validating against.
-# Anything else routes to the multilingual MiniLM-L12, which covers 50+ languages
-# including ZH / JA / KO / ES / FR / DE.
-#
-# Revision pinning for the multilingual model is deferred until the ZH
-# workflow is validated end-to-end. ``scripts/check_model_updates.py``
+# Pinned MiniLM-L6 embedder for topic modeling. ``scripts/check_model_updates.py``
 # is the release-time deliberate bump point.
-_TOPIC_EMBEDDERS_BY_LANGUAGE: dict[str, tuple[str, str | None]] = {
-    "en": (
-        "sentence-transformers/all-MiniLM-L6-v2",
-        "c9745ed1d9f207416be6d2e6f8de32d1f16199bf",
-    ),
-    "multi": (
-        "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
-        None,
-    ),
-}
-
-# Back-compat alias used by the result payload and existing telemetry — the
-# English pair is what English callers (the previous default) still see.
-_TOPIC_EMBEDDER_REPO_ID, _TOPIC_EMBEDDER_REVISION = _TOPIC_EMBEDDERS_BY_LANGUAGE["en"]
-
-
-def _select_embedder(language: str | None) -> tuple[str, str | None]:
-    """Return ``(repo_id, revision)`` for ``language``. English keeps the
-    pinned MiniLM-L6 (back-compat); everything else routes to the
-    multilingual fallback so ZH / JA topic modeling produces non-degenerate
-    clusters.
-
-    Called by:
-    - ``_embed_documents`` (this module).
-    - Tests that verify embedder routing without loading models.
-
-    Flow: load workspace corpora, choose sampling and embedding settings, reuse embedding
-        caches when possible, build topic payloads, and report artifacts back to the task
-        manager.
-    """
-    code = (language or "en").strip().lower()
-    if code == "en":
-        return _TOPIC_EMBEDDERS_BY_LANGUAGE["en"]
-    return _TOPIC_EMBEDDERS_BY_LANGUAGE["multi"]
+_TOPIC_EMBEDDER_REPO_ID = "sentence-transformers/all-MiniLM-L6-v2"
+_TOPIC_EMBEDDER_REVISION = "c9745ed1d9f207416be6d2e6f8de32d1f16199bf"
 
 
 def _embedder_cache_label(repo_id: str, revision: str | None) -> str:
@@ -297,7 +259,6 @@ def _embed_with_cache(
 def _embed_documents(
     *,
     all_docs: list[str],
-    language: str | None,
     embedding_cache_dir: str | None,
     progress_callback: Callable[[float, str], None] | None,
     progress_start: float,
@@ -313,7 +274,10 @@ def _embed_documents(
         caches when possible, build topic payloads, and report artifacts back to the task
         manager.
     """
-    embedder_repo_id, embedder_revision = _select_embedder(language)
+    embedder_repo_id, embedder_revision = (
+        _TOPIC_EMBEDDER_REPO_ID,
+        _TOPIC_EMBEDDER_REVISION,
+    )
     embedder = _get_embedder(embedder_repo_id, embedder_revision)
     embedding_backend = _embedder_provider_id(embedder)
     return _EmbeddedTopicDocuments(

@@ -33,7 +33,6 @@ from ....analysis.manager import get_task_manager
 from ....analysis.models import AnalysisStatus, AnalysisTask
 from ....analysis.results import GenericAnalysisResult
 from ....core.auth import get_current_user
-from ....core.i18n import effective_language
 from ....core.tokens_cache import hydrate_tokenization_lazyframe
 from ....core.workspace import workspace_manager
 from ....models import (
@@ -212,7 +211,6 @@ async def run_concordance(
             case_sensitive=request.case_sensitive,
             combined=bool(request.combined),
             search_mode=request.search_mode,
-            language=request.language,
         )
 
         task_id = str(uuid4())
@@ -231,7 +229,11 @@ async def run_concordance(
                 result=GenericAnalysisResult({"ready": True}),
             )
         )
-        task_manager.set_current_task("concordance", task_id)
+        # Key the current-task pointer by tab when the frontend supplies a
+        # tab_id so re-running inside a tab supersedes that tab's previous
+        # task (set_current_task clears the superseded task + its artifacts).
+        # Fall back to the analysis-type key for older clients.
+        task_manager.set_current_task(request.tab_id or "concordance", task_id)
 
         normalized_request = (
             normalize_saved_request(analysis_request.model_dump()) or {}
@@ -530,12 +532,6 @@ async def detach_concordance(
                 if extra_columns_dtypes
                 else None,
                 "materialized_path": request.materialized_path,
-                # Per-node language drives Bug-4 whole_word suppression:
-                # CJK nodes ignore the toggle (no \b semantics), EN/other
-                # nodes still honour it.
-                "language": effective_language(
-                    getattr(request, "language", None), node
-                ),
             },
         )
 
@@ -665,9 +661,6 @@ async def detach_concordance_dispersion(
                 "total_bins": request.total_bins,
                 "selected_matched_texts": request.selected_matched_texts,
                 "match_case_insensitive": request.match_case_insensitive,
-                "language": effective_language(
-                    getattr(request, "language", None), node
-                ),
             },
         )
         if request.parent_task_id:
@@ -814,9 +807,6 @@ async def materialize_concordance(
                 "extra_columns_dtypes": extra_columns_dtypes,
                 "search_mode": request.search_mode,
                 "node_tokens": node_tokens,
-                "language": effective_language(
-                    getattr(request, "language", None), node
-                ),
             },
         )
         get_task_manager(user_id).link_child_task(request.parent_task_id, task_info.id)

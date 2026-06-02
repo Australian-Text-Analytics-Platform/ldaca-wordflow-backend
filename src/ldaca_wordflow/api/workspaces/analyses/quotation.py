@@ -5,7 +5,7 @@ Used by:
 
 Flow:
 - FastAPI mounts these routes through the workspace package router.
-- Route handlers gate language support, validate quotation requests, and manage current task state.
+- Route handlers validate quotation requests, and manage current task state.
 - Helpers submit extraction work, read on-demand result pages, and attach/detach generated columns.
 - Responses return task metadata, quotation pages, preference updates, or saved workspace changes.
 """
@@ -26,12 +26,6 @@ from ....analysis.implementations.quotation import (
 from ....analysis.manager import get_task_manager
 from ....analysis.results import GenericAnalysisResult
 from ....core.auth import get_current_user
-from ....core.i18n import (
-    DEFAULT_LANGUAGE,
-    UnsupportedLanguageError,
-    effective_language,
-    require_language,
-)
 from ....core.services.quotation_client import (
     QuotationServiceError,
     extract_remote_quotations,
@@ -63,47 +57,6 @@ DEFAULT_CONTEXT_LENGTH = qcore.DEFAULT_CONTEXT_LENGTH
 DEFAULT_PAGE_SIZE = qcore.DEFAULT_PAGE_SIZE
 DEFAULT_DESCENDING = qcore.DEFAULT_DESCENDING
 CORE_QUOTATION_COLUMNS = list(qcore.CORE_QUOTATION_COLUMNS)
-
-# Quotation extractor is English-only. Vendored GenderGapTracker rules / spaCy
-# model only work for English; running them on other
-# languages produces garbage rather than a useful refusal. Frontend shows
-# a disabled-with-tooltip control, but the API still gates so curl users
-# / future clients can't bypass it.
-_QUOTATION_TOOL = "Quotation extractor"
-_QUOTATION_SUPPORTED_LANGUAGES = (DEFAULT_LANGUAGE,)
-
-
-def _enforce_quotation_language_gate(request_language: Optional[str], node: Any) -> str:
-    """Resolve effective language and reject anything other than English.
-
-    Returns the resolved language string for downstream telemetry/logging.
-    Raises ``HTTPException(400)`` with a typed-error payload on rejection.
-
-    Steps:
-    - Normalize caller input into the representation this module expects.
-    - Delegate stateful, expensive, or validating work to the owning manager/helper when needed.
-    - Return the compact value the caller uses for artifacts, validation, or response shaping.
-
-    Called by:
-    - Local helpers, route handlers, or service methods in this module because they need this unit's "Resolve effective language and reject anything other than English" behavior.
-    """
-    language = effective_language(request_language, node)
-    try:
-        require_language(
-            _QUOTATION_TOOL, language, supported=_QUOTATION_SUPPORTED_LANGUAGES
-        )
-    except UnsupportedLanguageError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": "unsupported_language",
-                "tool": exc.tool,
-                "language": exc.language,
-                "supported": list(_QUOTATION_SUPPORTED_LANGUAGES),
-                "message": str(exc),
-            },
-        ) from exc
-    return language
 
 
 async def _compute_on_demand_page(
@@ -426,7 +379,6 @@ async def get_quotation(
         if workspace is None:
             raise NoActiveWorkspaceError("No active workspace selected")
         node = workspace.nodes[node_id]
-        _enforce_quotation_language_gate(request.language, node)
 
         engine = request.engine or QuotationEngineConfig()
 
@@ -583,7 +535,6 @@ async def detach_quotation(
     if not workspace_id or ws is None:
         raise NoActiveWorkspaceError("No active workspace selected")
     node = ws.nodes[node_id]
-    _enforce_quotation_language_gate(request.language, node)
     tm = workspace_manager.get_task_manager(user_id)
     node_data = node.data
 
@@ -672,7 +623,6 @@ async def materialize_quotation(
     if node_id not in ws.nodes:
         raise NotFoundError(f"Node {node_id} not found")
     node = ws.nodes[node_id]
-    _enforce_quotation_language_gate(request.language, node)
     tm = workspace_manager.get_task_manager(user_id)
     node_data = node.data
 

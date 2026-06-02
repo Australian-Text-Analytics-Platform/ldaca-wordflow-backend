@@ -38,7 +38,6 @@ from ....analysis.manager import get_task_manager
 from ....analysis.models import AnalysisStatus, AnalysisTask
 from ....analysis.results import GenericAnalysisResult
 from ....core.auth import get_current_user
-from ....core.i18n import effective_language
 from ....core.workspace import workspace_manager
 from ....models import (
     AiAnnotationCategoriesResponse,
@@ -182,7 +181,6 @@ async def _build_response(
             for v in sel_df.get_column(column_name).to_list()
         ]
 
-        node_language = effective_language(request.language, node)
         results = await classify_texts(
             texts=texts,
             classes=classes,
@@ -195,7 +193,6 @@ async def _build_response(
             seed=request.seed,
             batch_size=page_size,
             text_column_name=column_name,
-            language=node_language,
         )
 
         for r in results:
@@ -626,7 +623,6 @@ async def detach_ai_annotation(
         seed=request.seed,
         batch_size=request.batch_size,
         text_column_name=request.column,
-        language=effective_language(request.language, node),
     )
 
     annotation_col = request.annotation_column or "ai_annotation"
