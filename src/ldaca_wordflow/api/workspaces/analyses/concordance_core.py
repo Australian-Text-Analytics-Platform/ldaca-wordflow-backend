@@ -54,6 +54,9 @@ _REQUEST_EXCLUDE_KEYS = {
     "sort_by",
     "descending",
     "pagination",
+    # ``combined`` was a backend view flag; the combined comparison view is now
+    # synthesized client-side, so drop any legacy persisted value here.
+    "combined",
 }
 
 
@@ -78,8 +81,6 @@ def normalize_saved_request(raw_request: Optional[dict]) -> Optional[dict]:
         return None
 
     normalized_request = dict(raw_request)
-    if not normalized_request.get("combined"):
-        normalized_request.pop("combined", None)
     for field in _REQUEST_EXCLUDE_KEYS:
         normalized_request.pop(field, None)
 
@@ -886,160 +887,6 @@ def read_dispersion_bins(
     }
 
 
-def empty_concordance_page(page: int, page_size: int) -> dict[str, Any]:
-    """Return an empty concordance page payload with metadata defaults.
-
-    Steps:
-    - Normalize caller input into the representation this module expects.
-    - Delegate stateful, expensive, or validating work to the owning manager/helper when needed.
-    - Return the compact value the caller uses for artifacts, validation, or response shaping.
-
-    Used by:
-    - `build_concordance_response` fallback paths because they need this unit's "Return an empty concordance page payload with metadata defaults" behavior.
-
-    Why:
-    - Keeps response contracts consistent when no source rows are available.
-    """
-    return {
-        "data": [],
-        "columns": [],
-        "metadata": {
-            "concordance_columns": [],
-            "metadata_columns": [],
-            "all_columns": [],
-        },
-        "pagination": {
-            "page": page,
-            "page_size": page_size,
-            "total_source_rows": 0,
-            "total_source_pages": 0,
-            "result_count": 0,
-            "has_next": False,
-            "has_prev": page > 1,
-        },
-        "sorting": {"sort_by": None, "descending": DEFAULT_CONCORDANCE_DESCENDING},
-    }
-
-
-def collect_interleaved_combined(
-    left_src: dict[str, Any],
-    right_src: dict[str, Any],
-    request: dict[str, Any],
-    *,
-    page: int,
-    page_size: Optional[int],
-    sort_by: Optional[str],
-    descending: bool,
-) -> dict[str, Any]:
-    """Combine two node concordance pages using left-right interleaving.
-
-    Steps:
-    - Normalize caller input into the representation this module expects.
-    - Delegate stateful, expensive, or validating work to the owning manager/helper when needed.
-    - Return the compact value the caller uses for artifacts, validation, or response shaping.
-
-    Used by:
-    - `build_concordance_response` when `combined=True` and two nodes are set because they need this unit's "Combine two node concordance pages using left-right interleaving" behavior.
-
-    Why:
-    - Preserves per-node page semantics while presenting a merged comparison view.
-      Routes through ``compute_node_concordance_page`` so each side independently
-    picks regex- vs tokens-mode based on the request and tokenization metadata.
-    """
-    left_result = compute_node_concordance_page(
-        left_src,
-        request,
-        page=page,
-        page_size=page_size,
-        sort_by=sort_by,
-        descending=descending,
-    )
-    right_result = compute_node_concordance_page(
-        right_src,
-        request,
-        page=page,
-        page_size=page_size,
-        sort_by=sort_by,
-        descending=descending,
-    )
-
-    left_all_rows = left_result["data"]
-    right_all_rows = right_result["data"]
-
-    all_interleaved: list[list[dict[str, Any]]] = []
-    li, ri = 0, 0
-    use_left = True
-    while li < len(left_all_rows) or ri < len(right_all_rows):
-        if use_left:
-            if li < len(left_all_rows):
-                all_interleaved.append(left_all_rows[li])
-                li += 1
-            elif ri < len(right_all_rows):
-                all_interleaved.append(right_all_rows[ri])
-                ri += 1
-                use_left = not use_left
-                continue
-            else:
-                break
-        else:
-            if ri < len(right_all_rows):
-                all_interleaved.append(right_all_rows[ri])
-                ri += 1
-            elif li < len(left_all_rows):
-                all_interleaved.append(left_all_rows[li])
-                li += 1
-                use_left = not use_left
-                continue
-            else:
-                break
-        use_left = not use_left
-
-    columns = left_result.get("columns") or right_result.get("columns") or []
-    if left_result.get("columns") and right_result.get("columns"):
-        columns = list(dict.fromkeys(left_result["columns"] + right_result["columns"]))
-
-    metadata = _column_metadata(columns, CORE_CONCORDANCE_COLUMNS)
-
-    effective_sort_by = left_result["sorting"].get("sort_by") or right_result[
-        "sorting"
-    ].get("sort_by")
-
-    left_pag = left_result["pagination"]
-    right_pag = right_result["pagination"]
-    total_source_rows = max(
-        left_pag.get("total_source_rows", 0),
-        right_pag.get("total_source_rows", 0),
-    )
-    total_source_pages = max(
-        left_pag.get("total_source_pages", 0),
-        right_pag.get("total_source_pages", 0),
-    )
-    resolved_page_size = (
-        left_pag.get("page_size")
-        or right_pag.get("page_size")
-        or (int(page_size) if page_size is not None else DEFAULT_CONCORDANCE_PAGE_SIZE)
-    )
-
-    return {
-        "data": all_interleaved,
-        "columns": columns,
-        "metadata": metadata,
-        "pagination": {
-            "page": page,
-            "page_size": resolved_page_size,
-            "total_source_rows": total_source_rows,
-            "total_source_pages": total_source_pages,
-            "result_count": len(all_interleaved),
-            "has_next": page < total_source_pages,
-            "has_prev": page > 1,
-        },
-        "sorting": {
-            "sort_by": effective_sort_by,
-            "descending": descending,
-        },
-    }
-
-
 def build_concordance_response(
     user_id: str,
     workspace_id: str,
@@ -1070,7 +917,6 @@ def build_concordance_response(
     )
     sort_by = request.get("sort_by")
     descending = bool(request.get("descending", DEFAULT_CONCORDANCE_DESCENDING))
-    combined = bool(request.get("combined"))
     materialized_paths_raw = request.get("materialized_paths") or {}
     materialized_paths: dict[str, str] = {
         str(node_id): str(path)
@@ -1089,10 +935,10 @@ def build_concordance_response(
         raise NotFoundError(resolve_error)
     data: dict[str, Any] = {}
 
-    # Pre-resolve page_size for non-materialized nodes so combined/separated views
-    # stay consistent. For materialized nodes we rely on the client's choice and
-    # default to DEFAULT_CONCORDANCE_PAGE_SIZE inside compute_materialized_page.
-    if page_size is None and combined is False:
+    # Pre-resolve page_size for non-materialized nodes so each per-node page stays
+    # consistent. For materialized nodes we rely on the client's choice and default
+    # to DEFAULT_CONCORDANCE_PAGE_SIZE inside compute_materialized_page.
+    if page_size is None:
         estimates: list[int] = []
         for node_id in node_ids:
             if node_id in materialized_paths:
@@ -1111,123 +957,45 @@ def build_concordance_response(
             )
         if estimates:
             page_size = max(estimates)
-    if page_size is None and combined and len(node_ids) == 2:
-        left_src = node_sources.get(node_ids[0])
-        right_src = node_sources.get(node_ids[1])
-        estimates_combined: list[int] = []
-        if left_src and node_ids[0] not in materialized_paths:
-            estimates_combined.append(
-                _resolve_page_size(
-                    left_src["lf"],
-                    left_src["column"],
-                    request,
-                    None,
-                    tokenization_column=left_src.get("tokenization_column"),
-                )
-            )
-        if right_src and node_ids[1] not in materialized_paths:
-            estimates_combined.append(
-                _resolve_page_size(
-                    right_src["lf"],
-                    right_src["column"],
-                    request,
-                    None,
-                    tokenization_column=right_src.get("tokenization_column"),
-                )
-            )
-        if estimates_combined:
-            page_size = max(estimates_combined)
 
-    if combined and node_ids:
-        if len(node_ids) == 2:
-            left_id, right_id = node_ids
-            left_src = node_sources.get(left_id)
-            right_src = node_sources.get(right_id)
-            if left_src and right_src:
-                data["__COMBINED__"] = collect_interleaved_combined(
-                    left_src,
-                    right_src,
-                    request,
-                    page=page,
-                    page_size=page_size,
-                    sort_by=sort_by,
-                    descending=descending,
-                )
-            else:
-                data["__COMBINED__"] = empty_concordance_page(
-                    page, page_size or DEFAULT_CONCORDANCE_PAGE_SIZE
-                )
-        else:
-            all_rows: list[dict[str, Any]] = []
-            columns: list[str] = []
-            max_total_source_rows = 0
-            max_total_source_pages = 0
-            combined_page_size = page_size or DEFAULT_CONCORDANCE_PAGE_SIZE
-            for node_id in node_ids:
-                src = node_sources.get(node_id)
-                if not src:
-                    continue
-                node_result = compute_node_concordance_page(
-                    src,
-                    request,
-                    page=page,
-                    page_size=combined_page_size,
-                    sort_by=sort_by,
-                    descending=descending,
-                )
-                all_rows.extend(node_result["data"])
-                if not columns and node_result["columns"]:
-                    columns = node_result["columns"]
-                pag = node_result["pagination"]
-                max_total_source_rows = max(
-                    max_total_source_rows, pag.get("total_source_rows", 0)
-                )
-                max_total_source_pages = max(
-                    max_total_source_pages, pag.get("total_source_pages", 0)
-                )
-
-            metadata = _column_metadata(columns, CORE_CONCORDANCE_COLUMNS)
-            data["__COMBINED__"] = {
-                "data": stringify_unsafe_integers(all_rows),
-                "columns": columns,
-                "metadata": metadata,
-                "pagination": {
-                    "page": page,
-                    "page_size": combined_page_size,
-                    "total_source_rows": max_total_source_rows,
-                    "total_source_pages": max_total_source_pages,
-                    "result_count": len(all_rows),
-                    "has_next": page < max_total_source_pages,
-                    "has_prev": page > 1,
-                },
-                "sorting": {"sort_by": sort_by, "descending": descending},
-            }
-        combinable = len(node_ids) > 1
-    else:
-        for node_id in node_ids:
-            src = node_sources.get(node_id)
-            if not src:
-                continue
-            if node_id in materialized_paths:
-                data[node_id] = compute_materialized_page(
-                    materialized_paths[node_id],
-                    page=page,
-                    page_size=page_size,
-                    sort_by=sort_by,
-                    descending=descending,
-                    node_label=src.get("label"),
-                    document_column=src.get("column"),
-                )
-                continue
-            data[node_id] = compute_node_concordance_page(
-                src,
-                request,
+    # Each node is paged independently and returned under its own node_id key. The
+    # combined comparison view is synthesized client-side from these per-node
+    # slices, so the backend no longer interleaves rows. Per-node result queries
+    # carry ``result_node_id`` so a page or sort change recomputes only the
+    # targeted node; other nodes keep their independently-paged client data after
+    # the frontend merges this partial response. ``combinable`` advertises whether
+    # the frontend may offer the combined toggle and stays derived from the full
+    # node set so scoping a single node never hides the combine action.
+    result_node_id = request.get("result_node_id")
+    scoped_node_ids = (
+        [result_node_id]
+        if result_node_id and result_node_id in node_ids
+        else node_ids
+    )
+    for node_id in scoped_node_ids:
+        src = node_sources.get(node_id)
+        if not src:
+            continue
+        if node_id in materialized_paths:
+            data[node_id] = compute_materialized_page(
+                materialized_paths[node_id],
                 page=page,
                 page_size=page_size,
                 sort_by=sort_by,
                 descending=descending,
+                node_label=src.get("label"),
+                document_column=src.get("column"),
             )
-        combinable = len(node_ids) > 1
+            continue
+        data[node_id] = compute_node_concordance_page(
+            src,
+            request,
+            page=page,
+            page_size=page_size,
+            sort_by=sort_by,
+            descending=descending,
+        )
+    combinable = len(node_ids) > 1
 
     analysis_params = dict(request)
     if label_to_node_map:

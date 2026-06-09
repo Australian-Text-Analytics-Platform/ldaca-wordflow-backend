@@ -4,7 +4,6 @@ from ldaca_wordflow.api.workspaces.analyses.concordance_core import (
     CORE_CONCORDANCE_COLUMNS,
     _serialize_materialized_rows,
     build_concordance_search_pattern,
-    collect_interleaved_combined,
     compute_concordance_page,
     concordance_non_empty_expr,
     normalize_saved_request,
@@ -163,55 +162,6 @@ def test_compute_concordance_page_whole_word_ignores_partial_matches():
     assert len(result["data"]) == 1
     assert result["data"][0][0]["speaker"] == "B"
     assert result["data"][0][0]["CONC_matched_text"] == "alpha"
-
-
-def test_collect_interleaved_combined_interleaves_grouped_rows():
-    request = {
-        "search_word": "alpha",
-        "num_left_tokens": 2,
-        "num_right_tokens": 2,
-        "regex": False,
-        "case_sensitive": False,
-    }
-    left_source = pl.DataFrame(
-        {
-            "text": ["alpha beta alpha", "beta alpha"],
-            "speaker": ["L1", "L2"],
-        }
-    ).lazy()
-    right_source = pl.DataFrame(
-        {
-            "text": ["alpha gamma", "alpha delta"],
-            "speaker": ["R1", "R2"],
-        }
-    ).lazy()
-
-    result = collect_interleaved_combined(
-        {
-            "lf": left_source,
-            "column": "text",
-            "label": "left",
-            "tokenization_column": None,
-        },
-        {
-            "lf": right_source,
-            "column": "text",
-            "label": "right",
-            "tokenization_column": None,
-        },
-        request,
-        page=1,
-        page_size=2,
-        sort_by=None,
-        descending=False,
-    )
-
-    assert len(result["data"]) == 4
-    assert all(isinstance(grouped_row, list) for grouped_row in result["data"])
-    assert result["data"][0][0]["__source_node"] == "left"
-    assert result["data"][1][0]["__source_node"] == "right"
-    assert result["data"][2][0]["__source_node"] == "left"
-    assert result["data"][3][0]["__source_node"] == "right"
 
 
 def test_serialize_materialized_rows_groups_by_document_for_dispersion():

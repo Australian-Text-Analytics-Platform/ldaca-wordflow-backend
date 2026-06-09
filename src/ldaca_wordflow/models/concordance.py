@@ -27,7 +27,6 @@ class ConcordanceAnalysisRequest(BaseModel):
     regex: bool = False
     whole_word: bool = False
     case_sensitive: bool = False
-    combined: bool = False  # if true, backend builds a combined view across nodes
     # "regex" (default) uses the polars-text concordance engine on raw text,
     # preserving partial-word patterns like ``equ\w*`` for English users.
     # "tokens" looks up a tokenization column and walks it for exact-token

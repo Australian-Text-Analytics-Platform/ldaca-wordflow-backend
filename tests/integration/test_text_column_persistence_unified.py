@@ -98,7 +98,6 @@ async def test_text_column_preference_is_set_by_node_endpoint_not_analyses(
             "num_right_tokens": 1,
             "regex": False,
             "case_sensitive": False,
-            "combined": False,
         },
     )
     assert concordance_response.status_code == 200, concordance_response.text

@@ -119,7 +119,6 @@ async def test_concordance_single_node_roundtrip(authenticated_client, workspace
         "num_right_tokens": 2,
         "regex": False,
         "case_sensitive": False,
-        "combined": False,
     }
 
     resp = await authenticated_client.post(
@@ -223,8 +222,14 @@ async def test_concordance_single_node_roundtrip(authenticated_client, workspace
 
 
 @pytest.mark.anyio
-async def test_concordance_multi_node_combined(authenticated_client, workspace_id):
-    """Two-node concordance returns per-node results via async workflow."""
+async def test_concordance_multi_node_separated(authenticated_client, workspace_id):
+    """Two-node concordance returns one independently-paged slice per node.
+
+    The combined comparison view is synthesized client-side, so the backend only
+    ever returns per-node keys. This guards that both nodes appear, that a scoped
+    ``node_id`` page override re-pages only the targeted node, and that
+    ``combinable`` advertises the combine action to the frontend.
+    """
     _clear_concordance_state("test", workspace_id)
 
     df_left = pl.DataFrame(
@@ -253,7 +258,6 @@ async def test_concordance_multi_node_combined(authenticated_client, workspace_i
         "num_right_tokens": 2,
         "regex": False,
         "case_sensitive": False,
-        "combined": True,
     }
 
     resp = await authenticated_client.post(
@@ -273,114 +277,36 @@ async def test_concordance_multi_node_combined(authenticated_client, workspace_i
     )
     assert result_payload["state"] == "successful"
     assert result_payload.get("combinable") is True
-    assert "__COMBINED__" in result_payload["data"]
+    # Per-node keys only; no backend __COMBINED__ payload.
+    assert "__COMBINED__" not in result_payload["data"]
+    assert left_node.id in result_payload["data"]
+    assert right_node.id in result_payload["data"]
+    for node_id in (left_node.id, right_node.id):
+        _assert_grouped_result_rows(
+            result_payload["data"][node_id],
+            expected_page_size=max(DEFAULT_PAGE_SIZE_CANDIDATES),
+        )
 
-    combined_result = result_payload["data"]["__COMBINED__"]
-    _assert_grouped_result_rows(
-        combined_result,
-        expected_page_size=max(DEFAULT_PAGE_SIZE_CANDIDATES),
-    )
-    assert all(
-        isinstance(group, list) and group and "__source_node" in group[0]
-        for group in combined_result["data"]
-    )
-
-    # Request both nodes with a smaller page size override
-    narrowed = await authenticated_client.post(
+    # A scoped node_id page override re-pages only that node; the sibling key is
+    # absent from the partial response so the frontend keeps its existing slice.
+    scoped = await authenticated_client.post(
         f"/api/workspaces/concordance/tasks/{task_id}/result",
-        json={"page_size": 1, "page": 1},
+        json={"node_id": left_node.id, "page": 2, "page_size": 1},
     )
-    assert narrowed.status_code == 200
-    narrowed_payload = narrowed.json()
-    assert narrowed_payload["state"] == "successful"
-    narrowed_grouped = narrowed_payload["data"]["__COMBINED__"]
-    _assert_grouped_result_rows(narrowed_grouped, expected_page_size=1)
-    assert len(narrowed_grouped["data"]) >= 1
-
-    # Second page request applies to both nodes equally
-    paged = await authenticated_client.post(
-        f"/api/workspaces/concordance/tasks/{task_id}/result",
-        json={"page": 2, "page_size": 1},
-    )
-    assert paged.status_code == 200
-    paged_payload = paged.json()
-    assert paged_payload["data"]["__COMBINED__"]["pagination"]["page"] == 2
+    assert scoped.status_code == 200
+    scoped_payload = scoped.json()
+    assert scoped_payload["state"] == "successful"
+    assert left_node.id in scoped_payload["data"]
+    assert right_node.id not in scoped_payload["data"]
+    assert scoped_payload["data"][left_node.id]["pagination"]["page"] == 2
+    assert scoped_payload["data"][left_node.id]["pagination"]["page_size"] == 1
 
 
 @pytest.mark.anyio
-async def test_concordance_combined_toggle_after_separated_request(
+async def test_concordance_multi_node_mismatched_columns(
     authenticated_client, workspace_id
 ):
-    """Combined toggle requests should still return successful per-node data."""
-    _clear_concordance_state("test", workspace_id)
-
-    df_left = pl.DataFrame(
-        {
-            "text": ["alpha beta", "beta alpha", "alpha gamma"],
-            "speaker": ["L1", "L2", "L3"],
-        }
-    )
-    df_right = pl.DataFrame(
-        {
-            "text": ["alpha delta", "epsilon alpha", "zeta"],
-            "speaker": ["R1", "R2", "R3"],
-        }
-    )
-
-    left_node = _add_node(workspace_id, df_left.lazy(), "left_docs")
-    left_node.document = "text"
-    right_node = _add_node(workspace_id, df_right.lazy(), "right_docs")
-    right_node.document = "text"
-
-    request_payload = {
-        "node_ids": [left_node.id, right_node.id],
-        "node_columns": {left_node.id: "text", right_node.id: "text"},
-        "search_word": "alpha",
-        "num_left_tokens": 2,
-        "num_right_tokens": 2,
-        "regex": False,
-        "case_sensitive": False,
-        "combined": False,
-    }
-
-    resp = await authenticated_client.post(
-        "/api/workspaces/concordance",
-        json=request_payload,
-    )
-    assert resp.status_code == 200, resp.text
-    payload = resp.json()
-    assert payload["state"] == "successful"
-    task_id = await _get_current_task_id(
-        authenticated_client, workspace_id, "concordance"
-    )
-    assert task_id
-
-    result_payload = await _wait_for_concordance_result(
-        authenticated_client, workspace_id, task_id
-    )
-    assert result_payload["state"] == "successful"
-    assert result_payload.get("combinable") is True
-
-    combined_toggle = await authenticated_client.post(
-        f"/api/workspaces/concordance/tasks/{task_id}/result",
-        json={"combined": True, "page": 1, "page_size": 2},
-    )
-    assert combined_toggle.status_code == 200
-    combined_payload = combined_toggle.json()
-    assert combined_payload["state"] == "successful"
-    assert combined_payload.get("combinable") is True
-    assert "__COMBINED__" in combined_payload["data"]
-    _assert_grouped_result_rows(
-        combined_payload["data"]["__COMBINED__"],
-        expected_page_size=2,
-    )
-
-
-@pytest.mark.anyio
-async def test_concordance_combined_handles_mismatched_columns(
-    authenticated_client, workspace_id
-):
-    """Mismatched node schemas still return per-node concordance data."""
+    """Two nodes with different schemas each return their own per-node columns."""
     _clear_concordance_state("test", workspace_id)
 
     left_df = pl.DataFrame(
@@ -411,7 +337,6 @@ async def test_concordance_combined_handles_mismatched_columns(
         "num_right_tokens": 2,
         "regex": False,
         "case_sensitive": False,
-        "combined": True,
     }
 
     resp = await authenticated_client.post(
@@ -431,18 +356,11 @@ async def test_concordance_combined_handles_mismatched_columns(
     )
     assert result_payload["state"] == "successful"
     assert result_payload.get("combinable") is True
-    assert "__COMBINED__" in result_payload["data"]
-
-    combined_attempt = await authenticated_client.post(
-        f"/api/workspaces/concordance/tasks/{task_id}/result",
-        json={"combined": True, "page": 1, "page_size": 1},
-    )
-    assert combined_attempt.status_code == 200
-    combined_attempt_payload = combined_attempt.json()
-    assert combined_attempt_payload["state"] == "successful"
-    assert combined_attempt_payload.get("combinable") is True
-    assert "__COMBINED__" in combined_attempt_payload["data"]
-    _assert_grouped_result_rows(
-        combined_attempt_payload["data"]["__COMBINED__"],
-        expected_page_size=1,
-    )
+    assert "__COMBINED__" not in result_payload["data"]
+    assert left_node.id in result_payload["data"]
+    assert right_node.id in result_payload["data"]
+    # Each node carries its own metadata columns reflecting its distinct schema.
+    left_columns = result_payload["data"][left_node.id]["columns"]
+    right_columns = result_payload["data"][right_node.id]["columns"]
+    assert "topic" in left_columns
+    assert "word_count" in right_columns

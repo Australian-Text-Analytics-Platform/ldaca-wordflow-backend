@@ -39,7 +39,6 @@ class ConcordanceRequest(BaseAnalysisRequest):
     regex: bool = False
     whole_word: bool = False
     case_sensitive: bool = False
-    combined: bool = False
     # Engine selector: "regex" walks raw text (default, preserves partial-word
     # patterns); "tokens" walks the active node's tokenization column for
     # exact-token matches with N-actual-token context. Persisted on the task

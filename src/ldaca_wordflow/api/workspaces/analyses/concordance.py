@@ -84,7 +84,6 @@ class ConcordanceResultQuery(BaseModel):
     """
 
     node_id: Optional[str] = None
-    combined: Optional[bool] = None
     page: Optional[int] = None
     page_number: Optional[int] = None
     page_size: Optional[int] = None
@@ -121,11 +120,14 @@ def _apply_result_query_overrides(
         normalized_request["sort_by"] = query.sort_by
     if query.descending is not None:
         normalized_request["descending"] = query.descending
-    if query.combined is not None:
-        if query.combined:
-            normalized_request["combined"] = True
-        else:
-            normalized_request.pop("combined", None)
+    # Scope the page/sort override to a single node when the client targets one.
+    # Each table paginates independently, so a per-node page or sort change must
+    # not re-page its sibling. build_concordance_response honors this key to
+    # recompute only that node, leaving the other node's client-side data
+    # untouched after the merge. The combined comparison view is synthesized
+    # client-side by fetching both nodes at the same page.
+    if query.node_id is not None:
+        normalized_request["result_node_id"] = query.node_id
     return normalized_request
 
 
@@ -209,7 +211,6 @@ async def run_concordance(
             regex=request.regex,
             whole_word=request.whole_word,
             case_sensitive=request.case_sensitive,
-            combined=bool(request.combined),
             search_mode=request.search_mode,
         )
 
@@ -242,8 +243,6 @@ async def run_concordance(
         if request.sort_by:
             normalized_request["sort_by"] = request.sort_by
         normalized_request["descending"] = request.descending
-        if request.combined:
-            normalized_request["combined"] = True
 
         response = build_concordance_response(
             user_id,
