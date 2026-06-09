@@ -88,17 +88,10 @@ async def test_concordance_detach_options_include_mandatory_and_optional_columns
         "CONC_extraction",
         "speaker",
     ]
-    # CONC_extraction is opt-in (not mandatory) so it stays out of
-    # disabled_columns despite the `CONC_` prefix.
-    assert node_option["disabled_columns"] == [
-        "CONC_left_context",
-        "CONC_matched_text",
-        "CONC_right_context",
-        "CONC_start_idx",
-        "CONC_end_idx",
-        "CONC_l1",
-        "CONC_r1",
-    ]
+    # Every column — including the generated concordance columns — is now
+    # user-choosable in the dialog, so nothing is reported as disabled. The
+    # generated columns are still ordered ahead of optional metadata.
+    assert node_option["disabled_columns"] == []
 
 
 @pytest.mark.anyio
@@ -130,7 +123,9 @@ async def test_concordance_detach_options_ignore_token_metadata(
     # Register tokenization directly on the in-memory node so the test
     # doesn't need to round-trip through plbin (the polars FFI plan can't
     # always be deserialized cross-version; see prior FfiPlugin episode).
-    tokenization_name = tokenization_column_name("text", "huggingface:bert-base-uncased")
+    tokenization_name = tokenization_column_name(
+        "text", "huggingface:bert-base-uncased"
+    )
     node.register_tokenization(  # type: ignore[arg-type]
         "text",
         {

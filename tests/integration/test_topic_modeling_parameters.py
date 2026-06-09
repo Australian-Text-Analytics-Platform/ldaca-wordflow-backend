@@ -380,7 +380,8 @@ async def test_topic_modeling_detach_keeps_topic_meaning_only_on_support_node(
         f"/api/workspaces/topic-modeling/tasks/{task_id}/detach",
         json={
             "node_ids": [source_node.id],
-            "selected_columns": {source_node.id: ["document"]},
+            # The topic column is now an explicit, default-selected choice.
+            "selected_columns": {source_node.id: ["document", "TOPIC_topic"]},
         },
     )
 
@@ -538,7 +539,8 @@ async def test_topic_modeling_detach_survives_artifact_cleanup(
         f"/api/workspaces/topic-modeling/tasks/{task_id}/detach",
         json={
             "node_ids": [source_node.id],
-            "selected_columns": {source_node.id: ["document"]},
+            # The topic column is now an explicit, default-selected choice.
+            "selected_columns": {source_node.id: ["document", "TOPIC_topic"]},
         },
     )
     assert detach_response.status_code == 200, detach_response.text

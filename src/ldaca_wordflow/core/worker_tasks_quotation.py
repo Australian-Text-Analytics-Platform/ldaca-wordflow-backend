@@ -115,6 +115,7 @@ def run_quotation_detach_task(
     new_node_name: str,
     include_document_column: bool = False,
     include_extraction: bool = False,
+    selected_generated_columns: list[str] | None = None,
     extra_columns_data: dict[str, list] | None = None,
     extra_columns_dtypes: dict[str, Any] | None = None,
     materialized_path: str | None = None,
@@ -163,17 +164,35 @@ def run_quotation_detach_task(
                 detach_data_dir,
                 f"quotation_detach_{uuid.uuid4().hex}.parquet",
             )
-            # When the user didn't tick `QUOTE_extraction` in the detach
-            # dialog, drop it from the materialised parquet copy. The
-            # materialised parquet always carries it (so subsequent ticks
-            # are cheap), but the detached node should respect the user's
-            # column picks.
+            # The materialised parquet always carries every generated quote
+            # column plus QUOTE_extraction (so re-ticking is cheap), but the
+            # detached node should respect the user's column picks: keep only
+            # the generated columns they left ticked, opt-in QUOTE_extraction,
+            # and pass through the document/metadata columns. A `None`
+            # selection preserves the old "keep all generated" behavior for
+            # legacy callers.
             mat_lazy = pl.scan_parquet(materialized_path)
             mat_columns = list(mat_lazy.collect_schema().names())
-            if not include_extraction and QUOTE_EXTRACTION_COLUMN in mat_columns:
+            generated_set = set(QUOTE_COLUMN_NAMES)
+            wanted_generated = (
+                generated_set
+                if selected_generated_columns is None
+                else set(selected_generated_columns)
+            )
+            keep_cols: list[str] = []
+            for col in mat_columns:
+                if col in generated_set:
+                    if col in wanted_generated:
+                        keep_cols.append(col)
+                elif col == QUOTE_EXTRACTION_COLUMN:
+                    if include_extraction:
+                        keep_cols.append(col)
+                else:
+                    keep_cols.append(col)
+            if keep_cols != mat_columns:
                 mat_df = cast(
                     pl.DataFrame,
-                    mat_lazy.drop(QUOTE_EXTRACTION_COLUMN).collect(),
+                    mat_lazy.select(keep_cols).collect(),
                 )
                 mat_df.write_parquet(detach_parquet_path)
             else:
@@ -218,14 +237,29 @@ def run_quotation_detach_task(
             extra_columns_dtypes=extra_columns_dtypes,
         )
 
-        # `_build_quotation_occurrence_dataframe` always emits
-        # `QUOTE_extraction`; drop it from the detach output when the user
-        # didn't tick it. Keeps the slow-path output consistent with what
-        # the fast-path materialised copy ships and with the detach dialog
-        # contract: untouched optional columns are excluded.
-        if not include_extraction and QUOTE_EXTRACTION_COLUMN in quote_df.columns:
-            quote_df = quote_df.drop(QUOTE_EXTRACTION_COLUMN)
-            output_columns = [c for c in output_columns if c != QUOTE_EXTRACTION_COLUMN]
+        # Final projection honoring the user's column choice. Generated quote
+        # columns are kept only when ticked; QUOTE_extraction stays opt-in; the
+        # document column and metadata columns pass through. A `None` selection
+        # keeps every generated column (legacy "keep all" behavior).
+        generated_set = set(QUOTE_COLUMN_NAMES)
+        wanted_generated = (
+            generated_set
+            if selected_generated_columns is None
+            else set(selected_generated_columns)
+        )
+        keep_columns: list[str] = []
+        for col in output_columns:
+            if col in generated_set:
+                if col in wanted_generated:
+                    keep_columns.append(col)
+            elif col == QUOTE_EXTRACTION_COLUMN:
+                if include_extraction:
+                    keep_columns.append(col)
+            else:
+                keep_columns.append(col)
+        if keep_columns and keep_columns != output_columns:
+            quote_df = quote_df.select(keep_columns)
+            output_columns = keep_columns
 
         if progress_callback:
             progress_callback(0.82, "Serializing detached data block...")

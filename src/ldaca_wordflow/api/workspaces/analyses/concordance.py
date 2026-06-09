@@ -33,6 +33,14 @@ from ....analysis.manager import get_task_manager
 from ....analysis.models import AnalysisStatus, AnalysisTask
 from ....analysis.results import GenericAnalysisResult
 from ....core.auth import get_current_user
+from ....core.exceptions import (
+    InternalServiceError,
+    InvalidInputError,
+    NoActiveWorkspaceError,
+    NotFoundError,
+    TaskNotFoundError,
+    WorkspaceNotFoundError,
+)
 from ....core.tokens_cache import hydrate_tokenization_lazyframe
 from ....core.workspace import workspace_manager
 from ....models import (
@@ -47,6 +55,7 @@ from ....models import (
     ConcordanceMaterializeRequest,
     CurrentAnalysisTasksResponse,
 )
+from ..utils import _build_detach_options
 from .cleanup import clear_previous_completed_analysis_task
 from .concordance_core import (
     CORE_CONCORDANCE_COLUMNS,
@@ -59,9 +68,8 @@ from .concordance_core import (
 from .current_tasks import get_current_task_ids_for_analysis
 from .generated_columns import (
     CONC_EXTRACTION_COLUMN,
+    MATERIALIZED_CONCORDANCE_COLUMNS,
 )
-from ..utils import _build_detach_options
-from ....core.exceptions import InternalServiceError, InvalidInputError, NoActiveWorkspaceError, NotFoundError, TaskNotFoundError, WorkspaceNotFoundError
 
 router = APIRouter(prefix="/workspaces", tags=["concordance"])
 logger = logging.getLogger(__name__)
@@ -253,6 +261,8 @@ async def run_concordance(
         return response
     except Exception as exc:
         raise InternalServiceError(f"Failed to run concordance: {exc}")
+
+
 @router.get("/concordance/tasks/current", response_model=CurrentAnalysisTasksResponse)
 async def concordance_current_tasks(
     current_user: dict = Depends(get_current_user),
@@ -345,7 +355,9 @@ async def concordance_task_dispersion_bins(
     materialized_paths = getattr(task.request, "materialized_paths", None) or {}
     path = materialized_paths.get(node_id)
     if not path:
-        raise NotFoundError(f"No materialised concordance for node {node_id}",)
+        raise NotFoundError(
+            f"No materialised concordance for node {node_id}",
+        )
     node_columns = getattr(task.request, "node_columns", None) or {}
     document_column = node_columns.get(node_id)
 
@@ -462,7 +474,16 @@ async def detach_concordance(
     include_document_column = False
     include_extraction = False
     columns_to_select: list[str] = []
-    if request.selected_columns:
+    # Generated columns (the concordance output columns + frequency columns)
+    # are now user-choosable like any other column. When the client sends an
+    # explicit selection we record exactly which generated columns to keep so
+    # the worker can drop — and, for frequency columns, skip computing — the
+    # ones the user unticked. `None` preserves the old "keep all" behavior for
+    # legacy callers that omit `selected_columns`.
+    generated_names = set(MATERIALIZED_CONCORDANCE_COLUMNS)
+    selected_generated_columns: list[str] | None = None
+    if request.selected_columns is not None:
+        selected_generated_columns = []
         for col in request.selected_columns:
             if col == request.column:
                 include_document_column = True
@@ -472,6 +493,9 @@ async def detach_concordance(
             # source selection.
             if col == CONC_EXTRACTION_COLUMN:
                 include_extraction = True
+                continue
+            if col in generated_names:
+                selected_generated_columns.append(col)
                 continue
             columns_to_select.append(col)
 
@@ -524,6 +548,7 @@ async def detach_concordance(
                 "new_node_name": request.new_node_name,
                 "include_document_column": include_document_column,
                 "include_extraction": include_extraction,
+                "selected_generated_columns": selected_generated_columns,
                 "extra_columns_data": extra_columns_data
                 if extra_columns_data
                 else None,
@@ -543,6 +568,8 @@ async def detach_concordance(
 
     except Exception as exc:
         raise InternalServiceError(f"Error submitting detach task: {exc}")
+
+
 @router.post(
     "/nodes/{node_id}/concordance/dispersion-detach",
     response_model=AnalysisTaskActionResponse,
@@ -629,7 +656,9 @@ async def detach_concordance_dispersion(
     if request.selected_bins is not None and (
         request.total_bins is None or request.total_bins <= 0
     ):
-        raise InvalidInputError("total_bins must be a positive integer when selected_bins is provided",)
+        raise InvalidInputError(
+            "total_bins must be a positive integer when selected_bins is provided",
+        )
     try:
         child_task_id = str(uuid4())
         task_info = await tm.submit_task(
@@ -674,7 +703,11 @@ async def detach_concordance_dispersion(
             "metadata": {"task_id": task_info.id},
         }
     except Exception as exc:
-        raise InternalServiceError(f"Error submitting dispersion detach task: {exc}",)
+        raise InternalServiceError(
+            f"Error submitting dispersion detach task: {exc}",
+        )
+
+
 @router.post(
     "/nodes/{node_id}/concordance/materialize",
     response_model=AnalysisTaskActionResponse,
@@ -817,6 +850,8 @@ async def materialize_concordance(
         }
     except Exception as exc:
         raise InternalServiceError(f"Error submitting materialize task: {exc}")
+
+
 @router.get(
     "/nodes/{node_id}/concordance/detach-options",
     response_model=ConcordanceDetachOptionsResponse,

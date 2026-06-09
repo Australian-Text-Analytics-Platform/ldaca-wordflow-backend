@@ -18,12 +18,18 @@ from pathlib import Path
 from typing import Any, cast
 
 import polars as pl
-from docworkspace import Node
 from docworkspace.workspace.core import Workspace
+
+from docworkspace import Node
+
 from ...analysis.models import AnalysisStatus
-from ...core.exceptions import InvalidInputError, NotFoundError, WorkspaceNotFoundError
+from ...core.exceptions import (
+    InternalServiceError,
+    InvalidInputError,
+    NotFoundError,
+    WorkspaceNotFoundError,
+)
 from ...core.workspace import workspace_manager
-from ...core.exceptions import InternalServiceError, InvalidInputError, NotFoundError, WorkspaceNotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -248,7 +254,9 @@ def stage_dataframe_as_lazy(
     )
 
     if not isinstance(data, pl.DataFrame):
-        raise InvalidInputError(f"Expected Polars DataFrame for staging, got {type(data).__name__}",)
+        raise InvalidInputError(
+            f"Expected Polars DataFrame for staging, got {type(data).__name__}",
+        )
     df = data
 
     try:
@@ -281,7 +289,9 @@ def stage_parquet_artifact_as_lazy(
 
     source_path = Path(artifact_path)
     if not source_path.exists() or not source_path.is_file():
-        raise NotFoundError(f"Artifact parquet not found: {source_path}",)
+        raise NotFoundError(
+            f"Artifact parquet not found: {source_path}",
+        )
     persisted_path = _allocate_workspace_data_path(
         workspace_dir,
         stem=_safe_workspace_data_stem(node_name or source_path.stem),
@@ -290,7 +300,9 @@ def stage_parquet_artifact_as_lazy(
     try:
         shutil.copy2(source_path, persisted_path)
     except Exception as exc:
-        raise InternalServiceError(f"Failed to copy artifact parquet into workspace data: {exc}",)
+        raise InternalServiceError(
+            f"Failed to copy artifact parquet into workspace data: {exc}",
+        )
     return _scan_workspace_parquet(persisted_path), persisted_path
 
 
@@ -375,7 +387,8 @@ def _extract_lazy_schema(lazy_frame: pl.LazyFrame) -> tuple[list[str], dict[str,
 
 
 def _propagated_tokenization(
-    parents: Node | list[Node], result_lf: pl.LazyFrame,
+    parents: Node | list[Node],
+    result_lf: pl.LazyFrame,
 ) -> dict[str, Any]:
     """Return parent tokenization metadata whose source column survived."""
     if isinstance(parents, list):
@@ -416,12 +429,15 @@ def _validate_existing_column(node: Node, column_name: str) -> None:
 
 
 def _paginated_lazy_preview(
-    lazyframe: pl.LazyFrame, page: int, page_size: int,
+    lazyframe: pl.LazyFrame,
+    page: int,
+    page_size: int,
 ) -> tuple[list[dict[str, Any]], list[str], dict[str, str], Any]:
     """Slice a LazyFrame for paginated preview and return data + metadata."""
     try:
         total_rows_df = cast(
-            pl.DataFrame, lazyframe.select(pl.len().alias("_len")).collect(),
+            pl.DataFrame,
+            lazyframe.select(pl.len().alias("_len")).collect(),
         )
         total_rows_series = total_rows_df.to_series(0)
         total_rows = int(total_rows_series.item()) if total_rows_series.len() else 0
@@ -433,7 +449,8 @@ def _paginated_lazy_preview(
     start_idx = (normalized_page - 1) * page_size if total_rows else 0
 
     preview_df = cast(
-        pl.DataFrame, lazyframe.slice(start_idx, page_size).collect(),
+        pl.DataFrame,
+        lazyframe.slice(start_idx, page_size).collect(),
     )
     columns = list(preview_df.columns)
     dtypes = {col: str(dtype) for col, dtype in preview_df.schema.items()}
@@ -442,8 +459,11 @@ def _paginated_lazy_preview(
     from ...models import PaginationInfo
 
     pagination = PaginationInfo(
-        page=normalized_page, page_size=page_size, total_rows=total_rows,
-        total_pages=total_pages, has_next=normalized_page < total_pages,
+        page=normalized_page,
+        page_size=page_size,
+        total_rows=total_rows,
+        total_pages=total_pages,
+        has_next=normalized_page < total_pages,
         has_prev=normalized_page > 1 and total_rows > 0,
     )
     return data_rows, columns, dtypes, pagination
@@ -465,8 +485,13 @@ def _create_and_persist_child_node(
     if tokenization is None:
         tokenization = _propagated_tokenization(parents, data)
     new_node = Node(
-        data=data, name=name, workspace=workspace, operation=operation,
-        parents=parents, tokenization=tokenization, document=document,
+        data=data,
+        name=name,
+        workspace=workspace,
+        operation=operation,
+        parents=parents,
+        tokenization=tokenization,
+        document=document,
     )
     workspace.add_node(new_node)
     update_workspace(user_id, workspace_id)
@@ -519,7 +544,7 @@ def _build_detach_options(
 
     Steps:
     - Collect available schema columns, optionally filtering transient internals.
-    - Order columns as: text column first, mandatory generated columns, then optional metadata.
+    - Order columns as: text column first, generated columns, then optional metadata.
     - Build the node option and wrap it in the correct tool-specific response model.
     """
     raw_columns = node.data.collect_schema().names()
@@ -541,7 +566,10 @@ def _build_detach_options(
         node_name=getattr(node, "name", None) or node_id,
         text_column=column,
         available_columns=ordered_available_columns,
-        disabled_columns=mandatory_columns,
+        # Every column is user-choosable now (default-selected on the client,
+        # deselectable). `mandatory_columns` is only used to order the
+        # generated columns ahead of optional metadata — nothing is disabled.
+        disabled_columns=[],
     )
 
     return detach_options_response_class(

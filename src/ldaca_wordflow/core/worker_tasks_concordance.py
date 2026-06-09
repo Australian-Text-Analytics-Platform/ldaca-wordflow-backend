@@ -279,6 +279,7 @@ def run_concordance_detach_task(
     new_node_name: str,
     include_document_column: bool = False,
     include_extraction: bool = False,
+    selected_generated_columns: list[str] | None = None,
     extra_columns_data: dict[str, list] | None = None,
     extra_columns_dtypes: dict[str, Any] | None = None,
     materialized_path: str | None = None,
@@ -330,19 +331,20 @@ def run_concordance_detach_task(
                 for col_name in extra_columns_data:
                     if col_name in mat_df.columns and col_name not in keep_cols:
                         keep_cols.append(col_name)
-            # Always keep CORE_CONCORDANCE_COLUMNS + freq columns. Other
-            # generated columns (currently just CONC_extraction) are opt-in
-            # via flags, mirroring the detach-options dialog: the user must
-            # tick them to receive them.
-            mandatory_generated = {
-                *CORE_CONCORDANCE_COLUMNS,
-                CONC_L1_FREQ_COLUMN,
-                CONC_R1_FREQ_COLUMN,
-            }
+            # Always keep CORE_CONCORDANCE_COLUMNS + freq columns when the
+            # caller didn't send an explicit selection (backwards-compat).
+            # Otherwise honor exactly the generated columns the user ticked —
+            # deselected generated columns are dropped from the output.
+            all_generated = set(MATERIALIZED_CONCORDANCE_COLUMNS)
+            wanted_generated = (
+                all_generated
+                if selected_generated_columns is None
+                else set(selected_generated_columns)
+            )
             for col in mat_df.columns:
                 if col in keep_cols:
                     continue
-                if col in mandatory_generated:
+                if col in wanted_generated:
                     keep_cols.append(col)
                 elif col == CONC_EXTRACTION_COLUMN and include_extraction:
                     keep_cols.append(col)
@@ -400,27 +402,57 @@ def run_concordance_detach_task(
             extra_columns_dtypes=extra_columns_dtypes,
         )
 
-        # Compute frequency columns (same as materialize) so detach always
-        # includes CONC_l1_freq and CONC_r1_freq regardless of prior
-        # materialization.
-        l1_freq = (
-            result.group_by(CONC_L1_COLUMN).len().rename({"len": CONC_L1_FREQ_COLUMN})
+        # Decide which generated columns the user wants. None == backwards-
+        # compatible "keep all core + freq"; otherwise honor the explicit
+        # selection so deselected generated columns are dropped (and, for the
+        # frequency columns, never even computed).
+        all_generated = set(MATERIALIZED_CONCORDANCE_COLUMNS)
+        wanted_generated = (
+            all_generated
+            if selected_generated_columns is None
+            else set(selected_generated_columns)
         )
-        r1_freq = (
-            result.group_by(CONC_R1_COLUMN).len().rename({"len": CONC_R1_FREQ_COLUMN})
+        need_freq = (
+            CONC_L1_FREQ_COLUMN in wanted_generated
+            or CONC_R1_FREQ_COLUMN in wanted_generated
         )
-        result = result.join(l1_freq, on=CONC_L1_COLUMN, how="left").join(
-            r1_freq, on=CONC_R1_COLUMN, how="left"
-        )
-        output_columns = output_columns + [CONC_L1_FREQ_COLUMN, CONC_R1_FREQ_COLUMN]
 
-        # `_build_concordance_occurrence_dataframe` always appends
-        # `CONC_extraction`; drop it from the detach output unless the user
-        # ticked the column. The output_columns list returned from there
-        # carries it too — strip it for the manifest as well.
-        if not include_extraction and CONC_EXTRACTION_COLUMN in result.columns:
-            result = result.drop(CONC_EXTRACTION_COLUMN)
-            output_columns = [c for c in output_columns if c != CONC_EXTRACTION_COLUMN]
+        # Compute frequency columns (same as materialize) only when the user
+        # kept at least one of them — skipping the group-by/join work entirely
+        # when neither frequency column was selected.
+        if need_freq:
+            l1_freq = (
+                result.group_by(CONC_L1_COLUMN)
+                .len()
+                .rename({"len": CONC_L1_FREQ_COLUMN})
+            )
+            r1_freq = (
+                result.group_by(CONC_R1_COLUMN)
+                .len()
+                .rename({"len": CONC_R1_FREQ_COLUMN})
+            )
+            result = result.join(l1_freq, on=CONC_L1_COLUMN, how="left").join(
+                r1_freq, on=CONC_R1_COLUMN, how="left"
+            )
+            output_columns = output_columns + [CONC_L1_FREQ_COLUMN, CONC_R1_FREQ_COLUMN]
+
+        # Final projection honoring the user's column choice. Generated columns
+        # (core + freq) are kept only when ticked; CONC_extraction stays opt-in;
+        # the document column and metadata columns pass through. Order follows
+        # the columns produced above so the detached node keeps a stable shape.
+        keep_columns: list[str] = []
+        for col in output_columns:
+            if col in all_generated:
+                if col in wanted_generated:
+                    keep_columns.append(col)
+            elif col == CONC_EXTRACTION_COLUMN:
+                if include_extraction:
+                    keep_columns.append(col)
+            else:
+                keep_columns.append(col)
+        if keep_columns:
+            result = result.select(keep_columns)
+            output_columns = keep_columns
 
         if progress_callback:
             progress_callback(0.82, "Serializing detached data block...")

@@ -30,6 +30,15 @@ from ....analysis.manager import get_task_manager
 from ....analysis.models import AnalysisStatus, AnalysisTask
 from ....analysis.results import GenericAnalysisResult
 from ....core.auth import get_current_user
+from ....core.exceptions import (
+    InternalServiceError,
+    InvalidInputError,
+    NoActiveWorkspaceError,
+    NotFoundError,
+    ResourceConflictError,
+    TaskNotFoundError,
+    WorkspaceNotFoundError,
+)
 from ....core.utils import get_user_cache_folder
 from ....core.worker_tasks_topic_result import reaggregate_exact_topic_modeling_result
 from ....core.workspace import workspace_manager
@@ -53,7 +62,6 @@ from ....models import (
 from ..utils import ensure_task_synced, update_workspace
 from .cleanup import clear_previous_completed_analysis_task
 from .current_tasks import get_current_task_ids_for_analysis
-from ....core.exceptions import InternalServiceError, InvalidInputError, NoActiveWorkspaceError, NotFoundError, ResourceConflictError, TaskNotFoundError, WorkspaceNotFoundError
 from .generated_columns import (
     TOPIC_COLUMN,
     TOPIC_MEANING_COLUMN,
@@ -142,11 +150,15 @@ def _topic_artifacts_from_task(task: AnalysisTask) -> dict:
     payload = _task_result_payload(task)
     artifacts = payload.get("artifacts")
     if not isinstance(artifacts, dict):
-        raise NotFoundError("Topic modeling artifacts are not available for this task",)
+        raise NotFoundError(
+            "Topic modeling artifacts are not available for this task",
+        )
     node_artifacts = artifacts.get("nodes")
     meanings_path = artifacts.get("topic_meanings_parquet_path")
     if not isinstance(node_artifacts, list) or not isinstance(meanings_path, str):
-        raise InternalServiceError("Topic modeling artifact manifest is invalid",)
+        raise InternalServiceError(
+            "Topic modeling artifact manifest is invalid",
+        )
     return artifacts
 
 
@@ -319,7 +331,9 @@ async def _require_completed_topic_task(
     if not task:
         raise TaskNotFoundError("Task not found")
     if task.status != AnalysisStatus.COMPLETED:
-        raise ResourceConflictError("Topic modeling task is not completed",)
+        raise ResourceConflictError(
+            "Topic modeling task is not completed",
+        )
     return task
 
 
@@ -541,7 +555,9 @@ async def run_topic_modeling(
 
         workspace_dir = update_workspace(user_id, workspace_id, ws)
         if workspace_dir is None:
-            raise InternalServiceError("Failed to persist workspace before topic modeling",)
+            raise InternalServiceError(
+                "Failed to persist workspace before topic modeling",
+            )
         artifact_dir, artifact_prefix = _prepare_topic_artifact_target(
             user_id, workspace_id
         )
@@ -755,20 +771,28 @@ async def update_topic_modeling_task_result(
     task = await _require_completed_topic_task(user_id, workspace_id, task_id)
     task_manager = get_task_manager(user_id)
     if not task.result:
-        raise ResourceConflictError("Topic modeling task is not completed",)
+        raise ResourceConflictError(
+            "Topic modeling task is not completed",
+        )
     request_payload = task.request.model_dump()
     if request_payload.get("topic_size_mode") != "exact":
-        raise ResourceConflictError("Only exact topic modeling results can be re-aggregated",)
+        raise ResourceConflictError(
+            "Only exact topic modeling results can be re-aggregated",
+        )
     requested_topic_count = updates.topic_size_value
     if isinstance(requested_topic_count, bool) or not isinstance(
         requested_topic_count, int
     ):
-        raise InvalidInputError("topic_size_value must be an integer",)
+        raise InvalidInputError(
+            "topic_size_value must be an integer",
+        )
     payload = _task_result_payload(task)
     artifacts = _topic_artifacts_from_task(task)
     exact_artifact_path = artifacts.get("exact_reduction_artifact_path")
     if not isinstance(exact_artifact_path, str) or not exact_artifact_path:
-        raise ResourceConflictError("This exact topic-modeling result cannot be re-aggregated",)
+        raise ResourceConflictError(
+            "This exact topic-modeling result cannot be re-aggregated",
+        )
     node_artifacts = artifacts.get("nodes") or []
     node_infos = [
         {
@@ -781,7 +805,9 @@ async def update_topic_modeling_task_result(
         if isinstance(node_payload, dict)
     ]
     if len(node_infos) != len(node_artifacts):
-        raise InternalServiceError("Topic modeling artifact manifest is invalid",)
+        raise InternalServiceError(
+            "Topic modeling artifact manifest is invalid",
+        )
     try:
         updated_payload = reaggregate_exact_topic_modeling_result(
             artifact_path=exact_artifact_path,
@@ -796,7 +822,9 @@ async def update_topic_modeling_task_result(
     except ValueError as exc:
         raise InvalidInputError(str(exc)) from exc
     except Exception as exc:  # pragma: no cover
-        raise InternalServiceError(f"Failed to re-aggregate exact topic model: {exc}",) from exc
+        raise InternalServiceError(
+            f"Failed to re-aggregate exact topic model: {exc}",
+        ) from exc
     existing_meta = cast(
         dict[str, object],
         payload.get("meta") if isinstance(payload.get("meta"), dict) else {},
@@ -923,7 +951,9 @@ async def topic_modeling_detach_options(
                 node_name=str(payload.get("node_name") or node_id),
                 text_column=str(payload.get("text_column") or ""),
                 available_columns=[topic_column_name, *original_columns],
-                disabled_columns=[topic_column_name],
+                # The topic column is user-choosable now (default-selected on
+                # the client, deselectable) — nothing is force-disabled.
+                disabled_columns=[],
             )
         )
 
@@ -975,7 +1005,9 @@ async def detach_topic_modeling(
     }
     meanings_path = Path(str(artifacts.get("topic_meanings_parquet_path")))
     if not meanings_path.exists():
-        raise NotFoundError("Topic meanings artifact is missing",)
+        raise NotFoundError(
+            "Topic meanings artifact is missing",
+        )
     selected_topic_ids = sorted(
         {int(topic_id) for topic_id in (request.topic_ids or [])}
     )
@@ -1022,10 +1054,14 @@ async def detach_topic_modeling(
     for node_id in target_node_ids:
         artifact_payload = assignments_by_node_id.get(node_id)
         if not artifact_payload:
-            raise InvalidInputError(f"Node {node_id} is not available in topic artifact manifest",)
+            raise InvalidInputError(
+                f"Node {node_id} is not available in topic artifact manifest",
+            )
         assignments_path = Path(str(artifact_payload.get("assignments_parquet_path")))
         if not assignments_path.exists():
-            raise NotFoundError(f"Topic assignments artifact missing for node {node_id}",)
+            raise NotFoundError(
+                f"Topic assignments artifact missing for node {node_id}",
+            )
         assignments_lf = pl.scan_parquet(assignments_path)
 
         # Filter assignments to selected topics if topic_ids specified
@@ -1059,25 +1095,36 @@ async def detach_topic_modeling(
         source_data = source_node.data
 
         original_columns = list(source_data.collect_schema().names())
-        selected_columns = list((request.selected_columns or {}).get(node_id) or [])
-        if not selected_columns:
-            raise InvalidInputError(f"No columns selected for node {node_id}",)
-        invalid = [col for col in selected_columns if col not in original_columns]
-        if invalid:
-            raise InvalidInputError(f"Invalid selected columns for node {node_id}: {invalid}",)
+        # Resolve the topic column name the same way the detach-options
+        # endpoint does (against the source columns only) so it matches the
+        # name the client ticked in the dialog.
         topic_column_name = _resolve_topic_column_name(
             request.topic_column_name or TOPIC_COLUMN,
-            set(original_columns) | set(selected_columns),
+            set(original_columns),
         )
+        raw_selected = list((request.selected_columns or {}).get(node_id) or [])
+        # The topic column is now user-choosable: include it only when ticked.
+        # Everything else must be a real source column.
+        include_topic_column = topic_column_name in raw_selected
+        source_selected = [col for col in raw_selected if col != topic_column_name]
+        if not source_selected and not include_topic_column:
+            raise InvalidInputError(
+                f"No columns selected for node {node_id}",
+            )
+        invalid = [col for col in source_selected if col not in original_columns]
+        if invalid:
+            raise InvalidInputError(
+                f"Invalid selected columns for node {node_id}: {invalid}",
+            )
 
+        projection = [pl.col(col) for col in source_selected]
+        if include_topic_column:
+            projection.append(pl.col(TOPIC_COLUMN).alias(topic_column_name))
         output_lf = assignments_lf.join(
             source_data.with_row_index("__row_nr__"),
             on="__row_nr__",
             how="inner",
-        ).select(
-            [pl.col(col) for col in selected_columns]
-            + [pl.col(TOPIC_COLUMN).alias(topic_column_name)]
-        )
+        ).select(projection)
 
         parents = [source_node] if source_node else []
         node_name = (
@@ -1109,7 +1156,7 @@ async def detach_topic_modeling(
         ws.add_node(new_node)
 
         text_column = artifact_payload.get("text_column")
-        if text_column and text_column in selected_columns:
+        if text_column and text_column in source_selected:
             try:
                 new_node.document = text_column
             except Exception as exc:

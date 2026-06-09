@@ -24,6 +24,7 @@ def test_concordance_detach_task_forwards_extra_columns_data(monkeypatch):
         new_node_name,
         include_document_column=False,
         include_extraction=False,
+        selected_generated_columns=None,
         extra_columns_data=None,
         extra_columns_dtypes=None,
         materialized_path=None,
@@ -32,6 +33,7 @@ def test_concordance_detach_task_forwards_extra_columns_data(monkeypatch):
     ):
         captured["include_document_column"] = include_document_column
         captured["include_extraction"] = include_extraction
+        captured["selected_generated_columns"] = selected_generated_columns
         captured["extra_columns_data"] = extra_columns_data
         captured["whole_word"] = whole_word
         return {"state": "successful"}

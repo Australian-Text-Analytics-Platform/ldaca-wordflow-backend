@@ -26,6 +26,16 @@ from ....analysis.implementations.quotation import (
 from ....analysis.manager import get_task_manager
 from ....analysis.results import GenericAnalysisResult
 from ....core.auth import get_current_user
+from ....core.exceptions import (
+    BadGatewayError,
+    InternalServiceError,
+    InvalidInputError,
+    NoActiveWorkspaceError,
+    NotFoundError,
+    ResourceConflictError,
+    TaskNotFoundError,
+    WorkspaceNotFoundError,
+)
 from ....core.services.quotation_client import (
     QuotationServiceError,
     extract_remote_quotations,
@@ -45,11 +55,10 @@ from ....models import (
     QuotationResultQuery,
 )
 from ....settings import settings
+from ..utils import _build_detach_options
 from . import quotation_core as qcore
 from .current_tasks import get_current_task_ids_for_analysis
 from .generated_columns import QUOTE_EXTRACTION_COLUMN, is_tokenization_column_name
-from ..utils import _build_detach_options
-from ....core.exceptions import BadGatewayError, InternalServiceError, InvalidInputError, NoActiveWorkspaceError, NotFoundError, ResourceConflictError, TaskNotFoundError, WorkspaceNotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -291,7 +300,9 @@ async def update_quotation_task_result(
             task.complete(GenericAnalysisResult(base_result))
             task_manager.save_task(task)
         except Exception as exc:  # pragma: no cover
-            raise InternalServiceError(f"Failed to persist quotation preferences: {exc}",)
+            raise InternalServiceError(
+                f"Failed to persist quotation preferences: {exc}",
+            )
         return {
             "state": "successful",
             "message": "saved",
@@ -345,7 +356,9 @@ async def update_quotation_task_result(
 
         task_manager.save_task(task)
     except Exception as exc:  # pragma: no cover
-        raise InternalServiceError(f"Failed to persist quotation pagination update: {exc}",)
+        raise InternalServiceError(
+            f"Failed to persist quotation pagination update: {exc}",
+        )
     return updated_result
 
 
@@ -438,7 +451,9 @@ async def get_quotation(
         if existing_task:
             existing_req = existing_task.request
             if existing_req.node_id != node_id or existing_req.column != request.column:
-                raise ResourceConflictError("Clear current quotation results before starting a new quotation analysis",)
+                raise ResourceConflictError(
+                    "Clear current quotation results before starting a new quotation analysis",
+                )
             task = existing_task
 
         else:
@@ -447,7 +462,9 @@ async def get_quotation(
             task_manager.set_current_task("quotation", task_id)
 
         if task is None:
-            raise InternalServiceError("Failed to load quotation task",)
+            raise InternalServiceError(
+                "Failed to load quotation task",
+            )
         task.request = analysis_request
         task.complete(GenericAnalysisResult(result_payload))
         task_manager.save_task(task)
@@ -463,6 +480,8 @@ async def get_quotation(
     except Exception as exc:  # pragma: no cover
         logger.exception("Unexpected quotation error")
         raise InternalServiceError(f"Internal server error: {exc}")
+
+
 @router.get(
     "/nodes/{node_id}/quotation/detach-options",
     response_model=QuotationDetachOptionsResponse,
@@ -541,7 +560,14 @@ async def detach_quotation(
     include_document_column = False
     include_extraction = False
     columns_to_select: list[str] = []
-    if request.selected_columns:
+    # The generated quote columns are now user-choosable like any other column.
+    # Record exactly which ones the client kept so the worker drops the rest.
+    # `None` (no selection sent) preserves the legacy "keep all generated"
+    # behavior for older callers.
+    generated_names = set(CORE_QUOTATION_COLUMNS)
+    selected_generated_columns: list[str] | None = None
+    if request.selected_columns is not None:
+        selected_generated_columns = []
         for col in request.selected_columns:
             if col == request.column:
                 include_document_column = True
@@ -550,6 +576,9 @@ async def detach_quotation(
             # column — translate to a worker flag and skip source-selection.
             if col == QUOTE_EXTRACTION_COLUMN:
                 include_extraction = True
+                continue
+            if col in generated_names:
+                selected_generated_columns.append(col)
                 continue
             columns_to_select.append(col)
 
@@ -576,6 +605,7 @@ async def detach_quotation(
                 "new_node_name": request.new_node_name,
                 "include_document_column": include_document_column,
                 "include_extraction": include_extraction,
+                "selected_generated_columns": selected_generated_columns,
                 "extra_columns_data": extra_columns_data or None,
                 "extra_columns_dtypes": extra_columns_dtypes or None,
                 "materialized_path": request.materialized_path,
@@ -593,6 +623,8 @@ async def detach_quotation(
     except Exception as exc:
         logger.exception("Error submitting detach quotation task")
         raise InternalServiceError(f"Error submitting detach task: {exc}")
+
+
 @router.post(
     "/nodes/{node_id}/quotation/materialize", response_model=AnalysisTaskActionResponse
 )
