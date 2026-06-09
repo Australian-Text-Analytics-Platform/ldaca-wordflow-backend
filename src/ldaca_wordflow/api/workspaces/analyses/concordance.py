@@ -68,7 +68,6 @@ from .concordance_core import (
 from .current_tasks import get_current_task_ids_for_analysis
 from .generated_columns import (
     CONC_EXTRACTION_COLUMN,
-    MATERIALIZED_CONCORDANCE_COLUMNS,
 )
 
 router = APIRouter(prefix="/workspaces", tags=["concordance"])
@@ -474,16 +473,7 @@ async def detach_concordance(
     include_document_column = False
     include_extraction = False
     columns_to_select: list[str] = []
-    # Generated columns (the concordance output columns + frequency columns)
-    # are now user-choosable like any other column. When the client sends an
-    # explicit selection we record exactly which generated columns to keep so
-    # the worker can drop — and, for frequency columns, skip computing — the
-    # ones the user unticked. `None` preserves the old "keep all" behavior for
-    # legacy callers that omit `selected_columns`.
-    generated_names = set(MATERIALIZED_CONCORDANCE_COLUMNS)
-    selected_generated_columns: list[str] | None = None
-    if request.selected_columns is not None:
-        selected_generated_columns = []
+    if request.selected_columns:
         for col in request.selected_columns:
             if col == request.column:
                 include_document_column = True
@@ -493,9 +483,6 @@ async def detach_concordance(
             # source selection.
             if col == CONC_EXTRACTION_COLUMN:
                 include_extraction = True
-                continue
-            if col in generated_names:
-                selected_generated_columns.append(col)
                 continue
             columns_to_select.append(col)
 
@@ -548,7 +535,6 @@ async def detach_concordance(
                 "new_node_name": request.new_node_name,
                 "include_document_column": include_document_column,
                 "include_extraction": include_extraction,
-                "selected_generated_columns": selected_generated_columns,
                 "extra_columns_data": extra_columns_data
                 if extra_columns_data
                 else None,
