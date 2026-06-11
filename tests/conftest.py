@@ -12,6 +12,48 @@ import pytest
 from ldaca_wordflow import db
 
 
+@pytest.fixture(autouse=True)
+def _reset_sniffio_async_context():
+    """Stop a leaked async-library marker from breaking sync ``TestClient`` tests.
+
+    Why this exists (free-threaded Python 3.14t only): on the free-threaded
+    build a newly started ``threading.Thread`` *inherits* the parent thread's
+    :mod:`contextvars` context, whereas the GIL build gives each thread a fresh,
+    empty context. anyio's asyncio backend records the running library in
+    sniffio's ``current_async_library_cvar`` ContextVar; after an async test
+    (e.g. one using the Starlette ``TestClient``/httpx ASGI transport) that
+    marker can linger in the main thread's context. A later *synchronous*
+    ``TestClient`` request calls ``anyio.start_blocking_portal``, which spawns a
+    worker thread to run a fresh event loop -- but on 3.14t that thread inherits
+    the lingering ``"asyncio"`` marker, so anyio raises
+    ``RuntimeError: Already running asyncio in this thread``. Manifested as ~19
+    failures in ``test_files_preview.py`` once the suite runs after the async
+    integration tests.
+
+    Flow: before each test, clear sniffio's ContextVar + thread-local marker in
+    the main thread so any portal thread spawned during the test inherits a
+    clean context. Harmless on the GIL build (the marker is already clean there)
+    and on async tests (anyio re-sets the marker inside its own loop context).
+
+    Used by: every test (autouse), guarding the synchronous ``TestClient``
+    fixtures (``files_test_client`` and friends) against cross-test async-context
+    leakage on free-threaded interpreters.
+    """
+    try:
+        import sniffio._impl as _sniffio
+    except Exception:  # pragma: no cover - sniffio always present via anyio
+        yield
+        return
+
+    _sniffio.thread_local.name = None
+    token = _sniffio.current_async_library_cvar.set(None)
+    try:
+        yield
+    finally:
+        _sniffio.current_async_library_cvar.reset(token)
+        _sniffio.thread_local.name = None
+
+
 @pytest.fixture(scope="session")
 def anyio_backend():
     return "asyncio"

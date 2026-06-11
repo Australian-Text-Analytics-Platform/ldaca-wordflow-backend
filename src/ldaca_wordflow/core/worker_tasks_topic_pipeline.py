@@ -1,28 +1,35 @@
-"""Pipeline building helpers for the topic-modeling worker.
+"""Sampling and Rust-pipeline configuration helpers for topic modeling.
 
-Encapsulates BERTopic pipeline construction (vectorizer, UMAP, HDBSCAN),
-corpus sampling, and parameter resolution so the top-level orchestrator
-stays focused on coordination.
+Encapsulates reproducible corpus sampling, top-N-words headroom arithmetic, and
+the language/script heuristics that pick a c-TF-IDF vectorizer and stopword list
+for the Rust pipeline, so the top-level orchestrator stays focused on
+coordination.
 
 Used by:
 - ``_compute_topic_payload`` in ``worker_tasks_topic`` delegates sampling and
-  pipeline execution to functions in this module.
-- Tests that verify stopword handling, label vectorizer config, and topic size
-  arithmetic import directly from here.
+  vectorizer selection to functions in this module.
+- Tests that verify deterministic sampling, top-N headroom, and script
+  detection import directly from here.
 """
 
 from __future__ import annotations
 
 import logging
-import os
-import random
-from typing import Any, Callable, cast
+from typing import Any, cast
 
 import polars as pl
 
 logger = logging.getLogger(__name__)
 
-from .worker_tasks_topic_types import _SampledTopicCorpora, _TopicPipelineRun
+from .worker_tasks_topic_types import _SampledTopicCorpora
+
+# c-TF-IDF vectorizer model ids understood by the Rust pipeline
+# (the ``vectorizer_model`` kwarg of the ``pl.col(...).text.topic_modeling``
+# expression). These mirror the ``polars_text`` tokenizer model-id constants.
+_PLAIN_WORDS_EN_VECTORIZER = "native:plain_words_en"
+_LINDERA_ZH_VECTORIZER = "lindera:cc-cedict"
+_LINDERA_JA_VECTORIZER = "lindera:ja-ipadic"
+_LINDERA_KO_VECTORIZER = "lindera:ko-dic"
 
 
 def _sample_corpus(
@@ -38,10 +45,6 @@ def _sample_corpus(
     Called by:
     - ``_sample_corpora_for_topic_modeling`` (this module) for each corpus.
     - Tests that verify deterministic sampling across seeds and fractions.
-
-    Flow: load workspace corpora, choose sampling and embedding settings, reuse embedding
-        caches when possible, build topic payloads, and report artifacts back to the task
-        manager.
     """
     if fraction >= 1.0:
         return docs, list(range(len(docs)))
@@ -61,24 +64,22 @@ def _sample_corpus(
 def _sample_corpora_for_topic_modeling(
     *,
     corpora: list[list[str]],
-    vectorizer_corpora: list[list[str] | None],
     sample_fractions: list[float | None] | None,
     random_seed: int,
 ) -> _SampledTopicCorpora:
     """Sample each corpus according to ``sample_fractions`` and flatten into
-    a single document list for pipeline ingestion.
+    a single document list for the Rust pipeline.
 
     Called by:
     - ``_compute_topic_payload`` in ``worker_tasks_topic``.
 
-    Flow: load workspace corpora, choose sampling and embedding settings, reuse embedding
-        caches when possible, build topic payloads, and report artifacts back to the task
-        manager.
+    The flattened ``all_docs`` order (corpus 0 documents, then corpus 1, ...) is
+    the contract the Rust pipeline relies on: ``corpus_indices`` is derived from
+    the same order, and ``documents[].doc_index`` indexes back into it.
     """
     corpus_sizes_before_sample = [len(corpus) for corpus in corpora]
     active_corpora: list[list[str]] = []
     active_corpora_indices: list[list[int]] = []
-    active_vectorizer_corpora: list[list[str] | None] = []
 
     if sample_fractions is not None:
         for index, corpus in enumerate(corpora):
@@ -91,195 +92,231 @@ def _sample_corpora_for_topic_modeling(
                 )
                 active_corpora.append(sampled_docs)
                 active_corpora_indices.append(sampled_indices)
-                vectorizer_corpus = vectorizer_corpora[index]
-                active_vectorizer_corpora.append(
-                    [vectorizer_corpus[row_index] for row_index in sampled_indices]
-                    if vectorizer_corpus is not None
-                    else None
-                )
             else:
                 active_corpora.append(corpus)
                 active_corpora_indices.append(list(range(len(corpus))))
-                active_vectorizer_corpora.append(vectorizer_corpora[index])
     else:
         active_corpora = list(corpora)
         active_corpora_indices = [list(range(len(corpus))) for corpus in corpora]
-        active_vectorizer_corpora = list(vectorizer_corpora)
 
     all_docs = [doc for corpus in active_corpora for doc in corpus]
-    all_docs_for_vectorizer: list[str] = []
-    any_pretokenised = False
-    for index, raw_corpus in enumerate(active_corpora):
-        vectorizer_corpus = active_vectorizer_corpora[index]
-        if vectorizer_corpus is not None:
-            any_pretokenised = True
-            all_docs_for_vectorizer.extend(vectorizer_corpus)
-        else:
-            all_docs_for_vectorizer.extend(raw_corpus)
 
     return _SampledTopicCorpora(
         corpus_sizes_before_sample=corpus_sizes_before_sample,
         active_corpora=active_corpora,
         active_corpora_indices=active_corpora_indices,
-        active_vectorizer_corpora=active_vectorizer_corpora,
         all_docs=all_docs,
-        all_docs_for_vectorizer=all_docs_for_vectorizer,
-        any_pretokenised=any_pretokenised,
         corpus_sizes=[len(corpus) for corpus in active_corpora],
     )
 
 
-def _compute_min_topic_size(
-    n_eff: int,
-    topic_size_mode: str,
-    topic_size_value: int,
-) -> int:
-    """Derive BERTopic min_topic_size from the chosen sizing mode.
-
-    Args:
-        n_eff: Effective document count (post-sample total across all corpora).
-        topic_size_mode: "target", "min", or "exact".
-        topic_size_value: The user-supplied numeric value for the chosen mode.
-
-    Called by:
-    - ``_compute_topic_payload`` in ``worker_tasks_topic``.
-    - Tests that verify the arithmetic for each mode.
-
-    Flow: load workspace corpora, choose sampling and embedding settings, reuse embedding
-        caches when possible, build topic payloads, and report artifacts back to the task
-        manager.
-    """
-    if topic_size_mode == "min":
-        return max(2, int(topic_size_value))
-    if topic_size_mode == "exact":
-        # Start from the target-mode heuristic, then reduce it so BERTopic is
-        # more likely to produce enough raw topics before exact post-fit merging.
-        target_min_topic_size = max(2, n_eff // (int(topic_size_value) * 10))
-        return max(5, int(target_min_topic_size * 0.75))
-    # "target" (default)
-    return max(2, n_eff // (int(topic_size_value) * 10))
-
-
-def _build_label_vectorizer(*, online: bool = False) -> Any:
-    """Return the CountVectorizer (or OnlineCountVectorizer) used for the
-    label/c-TF-IDF stage with sklearn's built-in English stoplist.
-
-    Called by:
-    - ``_build_classic_pipeline`` (this module).
-
-    Flow: load workspace corpora, choose sampling and embedding settings, reuse embedding
-        caches when possible, build topic payloads, and report artifacts back to the task
-        manager.
-    """
-    if online:
-        from bertopic.vectorizers import OnlineCountVectorizer
-
-        return OnlineCountVectorizer(stop_words="english", decay=0.01)
-    from sklearn.feature_extraction.text import CountVectorizer
-
-    return CountVectorizer(stop_words="english")
-
-
 def _resolve_top_n_words(representative_words_count: int | None) -> int:
-    """Pick BERTopic's ``top_n_words`` from the user-requested display cap.
+    """Pick the Rust c-TF-IDF ``top_k`` from the user-requested display cap.
 
-    BERTopic's default is 10. When the user picks "Words per topic = 35"
-    and toggles on the frontend stopword filter, c-TF-IDF would compute
-    only 10 raw words, the filter would drop 5--9 of them as CJK function
-    words (的/是/了/...), and the user would see 1--3 --- even though they
-    asked for 35.
-
-    We pre-compute a generous headroom so the post-filter slice still has
-    enough material:
+    When the user picks a small "Words per topic" and toggles on the frontend
+    stopword filter, computing only that many raw words would let the filter
+    drop most of them, leaving the user with fewer words than requested. We
+    pre-compute a generous headroom so the post-filter slice still has enough
+    material:
 
     - At least 50 candidates, so even a tiny request like 5 has a healthy
       buffer for the stopword filter.
-    - Otherwise 2× the requested cap.
-
-    Performance impact is negligible --- c-TF-IDF already produces a ranked
-    vocabulary per topic; ``top_n_words`` just decides where to truncate.
+    - Otherwise 2x the requested cap.
 
     Called by:
-    - ``_build_classic_pipeline`` (this module).
-    - ``_compute_topic_payload`` in ``worker_tasks_topic`` uses it for the
-      display cap in result payloads.
-
-    Flow: load workspace corpora, choose sampling and embedding settings, reuse embedding
-        caches when possible, build topic payloads, and report artifacts back to the task
-        manager.
+    - ``_compute_topic_payload`` in ``worker_tasks_topic`` (Rust ``top_k``).
+    - ``_build_topic_result_payload`` for the wire-payload word cap.
+    - Tests that verify the headroom arithmetic.
     """
     requested = int(representative_words_count or 0)
     return max(50, requested * 2) if requested > 0 else 50
 
 
-def _build_classic_pipeline(
-    min_topic_size: int,
-    random_state: int,
-    embedder: Any,
-    top_n_words: int = 50,
-) -> Any:
-    """Build a standard BERTopic pipeline with UMAP + HDBSCAN.
+def _count_cjk_chars(text: str) -> tuple[int, int, int]:
+    """Count (han, kana, hangul) codepoints in ``text``.
 
-    Called by:
-    - ``_run_classic_pipeline`` (this module).
-
-    Flow: load workspace corpora, choose sampling and embedding settings, reuse embedding
-        caches when possible, build topic payloads, and report artifacts back to the task
-        manager.
+    Used by ``_resolve_vectorizer_model`` to choose a CJK-aware segmenter; the
+    three buckets disambiguate Chinese (han only), Japanese (kana present), and
+    Korean (hangul) so the right lindera dictionary is selected.
     """
-    from bertopic import BERTopic
-    from umap import UMAP
-
-    return BERTopic(
-        verbose=False,
-        min_topic_size=min_topic_size,
-        embedding_model=embedder,
-        umap_model=UMAP(
-            n_neighbors=15,
-            n_components=5,
-            min_dist=0.0,
-            metric="cosine",
-            random_state=random_state,
-        ),
-        vectorizer_model=_build_label_vectorizer(online=False),
-        top_n_words=top_n_words,
-    )
+    han = kana = hangul = 0
+    for ch in text:
+        code = ord(ch)
+        if (
+            0x4E00 <= code <= 0x9FFF  # CJK Unified Ideographs
+            or 0x3400 <= code <= 0x4DBF  # CJK Extension A
+            or 0xF900 <= code <= 0xFAFF  # CJK Compatibility Ideographs
+        ):
+            han += 1
+        elif 0x3040 <= code <= 0x30FF:  # Hiragana + Katakana
+            kana += 1
+        elif 0xAC00 <= code <= 0xD7A3:  # Hangul syllables
+            hangul += 1
+    return han, kana, hangul
 
 
-def _run_classic_pipeline(
-    *,
-    all_docs_for_vectorizer: list[str],
-    all_embeddings: Any,
-    effective_min_topic_size: int,
-    random_state: int,
-    embedder: Any,
-    top_n_words: int,
-    progress_callback: Callable[[float, str], None] | None,
-    progress_fraction: float,
-) -> _TopicPipelineRun:
-    """Build the classic BERTopic pipeline, fit it, and return the model and
-    topic assignments wrapped in ``_TopicPipelineRun``.
+def _resolve_vectorizer_model(
+    docs: list[str], *, sample_limit: int = 200
+) -> tuple[str, str | None]:
+    """Choose the Rust c-TF-IDF vectorizer + stopword language from corpus script.
+
+    The Rust pipeline tokenizes topic text itself for c-TF-IDF, so -- unlike the
+    old BERTopic path that consumed pre-tokenized "vectorizer corpora" -- we only
+    need to tell it *which* segmenter to use. Space-delimited languages use the
+    built-in ``native:plain_words_en`` word splitter (English stopwords applied);
+    CJK scripts need a lindera dictionary because there are no word boundaries.
+
+    Returns ``(vectorizer_model_id, stopwords_lang)`` where ``stopwords_lang`` is
+    ``"en"`` for the plain-words path (so the caller loads English stopwords) and
+    ``None`` for CJK (lindera handles segmentation; stopwording is left to it).
+
+    Heuristic: sample up to ``sample_limit`` documents and, if CJK codepoints are
+    a meaningful share (>=20%) of the letters seen, pick the dominant CJK script's
+    dictionary. Otherwise default to English plain words.
 
     Called by:
     - ``_compute_topic_payload`` in ``worker_tasks_topic``.
-
-    Flow: load workspace corpora, choose sampling and embedding settings, reuse embedding
-        caches when possible, build topic payloads, and report artifacts back to the task
-        manager.
+    - Tests that verify EN vs CJK selection.
     """
-    if progress_callback:
-        progress_callback(
-            progress_fraction, "Running classic BERTopic pipeline (UMAP + HDBSCAN)..."
+    han = kana = hangul = letters = 0
+    for doc in docs[:sample_limit]:
+        if not doc:
+            continue
+        d_han, d_kana, d_hangul = _count_cjk_chars(doc)
+        han += d_han
+        kana += d_kana
+        hangul += d_hangul
+        letters += sum(1 for ch in doc if ch.isalpha())
+        letters += d_han + d_kana + d_hangul
+
+    cjk = han + kana + hangul
+    if letters == 0 or cjk / letters < 0.20:
+        return _PLAIN_WORDS_EN_VECTORIZER, "en"
+
+    # CJK-dominant: disambiguate by script. Kana present -> Japanese; Hangul
+    # dominant -> Korean; otherwise Han-only -> Chinese.
+    if kana > 0:
+        return _LINDERA_JA_VECTORIZER, None
+    if hangul > han:
+        return _LINDERA_KO_VECTORIZER, None
+    return _LINDERA_ZH_VECTORIZER, None
+
+
+def _stopwords_for_lang(lang: str | None) -> list[str]:
+    """Return the stopword list for ``lang`` passed to the Rust pipeline.
+
+    English uses scikit-learn's built-in stoplist (already a dependency) so
+    generic function words ("the", "a", "is") don't leak into c-TF-IDF labels;
+    CJK / unknown languages return ``[]`` and rely on the lindera segmenter.
+
+    Called by:
+    - ``_compute_topic_payload`` in ``worker_tasks_topic``.
+    """
+    if lang == "en":
+        from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS
+
+        return sorted(ENGLISH_STOP_WORDS)
+    return []
+
+
+def _run_rust_topic_modeling(
+    *,
+    all_docs: list[str],
+    corpus_indices: list[int],
+    seed: int,
+    top_k: int,
+    min_cluster_size: int,
+    vectorizer_model: str | None,
+    stopwords: list[str],
+    embedder_model: str | None = None,
+) -> dict:
+    """Run the Rust topic-modeling pipeline via the Polars expression and
+    reconstruct the result dict the payload builder consumes.
+
+    Topic modeling is exposed by ``polars-text`` as a first-class Polars
+    expression in the ``.text`` namespace (``pl.col(...).text.topic_modeling``),
+    mirroring ``tokenize``/``concordance``. The Rust side owns chunking, candle
+    embedding, PaCMAP reduction, HDBSCAN clustering, and c-TF-IDF labeling. The
+    number of topics is whatever HDBSCAN yields for ``min_cluster_size`` (the
+    only native topic-count control). The expression returns one struct **per
+    input document** with the document's ``dominant_topic`` and
+    ``topic_distribution`` plus the per-topic metadata
+    (``representative_words``/``x``/``y``) replicated onto each row under its
+    dominant topic, and the run-level ``n_topics`` / ``n_chunks`` replicated on
+    every row.
+
+    ``corpus_indices`` is accepted for call-site compatibility but no longer
+    forwarded: the expression always treats the input as a single corpus, and
+    per-corpus splitting happens downstream from ``corpus_sizes`` in
+    ``_build_topic_result_payload``.
+
+    Flow:
+    1. Wrap ``all_docs`` in a one-column frame and evaluate the expression,
+       unnesting the per-row struct into flat columns.
+    2. Rebuild ``documents`` as ``[{doc_index, dominant_topic}]`` in input order.
+    3. Rebuild ``topics`` by grouping the rows whose ``dominant_topic >= 0`` and
+       taking the (replicated) ``representative_words``/``x``/``y`` once per
+       topic. ``n_topics`` is the number of topics with at least one dominant
+       document, so the displayed count matches the bubble chart; ``n_chunks`` is
+       read from the first row.
+
+    Called by:
+    - ``_compute_topic_payload`` in ``worker_tasks_topic`` for the initial run.
+    """
+    del corpus_indices  # retained for call-site compatibility; see docstring
+
+    import polars_text  # noqa: F401  (registers the ``.text`` expr namespace)
+
+    result = (
+        pl.DataFrame({"__doc__": all_docs})
+        .select(
+            cast(Any, pl.col("__doc__"))
+            .text.topic_modeling(
+                embedder_model=embedder_model,
+                seed=int(seed),
+                top_k=int(top_k),
+                min_cluster_size=int(min_cluster_size),
+                vectorizer_model=vectorizer_model,
+                lowercase=True,
+                stopwords=stopwords or None,
+            )
+            .alias("__topic__")
         )
-    topic_model = _build_classic_pipeline(
-        effective_min_topic_size,
-        random_state,
-        embedder,
-        top_n_words=top_n_words,
+        .unnest("__topic__")
     )
-    assigned_topics, _ = topic_model.fit_transform(
-        all_docs_for_vectorizer, all_embeddings
+
+    documents = [
+        {"doc_index": index, "dominant_topic": int(topic)}
+        for index, topic in enumerate(result["dominant_topic"].to_list())
+    ]
+
+    topics_frame = (
+        result.filter(pl.col("dominant_topic") >= 0)
+        .group_by("dominant_topic")
+        .agg(
+            pl.col("representative_words").first(),
+            pl.col("x").first(),
+            pl.col("y").first(),
+        )
+        .sort("dominant_topic")
     )
-    return _TopicPipelineRun(
-        topic_model=topic_model, assigned_topics=list(assigned_topics)
-    )
+    topics = [
+        {
+            "id": int(row["dominant_topic"]),
+            "representative_words": [
+                word for word in (row["representative_words"] or []) if word
+            ],
+            "x": float(row["x"]),
+            "y": float(row["y"]),
+        }
+        for row in topics_frame.iter_rows(named=True)
+    ]
+
+    n_chunks = int(result["n_chunks"][0]) if result.height else 0
+
+    return {
+        "topics": topics,
+        "documents": documents,
+        "n_topics": len(topics),
+        "n_chunks": n_chunks,
+    }

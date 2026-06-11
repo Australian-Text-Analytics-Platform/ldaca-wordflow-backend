@@ -11,61 +11,46 @@ Flow: load workspace corpora, choose sampling and embedding settings, reuse embe
 
 The implementation is split across several sub-modules:
 - ``worker_tasks_topic_types`` — internal frozen dataclasses
-- ``worker_tasks_topic_embedding`` — embedder selection, caching, and encoding
-- ``worker_tasks_topic_pipeline`` — corpus sampling and BERTopic pipeline building
+- ``worker_tasks_topic_pipeline`` — corpus sampling, c-TF-IDF vectorizer/stopword
+  selection, and the Rust-pipeline runner
 - ``worker_tasks_topic_result`` — result payload building and exact reduction
+
+Embedding, dimensionality reduction, clustering, and c-TF-IDF labeling all run
+inside the ``polars_text`` Rust extension; there is no Python BERTopic or
+SentenceTransformer dependency anymore.
 """
 
 from __future__ import annotations
 
 import logging
 import os
-import random
 from pathlib import Path
 from typing import Any, Callable, cast
 
-import numpy as np
-
-from ..api.workspaces.analyses.generated_columns import (
-    TOPIC_COLUMN,
-    TOPIC_MEANING_COLUMN,
-)
 from .worker_utils import worker_task
 
-from .worker_tasks_topic_types import _PreparedTopicPayload, _SampledTopicCorpora
-from .worker_tasks_topic_embedding import (
-    _EMBEDDER_CACHE,
-    _EMBEDDING_CHUNK_SIZE,
-    _TOPIC_EMBEDDER_REPO_ID,
-    _TOPIC_EMBEDDER_REVISION,
-    _embed_documents,
-    _embedder_cache_label,
-    _encode_embeddings_in_chunks,
-    _get_embedder,
-)
+from .worker_tasks_topic_types import _PreparedTopicPayload
 from .worker_tasks_topic_pipeline import (
-    _build_classic_pipeline,
-    _build_label_vectorizer,
-    _compute_min_topic_size,
     _resolve_top_n_words,
-    _run_classic_pipeline,
+    _resolve_vectorizer_model,
+    _run_rust_topic_modeling,
     _sample_corpora_for_topic_modeling,
-    _sample_corpus,
+    _stopwords_for_lang,
 )
 from .worker_tasks_topic_result import (
     _build_empty_topic_payload,
     _build_topic_result_payload,
-    _count_non_outlier_topics,
-    _persist_exact_reduction_artifact,
-    _resolve_exact_reduce_topics_target,
-    reaggregate_exact_topic_modeling_result,
 )
+
+# Default candle embedder used by the Rust pipeline when no override is given.
+# Recorded in result metadata so the API/frontend can report which model was
+# used; the actual download/caching is handled inside ``polars_text``.
+_DEFAULT_EMBEDDER_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
     "run_topic_modeling_task",
-    "reaggregate_exact_topic_modeling_result",
 ]
 
 
@@ -76,26 +61,23 @@ __all__ = [
 
 def _load_corpora_from_workspace(
     target_workspace_dir: str, node_payloads: list[dict[str, Any]], user_id: str
-) -> tuple[list[list[str]], list[list[str] | None], list[str | None]]:
-    """Return raw docs, optional tokenized docs, and token columns per node.
+) -> list[list[str]]:
+    """Return the raw document list for each requested node.
 
     Called by:
     - ``_prepare_payload`` (this module) when corpora are not provided directly.
 
-    Flow: load workspace corpora, choose sampling and embedding settings, reuse embedding
-        caches when possible, build topic payloads, and report artifacts back to the task
-        manager.
+    The Rust pipeline tokenizes for c-TF-IDF itself (lindera for CJK, a plain
+    word splitter for the rest), so this no longer hydrates the pre-tokenized
+    "vectorizer corpora" the BERTopic path needed -- it just selects the text
+    column from each workspace node and stringifies it.
     """
     import polars as pl
 
     from docworkspace import Workspace
 
-    from .tokens_cache import hydrate_tokenization_lazyframe
-
     workspace = Workspace.load(Path(target_workspace_dir))
     raw_corpora: list[list[str]] = []
-    vectorizer_corpora: list[list[str] | None] = []
-    tokens_columns: list[str | None] = []
 
     for node_info in node_payloads:
         node_id = str(node_info.get("node_id") or "")
@@ -123,40 +105,7 @@ def _load_corpora_from_workspace(
             ]
         )
 
-        tokens_column = node.find_tokenization_column(text_column)
-        if tokens_column is None:
-            vectorizer_corpora.append(None)
-            tokens_columns.append(None)
-            continue
-
-        node_data = hydrate_tokenization_lazyframe(
-            node=node,
-            source_column=text_column,
-            user_id=user_id,
-        )
-
-        tokens_selected = cast(
-            pl.DataFrame,
-            node_data.select(
-                pl.col(tokens_column)
-                .list.eval(pl.element().struct.field("token"))
-                .alias("__tokens_col__")
-            ).collect(),
-        )
-        joined: list[str] = []
-        for tokens in tokens_selected["__tokens_col__"].to_list():
-            if tokens is None:
-                joined.append("")
-                continue
-            joined.append(
-                " ".join(
-                    str(token) for token in tokens if token is not None and str(token)
-                )
-            )
-        vectorizer_corpora.append(joined)
-        tokens_columns.append(tokens_column)
-
-    return raw_corpora, vectorizer_corpora, tokens_columns
+    return raw_corpora
 
 
 def _prepare_payload(
@@ -187,12 +136,7 @@ def _prepare_payload(
             )
         if progress_callback:
             progress_callback(0.03, "Loading source documents from workspace...")
-        corpora, vectorizer_corpora, tokens_columns_per_node = (
-            _load_corpora_from_workspace(workspace_dir, node_infos, user_id)
-        )
-    else:
-        vectorizer_corpora = [None] * len(corpora)
-        tokens_columns_per_node = [None] * len(corpora)
+        corpora = _load_corpora_from_workspace(workspace_dir, node_infos, user_id)
 
     if len(corpora) != len(node_infos):
         raise ValueError(
@@ -209,8 +153,6 @@ def _prepare_payload(
     return _PreparedTopicPayload(
         artifact_root=artifact_root,
         corpora=corpora,
-        vectorizer_corpora=vectorizer_corpora,
-        tokens_columns_per_node=tokens_columns_per_node,
         node_names=node_names,
     )
 
@@ -219,30 +161,27 @@ def _compute_topic_payload(
     *,
     node_infos: list[dict[str, Any]],
     corpora: list[list[str]],
-    vectorizer_corpora: list[list[str] | None],
     artifact_root: Path,
     artifact_prefix: str,
     random_seed: int,
     representative_words_count: int,
     progress_callback: Callable[[float, str], None] | None,
-    embedding_cache_dir: str | None,
     sample_fractions: list[float | None] | None,
-    topic_size_mode: str | None,
-    topic_size_value: int | None,
+    min_topic_size: int,
 ) -> dict[str, Any]:
-    """Run the full topic-modeling pipeline: sample, embed, fit, and build
-    the result payload.
+    """Run the full topic-modeling pipeline: sample, run Rust, build the payload.
 
     Called by:
     - ``run_topic_modeling_task`` (this module).
 
-    Flow: load workspace corpora, choose sampling and embedding settings, reuse embedding
-        caches when possible, build topic payloads, and report artifacts back to the task
-        manager.
+    Flow: sample each corpus, pick the c-TF-IDF vectorizer/stopwords from the
+    document script mix, call the Rust pipeline (chunk -> candle embed -> PaCMAP
+    -> HDBSCAN -> c-TF-IDF, plus optional merge for target/exact modes), and turn
+    its JSON result into the wire payload. For ``exact`` mode it also persists a
+    JSON re-aggregation context so the slider can request a different count later.
     """
     sampled = _sample_corpora_for_topic_modeling(
         corpora=corpora,
-        vectorizer_corpora=vectorizer_corpora,
         sample_fractions=sample_fractions,
         random_seed=random_seed,
     )
@@ -259,73 +198,44 @@ def _compute_topic_payload(
 
     random_state = int(random_seed)
     max_representative_words = max(1, int(representative_words_count))
-    random.seed(random_state)
-    np.random.seed(random_state)
+    min_cluster_size = max(2, int(min_topic_size))
 
-    effective_min_topic_size = _compute_min_topic_size(
-        len(sampled.all_docs), topic_size_mode or "target", topic_size_value or 25
-    )
+    corpus_indices = [
+        corpus_idx
+        for corpus_idx, size in enumerate(sampled.corpus_sizes)
+        for _ in range(size)
+    ]
+    vectorizer_model, stopwords_lang = _resolve_vectorizer_model(sampled.all_docs)
+
     logger.info(
-        "[Worker %d] Running classic BERTopic pipeline (%d docs)",
+        "[Worker %d] Running Rust topic-modeling pipeline (%d docs, min_cluster_size=%d)",
         os.getpid(),
         len(sampled.all_docs),
+        min_cluster_size,
     )
+    if progress_callback:
+        progress_callback(0.1, "Embedding and clustering documents...")
 
-    embedded = _embed_documents(
+    rust_result = _run_rust_topic_modeling(
         all_docs=sampled.all_docs,
-        embedding_cache_dir=embedding_cache_dir,
-        progress_callback=progress_callback,
-        progress_start=0.08,
-        progress_end=0.63,
+        corpus_indices=corpus_indices,
+        seed=random_state,
+        top_k=_resolve_top_n_words(representative_words_count),
+        min_cluster_size=min_cluster_size,
+        vectorizer_model=vectorizer_model,
+        stopwords=_stopwords_for_lang(stopwords_lang),
+        embedder_model=_DEFAULT_EMBEDDER_MODEL,
     )
 
-    top_n_words = _resolve_top_n_words(representative_words_count)
-    pipeline_run = _run_classic_pipeline(
-        all_docs_for_vectorizer=sampled.all_docs_for_vectorizer,
-        all_embeddings=embedded.all_embeddings,
-        effective_min_topic_size=effective_min_topic_size,
-        random_state=random_state,
-        embedder=embedded.embedder,
-        top_n_words=top_n_words,
-        progress_callback=progress_callback,
-        progress_fraction=0.65,
-    )
-
-    topic_model = pipeline_run.topic_model
-    assigned_topics = pipeline_run.assigned_topics
-    raw_total_topics = None
-    exact_reduction_artifact_path: str | None = None
-    if (topic_size_mode or "target") == "exact" and topic_size_value:
-        raw_total_topics = _count_non_outlier_topics(topic_model)
-        exact_reduction_artifact_path = str(
-            artifact_root / f"{artifact_prefix}_exact_reduction.pkl"
-        )
-        _persist_exact_reduction_artifact(
-            exact_reduction_artifact_path,
-            topic_model=topic_model,
-            all_docs=sampled.all_docs_for_vectorizer,
-            corpus_sizes=sampled.corpus_sizes,
-            active_corpora_indices=sampled.active_corpora_indices,
-        )
-        if progress_callback:
-            progress_callback(0.65, f"Reducing topics to exactly {topic_size_value}...")
-        topic_model.reduce_topics(
-            sampled.all_docs_for_vectorizer,
-            nr_topics=_resolve_exact_reduce_topics_target(
-                topic_model, int(topic_size_value)
-            ),
-        )
-        assigned_topics = list(topic_model.topics_)
+    if progress_callback:
+        progress_callback(0.85, "Assembling topic results...")
 
     payload = _build_topic_result_payload(
-        topic_model=topic_model,
+        rust_result=rust_result,
         node_infos=node_infos,
-        all_docs=sampled.all_docs_for_vectorizer,
         corpus_sizes=sampled.corpus_sizes,
         active_corpora_indices=sampled.active_corpora_indices,
         max_representative_words=max_representative_words,
-        random_state=random_state,
-        assigned_topics=assigned_topics,
         artifact_prefix=artifact_prefix,
         artifact_root=artifact_root,
     )
@@ -335,14 +245,14 @@ def _compute_topic_payload(
     payload_meta.update(
         {
             "native": True,
-            "engine": "bertopic",
-            "embedding_model": embedded.embedding_model_name,
-            "embedding_backend": embedded.embedding_backend,
-            "min_topic_size": effective_min_topic_size,
-            "topic_size_mode": topic_size_mode or "target",
-            "topic_size_value": topic_size_value,
+            "engine": "rust",
+            "embedding_model": _DEFAULT_EMBEDDER_MODEL,
+            "embedding_backend": "candle",
+            "min_topic_size": min_cluster_size,
             "representative_words_count": max_representative_words,
             "random_state": random_state,
+            "vectorizer_model": vectorizer_model,
+            "n_chunks": int(rust_result.get("n_chunks") or 0),
             **(
                 {
                     "corpus_sizes_before_sample": sampled.corpus_sizes_before_sample,
@@ -353,15 +263,7 @@ def _compute_topic_payload(
             ),
         }
     )
-    if raw_total_topics is not None:
-        payload_meta["raw_total_topics"] = raw_total_topics
     payload["meta"] = payload_meta
-    payload_artifacts = payload.get("artifacts")
-    if isinstance(payload_artifacts, dict) and exact_reduction_artifact_path:
-        payload_artifacts["exact_reduction_artifact_path"] = (
-            exact_reduction_artifact_path
-        )
-        payload_artifacts["version"] = 2
     return payload
 
 
@@ -373,7 +275,7 @@ def run_topic_modeling_task(
     node_infos: list[dict[str, Any]],
     artifact_dir: str,
     artifact_prefix: str,
-    min_topic_size: int = 5,
+    min_topic_size: int = 10,
     workspace_dir: str | None = None,
     corpora: list[list[str]] | None = None,
     random_seed: int = 42,
@@ -381,8 +283,6 @@ def run_topic_modeling_task(
     progress_callback: Callable[[float, str], None] | None = None,
     embedding_cache_dir: str | None = None,
     sample_fractions: list[float | None] | None = None,
-    topic_size_mode: str | None = "target",
-    topic_size_value: int | None = 25,
 ) -> dict[str, Any]:
     """Execute topic modeling in a worker process.
 
@@ -392,12 +292,17 @@ def run_topic_modeling_task(
     - ``TASK_REGISTRY["topic_modeling"]`` because background jobs need one lifecycle owner for
       submission, progress, cancellation, and artifact cleanup.
         Why:
-        - Runs BERTopic embedding/modeling out-of-process and returns an artifact
+        - Runs the Rust ``polars_text`` topic-modeling pipeline (candle embeddings
+            + PaCMAP + HDBSCAN + c-TF-IDF) out-of-process and returns an artifact
             manifest (Parquet outputs) for main-process lazy retrieval/finalization.
 
-    Flow: load workspace corpora, choose sampling and embedding settings, reuse embedding
-        caches when possible, build topic payloads, and report artifacts back to the task
-        manager.
+    ``min_topic_size`` is the HDBSCAN minimum cluster size (the only native
+    topic-count control); the topic count is whatever emerges. ``embedding_cache_dir``
+    is retained for call-site compatibility but unused: the Rust pipeline manages
+    its own in-process embedder, so there is no Python-side embedding cache.
+
+    Flow: load workspace corpora, sample, run the Rust pipeline, build topic
+        payloads, and report artifacts back to the task manager.
     """
     configure_worker_environment()
 
@@ -429,16 +334,13 @@ def run_topic_modeling_task(
         topic_payload = _compute_topic_payload(
             node_infos=node_infos,
             corpora=prepared_payload.corpora,
-            vectorizer_corpora=prepared_payload.vectorizer_corpora,
             artifact_root=prepared_payload.artifact_root,
             artifact_prefix=artifact_prefix,
             random_seed=random_seed,
             representative_words_count=representative_words_count,
             progress_callback=progress_callback,
-            embedding_cache_dir=embedding_cache_dir,
             sample_fractions=sample_fractions,
-            topic_size_mode=topic_size_mode,
-            topic_size_value=topic_size_value,
+            min_topic_size=min_topic_size,
         )
 
         if progress_callback:

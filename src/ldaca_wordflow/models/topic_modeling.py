@@ -1,4 +1,4 @@
-"""Topic modeling (BERTopic) request and response models.
+"""Topic modeling request and response models.
 
 Split from models/__init__.py.
 """
@@ -95,16 +95,14 @@ class TopicModelingRequest(BaseModel):
 
     node_ids: List[str]  # 1 or 2 node IDs
     node_columns: Dict[str, str]  # Maps node_id -> column_name
-    min_topic_size: Optional[int] = (
-        10  # kept for backwards compat; ignored when topic_size_mode != "min"
-    )
+    # HDBSCAN minimum cluster size: the smallest group of chunks that counts as a
+    # topic. The number of topics is whatever HDBSCAN yields for it (the only
+    # native topic-count control; there is no post-fit merge to a target count).
+    min_topic_size: Optional[int] = 10
     random_seed: Optional[int] = 42
     representative_words_count: Optional[int] = 5
     # Sampling: one entry per corpus in node_ids order. None = no sampling for that corpus.
     sample_fractions: Optional[List[Optional[float]]] = None
-    # Topic size mode: controls how min_topic_size is derived
-    topic_size_mode: Optional[Literal["target", "min", "exact"]] = "target"
-    topic_size_value: Optional[int] = 25
 
     # Pydantic v2 model config
     model_config = ConfigDict(
@@ -112,11 +110,10 @@ class TopicModelingRequest(BaseModel):
             "example": {
                 "node_ids": ["node1", "node2"],
                 "node_columns": {"node1": "text", "node2": "content"},
+                "min_topic_size": 10,
                 "random_seed": 42,
                 "representative_words_count": 5,
                 "sample_fractions": [0.2, 0.5],
-                "topic_size_mode": "target",
-                "topic_size_value": 25,
             }
         }
     )
@@ -177,21 +174,6 @@ class TopicModelingResponse(BaseModel):
     message: str
     data: Optional[TopicModelingData] = None
     metadata: AnalysisTaskMetadata | None = None
-
-
-
-class TopicModelingResultUpdateRequest(BaseModel):
-    """Request schema used by API routes and generated clients for topic modeling result update request.
-
-    Used by:
-    - backend API routes, backend request/response models because they need a stable JSON
-      contract shared by route handlers, generated clients, and tests.
-
-    Flow: validate incoming API fields, apply defaults or validators, and serialize route
-        responses in the shape expected by frontend clients and tests.
-    """
-
-    topic_size_value: int
 
 
 

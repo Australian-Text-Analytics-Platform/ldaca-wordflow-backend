@@ -217,7 +217,7 @@ async def test_clear_analysis_task_deletes_owned_artifacts_only(
     artifact_dir.mkdir(parents=True, exist_ok=True)
     request_artifact = artifact_dir / "materialized_child.parquet"
     result_artifact = artifact_dir / "token_frequency.parquet"
-    result_artifact_dir = artifact_dir / "topic-model.bertopic"
+    result_artifact_dir = artifact_dir / "topic-model.artifacts"
     durable_data = workspace_dir / "data" / "added_to_workspace.parquet"
 
     request_artifact.write_text("request", encoding="utf-8")

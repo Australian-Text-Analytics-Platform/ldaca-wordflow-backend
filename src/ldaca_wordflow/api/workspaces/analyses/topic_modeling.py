@@ -28,7 +28,6 @@ from ....analysis.implementations.topic_modeling import (
 )
 from ....analysis.manager import get_task_manager
 from ....analysis.models import AnalysisStatus, AnalysisTask
-from ....analysis.results import GenericAnalysisResult
 from ....core.auth import get_current_user
 from ....core.exceptions import (
     InternalServiceError,
@@ -40,7 +39,6 @@ from ....core.exceptions import (
     WorkspaceNotFoundError,
 )
 from ....core.utils import get_user_cache_folder
-from ....core.worker_tasks_topic_result import reaggregate_exact_topic_modeling_result
 from ....core.workspace import workspace_manager
 from ....models import (
     AnalysisClearResponse,
@@ -57,7 +55,6 @@ from ....models import (
     TopicModelingEmbeddingCacheSizeResponse,
     TopicModelingRequest,
     TopicModelingResponse,
-    TopicModelingResultUpdateRequest,
 )
 from ..utils import ensure_task_synced, update_workspace
 from .cleanup import clear_previous_completed_analysis_task
@@ -577,8 +574,6 @@ async def run_topic_modeling(
                     get_user_cache_folder(user_id) / "embeddings"
                 ),
                 "sample_fractions": request.sample_fractions,
-                "topic_size_mode": request.topic_size_mode,
-                "topic_size_value": request.topic_size_value,
             },
             task_name="Topic Modeling",
         )
@@ -601,8 +596,6 @@ async def run_topic_modeling(
         random_seed=random_seed,
         representative_words_count=representative_words_count,
         sample_fractions=request.sample_fractions,
-        topic_size_mode=request.topic_size_mode,
-        topic_size_value=request.topic_size_value,
     )
     analysis_tm.save_task(
         AnalysisTask(
@@ -741,132 +734,6 @@ async def topic_modeling_task_result(
         state="failed",
         message="Topic Modeling analysis failed",
         data=None,
-        metadata=_task_metadata(task_id),
-    )
-
-
-@router.post(
-    "/topic-modeling/tasks/{task_id}/result",
-    response_model=TopicModelingResponse,
-)
-async def update_topic_modeling_task_result(
-    task_id: str,
-    updates: TopicModelingResultUpdateRequest,
-    current_user: dict = Depends(get_current_user),
-):
-    """Re-aggregate a completed exact topic-modeling task without refitting.
-
-    Flow:
-    - Resolve authentication and request parameters from FastAPI dependencies.
-    - Delegate validation, manager calls, artifacts, or state changes to the owning helper.
-    - Shape the response payload or raise the HTTP error the client should see.
-
-    Used by:
-    - Frontend and API clients through the FastAPI POST /topic-modeling/tasks/{task_id}/result route because they need this unit's "Re-aggregate a completed exact topic-modeling task without refitting" behavior.
-    """
-    user_id = current_user["id"]
-    workspace_id = workspace_manager.get_current_workspace_id(user_id)
-    if not workspace_id:
-        raise NoActiveWorkspaceError("No active workspace selected")
-    task = await _require_completed_topic_task(user_id, workspace_id, task_id)
-    task_manager = get_task_manager(user_id)
-    if not task.result:
-        raise ResourceConflictError(
-            "Topic modeling task is not completed",
-        )
-    request_payload = task.request.model_dump()
-    if request_payload.get("topic_size_mode") != "exact":
-        raise ResourceConflictError(
-            "Only exact topic modeling results can be re-aggregated",
-        )
-    requested_topic_count = updates.topic_size_value
-    if isinstance(requested_topic_count, bool) or not isinstance(
-        requested_topic_count, int
-    ):
-        raise InvalidInputError(
-            "topic_size_value must be an integer",
-        )
-    payload = _task_result_payload(task)
-    artifacts = _topic_artifacts_from_task(task)
-    exact_artifact_path = artifacts.get("exact_reduction_artifact_path")
-    if not isinstance(exact_artifact_path, str) or not exact_artifact_path:
-        raise ResourceConflictError(
-            "This exact topic-modeling result cannot be re-aggregated",
-        )
-    node_artifacts = artifacts.get("nodes") or []
-    node_infos = [
-        {
-            "node_id": node_payload.get("node_id"),
-            "node_name": node_payload.get("node_name"),
-            "text_column": node_payload.get("text_column"),
-            "original_columns": node_payload.get("original_columns") or [],
-        }
-        for node_payload in node_artifacts
-        if isinstance(node_payload, dict)
-    ]
-    if len(node_infos) != len(node_artifacts):
-        raise InternalServiceError(
-            "Topic modeling artifact manifest is invalid",
-        )
-    try:
-        updated_payload = reaggregate_exact_topic_modeling_result(
-            artifact_path=exact_artifact_path,
-            existing_artifacts=artifacts,
-            node_infos=node_infos,
-            topic_size_value=requested_topic_count,
-            representative_words_count=int(
-                request_payload.get("representative_words_count") or 5
-            ),
-            random_seed=int(request_payload.get("random_seed") or 42),
-        )
-    except ValueError as exc:
-        raise InvalidInputError(str(exc)) from exc
-    except Exception as exc:  # pragma: no cover
-        raise InternalServiceError(
-            f"Failed to re-aggregate exact topic model: {exc}",
-        ) from exc
-    existing_meta = cast(
-        dict[str, object],
-        payload.get("meta") if isinstance(payload.get("meta"), dict) else {},
-    )
-    updated_meta = cast(
-        dict[str, object],
-        updated_payload.get("meta")
-        if isinstance(updated_payload.get("meta"), dict)
-        else {},
-    )
-    payload.update(
-        {
-            "topics": updated_payload.get("topics", []),
-            "corpus_sizes": updated_payload.get("corpus_sizes", []),
-            "per_corpus_topic_counts": updated_payload.get(
-                "per_corpus_topic_counts", []
-            ),
-            "artifacts": updated_payload.get("artifacts", artifacts),
-            "meta": {
-                **existing_meta,
-                **updated_meta,
-                "topic_size_mode": "exact",
-                "topic_size_value": requested_topic_count,
-                "representative_words_count": int(
-                    request_payload.get("representative_words_count") or 5
-                ),
-            },
-        }
-    )
-
-    # Leave `task.request.topic_size_value` as the original rerun target —
-    # the post-fit slider is a display-only re-aggregation, decoupled from
-    # the "Target Topic Number" parameter that drives rerun. The new value
-    # is recorded in `payload.meta.topic_size_value` (above) so the frontend
-    # can restore the slider position on reload.
-    task.result = GenericAnalysisResult(payload)
-    task_manager.save_task(task)
-
-    return TopicModelingResponse(
-        state="successful",
-        message="Topic Modeling analysis updated",
-        data=TopicModelingData.model_validate(payload),
         metadata=_task_metadata(task_id),
     )
 

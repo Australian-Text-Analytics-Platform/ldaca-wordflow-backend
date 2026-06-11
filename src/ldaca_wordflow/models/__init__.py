@@ -70,7 +70,7 @@ from .topic_modeling import TopicModelingDetachRequest, TopicModelingDetachRespo
 from .topic_modeling import TopicModelingDetachedNode
 from .topic_modeling import TopicModelingEmbeddingCacheClearResponse
 from .topic_modeling import TopicModelingEmbeddingCacheSizeResponse, TopicModelingRequest
-from .topic_modeling import TopicModelingResponse, TopicModelingResultUpdateRequest
+from .topic_modeling import TopicModelingResponse
 from .workspace import CurrentWorkspaceResponse, NodeDocumentColumnUpdateRequest
 from .workspace import NodeTokenizationPreferenceRequest, SetCurrentWorkspaceResponse
 from .workspace import TokenizerModelsResponse, WorkspaceActionResponse, WorkspaceCreateRequest

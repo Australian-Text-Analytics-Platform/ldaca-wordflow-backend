@@ -10,8 +10,6 @@ Flow: normalize inputs, delegate to the owning backend state or service boundary
     return serialized values or existing domain errors to callers.
 """
 
-from typing import Literal
-
 from pydantic import Field
 
 from ..models import BaseAnalysisRequest
@@ -35,10 +33,11 @@ class TopicModelingRequest(BaseAnalysisRequest):
         None, description="Map of node_id to column name"
     )
     min_topic_size: int = Field(
-        5,
+        10,
         description=(
-            "Kept for backwards compatibility. Ignored when topic_size_mode is "
-            "'target' or 'exact' — computed from topic_size_value in those modes."
+            "HDBSCAN minimum cluster size: the smallest group of chunks that "
+            "counts as a topic. The number of topics is whatever HDBSCAN yields "
+            "for this value (the only native topic-count control)."
         ),
     )
     random_seed: int = Field(
@@ -53,18 +52,4 @@ class TopicModelingRequest(BaseAnalysisRequest):
             "One sampling fraction (0 < f ≤ 1) per corpus in node_ids order. "
             "None for a corpus means no sampling. Sampling uses random_seed."
         ),
-    )
-    topic_size_mode: Literal["target", "min", "exact"] | None = Field(
-        "target",
-        description=(
-            "'target': min_topic_size = max(2, n_eff // (topic_size_value * 10)). "
-            "'min': topic_size_value used directly as min_topic_size. "
-            "'exact': min_topic_size = max(5, int(target_min_topic_size * 0.75)) "
-            "where target_min_topic_size = max(2, n_eff // (topic_size_value * 10)), "
-            "then reduce_topics(nr_topics=topic_size_value) post-fit."
-        ),
-    )
-    topic_size_value: int | None = Field(
-        25,
-        description="Numeric parameter interpreted according to topic_size_mode.",
     )

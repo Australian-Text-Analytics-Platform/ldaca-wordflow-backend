@@ -85,19 +85,32 @@ def test_start_model_prefetch_spawns_daemon_thread(monkeypatch, tmp_path):
     assert isinstance(prefetch_names, list)
 
 
-def test_topic_prefetch_loads_native_sentence_transformer(monkeypatch):
-    calls: list[tuple[str, str | None]] = []
+def test_topic_prefetch_loads_candle_embedder(monkeypatch):
+    calls: list[str | None] = []
 
-    class FakeSentenceTransformer:
-        def __init__(self, model_id: str, *, revision: str | None = None) -> None:
-            calls.append((model_id, revision))
+    def fake_prefetch_embedder(repo_id=None):
+        calls.append(repo_id)
 
     monkeypatch.setitem(
         __import__("sys").modules,
-        "sentence_transformers",
-        SimpleNamespace(SentenceTransformer=FakeSentenceTransformer),
+        "polars_text._internal",
+        SimpleNamespace(prefetch_embedder=fake_prefetch_embedder),
     )
 
     mp._prefetch_topic_embedder()
 
-    assert calls == [(mp._TOPIC_EMBEDDER_REPO_ID, mp._TOPIC_EMBEDDER_REVISION)]
+    assert calls == [mp._TOPIC_EMBEDDER_REPO_ID]
+
+
+def test_topic_prefetch_does_not_raise_on_failure(monkeypatch):
+    def boom(repo_id=None):
+        raise RuntimeError("offline, no cache")
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "polars_text._internal",
+        SimpleNamespace(prefetch_embedder=boom),
+    )
+
+    # Best-effort prefetch must swallow failures.
+    mp._prefetch_topic_embedder()

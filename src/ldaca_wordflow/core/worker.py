@@ -441,8 +441,6 @@ def topic_modeling_task(
     progress_queue: Any | None = None,
     embedding_cache_dir: str | None = None,
     sample_fractions: list[float | None] | None = None,
-    topic_size_mode: str | None = "target",
-    topic_size_value: int | None = 25,
 ) -> dict[str, Any]:
     """Run the topic modeling task background job submitted by API routes.
 
@@ -471,8 +469,6 @@ def topic_modeling_task(
         progress_callback=cb,
         embedding_cache_dir=embedding_cache_dir,
         sample_fractions=sample_fractions,
-        topic_size_mode=topic_size_mode,
-        topic_size_value=topic_size_value,
     )
 
 

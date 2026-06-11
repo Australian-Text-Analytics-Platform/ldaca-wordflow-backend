@@ -90,8 +90,16 @@ The analysis routes live under `api/workspaces/analyses/`.
   detaches, or materializes quote results.
 - Sequential analysis runs synchronously over lazy Polars expressions for time
   and group buckets, with selected-period detach.
-- Topic modeling submits BERTopic/embedding work to workers and uses the
-  per-user DuckDB embedding cache.
+- Topic modeling runs entirely through the Rust `polars-text` pipeline. The
+  worker builds a single-column frame of sampled documents and calls
+  `pl.col(...).text.topic_modeling(...)`, which chunks the text, embeds chunks
+  with an in-process candle model, reduces with PaCMAP, clusters with HDBSCAN,
+  and labels topics with c-TF-IDF. The expression returns one struct per
+  document (dominant topic, per-document topic distribution, replicated topic
+  keywords/coordinates, and global counts); the worker rolls these up into the
+  topic/document payload. Embedding runs in-process in Rust with its own
+  content-hash cache, so there is no Python-side embedding cache for topic
+  modeling.
 - AI annotation calls OpenAI structured-output classification and can detach
   saved labels into workspace data.
 - Standalone tokenization routes are not exposed. Tokenizer model inventory is
@@ -134,7 +142,7 @@ Tokenisation and embeddings are performance caches rather than workspace
 artifacts. Token specs live in `Node.tokenization`; Wordflow resolves a per-user
 `tokens.duckdb` path, then delegates cache population and reuse to
 `pl.col(...).text.tokenize(..., cache=path)`. The resulting token structs are
-attached to temporary LazyFrames by token-mode concordance, token frequencies,
-and topic-modeling label preparation. Embedding vectors are stored in a
-per-user `embeddings.duckdb` file keyed by model, provider, and content hash.
-Missing cache files are recreated from schema on first use.
+attached to temporary LazyFrames by token-mode concordance and token
+frequencies. Topic modeling no longer uses a Python-side embedding cache: its
+embeddings are generated and cached in-process by the Rust `polars-text`
+pipeline. Missing token cache files are recreated from schema on first use.

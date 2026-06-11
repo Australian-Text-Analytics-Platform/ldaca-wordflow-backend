@@ -24,7 +24,6 @@ classifiers = [
 ]
 dependencies = [
     "aiosqlite>=0.21.0",
-    "bertopic>=0.17.3",
     "duckdb>=1.4.0",
     "fastapi-users[sqlalchemy]>=14.0.1",        # Includes fastapi, python-multipart, sqlalchemy
     "fastapi[standard]>=0.135.0",               # Includes uvicorn, pydantic, starlette
@@ -33,7 +32,6 @@ dependencies = [
     "google-auth-oauthlib>=1.2.2",              # Includes google-auth
     "httpx>=0.27.0",
     "pydantic-settings>=2.0.0",
-    "orjson>=3.10.0",
     "psutil>=6.1.0",                            # Process management for proper cleanup of child processes
     "docworkspace>=0.2.8",
     "polars-text>=0.3.0",
@@ -42,7 +40,7 @@ dependencies = [
     "tbb>=2022.3.1 ; sys_platform != 'darwin'",
     "openai>=2.26.0",
     "spacy>=3.7.0",
-    "sentence-transformers>=0.4.1",
+    "scikit-learn>=1.5.0",          # ENGLISH_STOP_WORDS for the Rust c-TF-IDF stoplist
 ]
 
 [project.optional-dependencies]
