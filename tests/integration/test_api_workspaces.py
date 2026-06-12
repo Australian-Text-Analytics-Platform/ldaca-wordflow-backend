@@ -1136,6 +1136,56 @@ class TestWorkspaceAPI:
         assert payload["has_null"] is True
         assert payload["unique_count"] == 5
 
+    async def test_unique_values_endpoint_returns_topic_ids_for_tmdist(
+        self, authenticated_client
+    ):
+        """Topic-distribution (tmdist) columns return distinct topic ids."""
+        import polars as pl
+
+        from ldaca_wordflow.core.docworkspace_data_types import (
+            TM_DISTRIBUTION_POLARS_DTYPE,
+        )
+
+        source_df = pl.DataFrame(
+            {
+                "TOPIC_distribution": [
+                    [
+                        {"topic_id": 0, "proportion": 0.7},
+                        {"topic_id": 1, "proportion": 0.3},
+                        {"topic_id": 2, "proportion": 0.0},
+                    ],
+                    [
+                        {"topic_id": 0, "proportion": 0.0},
+                        {"topic_id": 1, "proportion": 1.0},
+                        {"topic_id": 2, "proportion": 0.0},
+                    ],
+                ]
+            },
+            schema={"TOPIC_distribution": TM_DISTRIBUTION_POLARS_DTYPE},
+        ).lazy()
+
+        class DummyNode:
+            def __init__(self):
+                self.data = source_df
+
+        with patch(
+            "ldaca_wordflow.api.workspaces.nodes.workspace_manager.get_current_workspace"
+        ) as mock_active_ws:
+            mock_workspace = Mock()
+            mock_workspace.nodes = {"test-node": DummyNode()}
+            mock_active_ws.return_value = mock_workspace
+
+            response = await authenticated_client.get(
+                "/api/workspaces/nodes/test-node/columns/TOPIC_distribution/unique"
+            )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["column_name"] == "TOPIC_distribution"
+        assert payload["unique_values"] == [0, 1, 2]
+        assert payload["unique_count"] == 3
+        assert payload["has_null"] is False
+
     async def test_cast_node_unsupported_type(self, authenticated_client):
         """Test that unsupported casting types raise errors"""
         import polars as pl

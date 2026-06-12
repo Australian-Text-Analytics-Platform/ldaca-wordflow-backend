@@ -237,3 +237,58 @@ async def test_filter_preview_list_string_in_does_not_match_null_rows(
     payload = response.json()
     assert payload["pagination"]["total_rows"] == 0
     assert payload["data"] == []
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_filter_preview_tmdist_topic_proportion(authenticated_client, monkeypatch):
+    """A TMDist column filters by one topic's proportion vs a threshold."""
+    from ldaca_wordflow.core.docworkspace_data_types import TM_DISTRIBUTION_POLARS_DTYPE
+
+    df = pl.DataFrame(
+        {
+            "value": [0, 1, 2, 3],
+            "TOPIC_distribution": [
+                [{"topic_id": 0, "proportion": 0.9}, {"topic_id": 1, "proportion": 0.1}],
+                [{"topic_id": 1, "proportion": 0.6}, {"topic_id": 0, "proportion": 0.4}],
+                [{"topic_id": 1, "proportion": 0.04}],
+                [],
+            ],
+        },
+        schema_overrides={"TOPIC_distribution": TM_DISTRIBUTION_POLARS_DTYPE},
+    )
+
+    class DummyNode:
+        def __init__(self):
+            self.data = df.lazy()
+            self.name = "sample"
+
+    dummy_ws = DummyWorkspace({"node456": DummyNode()})
+    monkeypatch.setattr(
+        nodes_api.workspace_manager, "get_current_workspace_id", lambda user_id: "ws-tmdist"
+    )
+    monkeypatch.setattr(
+        nodes_api.workspace_manager, "get_current_workspace", lambda user_id: dummy_ws
+    )
+
+    response = await authenticated_client.post(
+        "/api/workspaces/nodes/node456/filter/preview",
+        params={"page": 1, "page_size": 10},
+        json={
+            "conditions": [
+                {
+                    "column": "TOPIC_distribution",
+                    "operator": "gte",
+                    "value": {"topic_id": 1, "threshold": 0.05},
+                    "dataType": "tmdist",
+                },
+            ],
+            "logic": "and",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    # Rows where topic 1 >= 5%: value 0 (10%) and value 1 (60%).
+    assert payload["pagination"]["total_rows"] == 2
+    assert [row["value"] for row in payload["data"]] == [0, 1]

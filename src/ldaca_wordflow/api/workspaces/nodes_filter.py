@@ -18,6 +18,7 @@ import polars as pl
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from ...core.auth import get_current_user
+from ...core.docworkspace_data_types import TM_DISTRIBUTION_POLARS_DTYPE
 from ...models import FilterPreviewResponse, FilterRequest, NodeOperationResponse, PaginationInfo
 from ...core.exceptions import InvalidInputError
 from .utils import (
@@ -35,6 +36,69 @@ from .utils import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/workspaces", tags=["nodes"])
+
+# Comparison operators supported for the TMDist topic-proportion filter.
+_TMDIST_OPERATORS = {"gt", "gte", "lt", "lte", "eq", "ne"}
+
+
+def _tmdist_proportion_expr(column: str, topic_id: int) -> pl.Expr:
+    """Expr giving one topic's proportion within a TMDist (distribution) column.
+
+    Maps each ``{topic_id, proportion}`` struct in the per-row list to its
+    proportion when it matches ``topic_id`` (else 0), then reduces with
+    ``list.max`` so a topic absent from the row's distribution reads as 0.
+
+    Called by: ``_build_filter_expression`` for TMDist topic-proportion filters.
+    """
+    return (
+        pl.col(column)
+        .list.eval(
+            pl.when(pl.element().struct.field("topic_id") == int(topic_id))
+            .then(pl.element().struct.field("proportion"))
+            .otherwise(0.0)
+        )
+        .list.max()
+        .fill_null(0.0)
+    )
+
+
+def _tmdist_condition_expr(condition: Any) -> pl.Expr:
+    """Build a boolean predicate for one TMDist filter condition.
+
+    The condition value is ``{topic_id, threshold}`` where ``threshold`` is a
+    proportion in [0, 1]; ``operator`` is a numeric comparison. Semantics:
+    "keep rows where topic <topic_id>'s proportion <op> <threshold>".
+
+    Called by: ``_build_filter_expression`` when the target column is a TMDist
+    (topic-distribution) column.
+    """
+    raw = condition.value
+    if not isinstance(raw, dict):
+        raise InvalidInputError(
+            "Topic-distribution filter value must be {topic_id, threshold}"
+        )
+    try:
+        topic_id = int(raw["topic_id"])
+        threshold = float(raw["threshold"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise InvalidInputError(
+            "Topic-distribution filter needs an integer topic_id and numeric threshold"
+        ) from exc
+    op = condition.operator
+    if op not in _TMDIST_OPERATORS:
+        raise InvalidInputError(f"Unsupported topic-distribution operator: {op}")
+    proportion = _tmdist_proportion_expr(condition.column, topic_id)
+    if op == "gt":
+        return proportion > threshold
+    if op == "gte":
+        return proportion >= threshold
+    if op == "lt":
+        return proportion < threshold
+    if op == "lte":
+        return proportion <= threshold
+    if op == "ne":
+        return proportion != threshold
+    return proportion == threshold
 
 
 def _build_filter_expression(
@@ -54,11 +118,17 @@ def _build_filter_expression(
         column_expr = pl.col(condition.column)
         column_dtype = schema_map.get(condition.column)
         is_string_list_column = _is_string_list_dtype(column_dtype)
+        is_tmdist_column = column_dtype == TM_DISTRIBUTION_POLARS_DTYPE
         op = condition.operator
         raw_value = condition.value
         expr = None
 
-        if op in {
+        if is_tmdist_column:
+            # Topic-distribution column: compare one topic's proportion against
+            # a threshold (value = {topic_id, threshold}). Handled before the
+            # generic scalar comparisons, which can't operate on list-of-struct.
+            expr = _tmdist_condition_expr(condition)
+        elif op in {
             "eq", "equals", "ne", "gt", "greater_than", "gte", "lt", "less_than", "lte",
         }:
             value = _coerce_scalar(_parse_temporal(raw_value))

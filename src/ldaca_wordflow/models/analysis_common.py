@@ -225,6 +225,11 @@ class DetachNodeOption(BaseModel):
     text_column: Optional[str] = None
     available_columns: list[str]
     disabled_columns: list[str] = Field(default_factory=list)
+    # Columns to tick by default when the detach dialog opens. When None the
+    # client falls back to its per-tool default (e.g. select-all). Topic
+    # modeling sets this to its generated columns so source columns start
+    # unticked, matching concordance/quotation.
+    default_selected_columns: Optional[list[str]] = None
 
 
 

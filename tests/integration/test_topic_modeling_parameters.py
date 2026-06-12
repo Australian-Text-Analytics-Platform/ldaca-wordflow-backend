@@ -265,7 +265,7 @@ async def test_topic_modeling_detach_keeps_topic_meaning_only_on_support_node(
         json={
             "node_ids": [source_node.id],
             # The topic column is now an explicit, default-selected choice.
-            "selected_columns": {source_node.id: ["document", "TOPIC_topic"]},
+            "selected_columns": {source_node.id: ["document", "TOPIC_top1"]},
         },
     )
 
@@ -289,7 +289,7 @@ async def test_topic_modeling_detach_keeps_topic_meaning_only_on_support_node(
     detached_df = detached_workspace_node.data.collect().sort("document")
     assert detached_workspace_node.name == "topic_source_topic_sampled_fr_0_5_rs_42"
     assert detached_df["document"].to_list() == ["beta gamma", "delta epsilon"]
-    assert detached_df["TOPIC_topic"].to_list() == [0, 1]
+    assert detached_df["TOPIC_top1"].to_list() == [0, 1]
 
     graph_response = await authenticated_client.get("/api/workspaces/graph")
     assert graph_response.status_code == 200, graph_response.text
@@ -313,7 +313,7 @@ async def test_topic_modeling_detach_keeps_topic_meaning_only_on_support_node(
     )
 
     assert "TOPIC_topic_meaning" not in detached_schema
-    assert support_schema["TOPIC_topic_meaning"] in {"list_string", "List(String)"}
+    assert support_schema["TOPIC_topic_meaning"] in {"list[string]", "List(String)"}
     assert set(support_schema) == {"TOPIC_topic", "TOPIC_topic_meaning"}
 
 
@@ -424,7 +424,7 @@ async def test_topic_modeling_detach_survives_artifact_cleanup(
         json={
             "node_ids": [source_node.id],
             # The topic column is now an explicit, default-selected choice.
-            "selected_columns": {source_node.id: ["document", "TOPIC_topic"]},
+            "selected_columns": {source_node.id: ["document", "TOPIC_top1"]},
         },
     )
     assert detach_response.status_code == 200, detach_response.text
@@ -445,7 +445,7 @@ async def test_topic_modeling_detach_survives_artifact_cleanup(
     # scanning the now-gone artifact paths.
     detached_df = workspace.nodes[detached_node_id].data.collect().sort("document")
     assert detached_df["document"].to_list() == ["beta gamma", "delta epsilon"]
-    assert detached_df["TOPIC_topic"].to_list() == [0, 1]
+    assert detached_df["TOPIC_top1"].to_list() == [0, 1]
 
     meanings_df = workspace.nodes[meanings_node_id].data.collect().sort("TOPIC_topic")
     assert meanings_df["TOPIC_topic"].to_list() == [0, 1]
@@ -581,3 +581,157 @@ async def test_topic_modeling_detach_with_meanings_override_replaces_meanings(
         meanings_path.parent.glob("topic_meanings_override_override_*.parquet")
     )
     assert len(override_files) == 1
+
+
+def _save_distribution_task(user_id, workspace_id, source_node, assignments_path, meanings_path):
+    """Persist a completed topic task whose assignment parquet carries a soft
+    ``TOPIC_topic_distribution`` column, for the distribution-filter tests."""
+    payload = {
+        "topics": [
+            {
+                "id": 0,
+                "label": "alpha",
+                "representative_words": ["alpha"],
+                "size": [2],
+                "total_size": 2,
+                "x": 0.0,
+                "y": 0.0,
+            },
+            {
+                "id": 1,
+                "label": "beta",
+                "representative_words": ["beta"],
+                "size": [2],
+                "total_size": 2,
+                "x": 1.0,
+                "y": 1.0,
+            },
+        ],
+        "corpus_sizes": [4],
+        "artifacts": {
+            "version": 1,
+            "topic_meanings_parquet_path": str(meanings_path),
+            "nodes": [
+                {
+                    "node_id": source_node.id,
+                    "node_name": source_node.name,
+                    "text_column": "document",
+                    "original_columns": ["document", "source"],
+                    "assignments_parquet_path": str(assignments_path),
+                }
+            ],
+        },
+    }
+    task_id = "completed-distribution-task"
+    get_task_manager(user_id).save_task(
+        AnalysisTask(
+            task_id=task_id,
+            user_id=user_id,
+            workspace_id=workspace_id,
+            request=AnalysisTopicModelingRequest(
+                node_ids=[source_node.id],
+                node_columns={source_node.id: "document"},
+                min_topic_size=5,
+                random_seed=42,
+                representative_words_count=5,
+            ),
+            status=AnalysisStatus.COMPLETED,
+            result=GenericAnalysisResult(payload),
+        )
+    )
+    return task_id
+
+
+def _distribution_fixture(workspace, tmp_path):
+    """Build a 4-row source node + assignment parquet with known distributions.
+
+    Row topic-1 proportions: 0.10, 0.60, 0.04, 0.00 — so "topic 1 >= 5%" keeps
+    rows 0 and 1.
+    """
+    source_node = Node(
+        data=pl.DataFrame(
+            {
+                "document": ["d0", "d1", "d2", "d3"],
+                "source": ["a", "b", "c", "d"],
+            }
+        ).lazy(),
+        name="dist_source",
+        workspace=workspace,
+        operation="test_setup",
+        parents=[],
+    )
+    workspace.add_node(source_node)
+
+    assignments_path = tmp_path / "dist_assignments.parquet"
+    pl.DataFrame(
+        {
+            "__row_nr__": [0, 1, 2, 3],
+            "TOPIC_topic": [0, 1, 0, -1],
+            "TOPIC_topic_distribution": [
+                [{"topic_id": 0, "proportion": 0.9}, {"topic_id": 1, "proportion": 0.1}],
+                [{"topic_id": 1, "proportion": 0.6}, {"topic_id": 0, "proportion": 0.4}],
+                [{"topic_id": 0, "proportion": 0.96}, {"topic_id": 1, "proportion": 0.04}],
+                [],
+            ],
+        },
+        schema={
+            "__row_nr__": pl.Int64,
+            "TOPIC_topic": pl.Int64,
+            "TOPIC_topic_distribution": pl.List(
+                pl.Struct({"topic_id": pl.Int64, "proportion": pl.Float64})
+            ),
+        },
+    ).write_parquet(assignments_path)
+
+    meanings_path = tmp_path / "dist_meanings.parquet"
+    pl.DataFrame(
+        {"TOPIC_topic": [0, 1], "TOPIC_topic_meaning": [["alpha"], ["beta"]]},
+        schema={"TOPIC_topic": pl.Int64, "TOPIC_topic_meaning": pl.List(pl.String)},
+    ).write_parquet(meanings_path)
+    return source_node, assignments_path, meanings_path
+
+
+
+
+@pytest.mark.asyncio
+async def test_topic_modeling_detach_emits_top1_and_distribution_columns(
+    authenticated_client, workspace_id, tmp_path
+):
+    """Detaching with both generated columns selected yields TOPIC_top1 (Int)
+    and TOPIC_distribution (TMDist: list[struct{topic_id, proportion}])."""
+    user_id = "test"
+    workspace = workspace_manager.get_current_workspace(user_id)
+    assert workspace is not None
+    source_node, assignments_path, meanings_path = _distribution_fixture(workspace, tmp_path)
+    task_id = _save_distribution_task(
+        user_id, workspace_id, source_node, assignments_path, meanings_path
+    )
+
+    response = await authenticated_client.post(
+        f"/api/workspaces/topic-modeling/tasks/{task_id}/detach",
+        json={
+            "node_ids": [source_node.id],
+            "selected_columns": {
+                source_node.id: ["document", "TOPIC_top1", "TOPIC_distribution"],
+            },
+        },
+    )
+    assert response.status_code == 200, response.text
+    detached_node_id = (
+        response.json().get("data", {}).get("detached_nodes", [{}])[0].get("new_node_id")
+    )
+    assert detached_node_id
+    detached = workspace.nodes[detached_node_id].data.collect()
+    assert "TOPIC_top1" in detached.columns
+    assert "TOPIC_distribution" in detached.columns
+    assert detached.schema["TOPIC_top1"] == pl.Int64
+    # TMDist canonical physical dtype.
+    assert detached.schema["TOPIC_distribution"] == pl.List(
+        pl.Struct({"topic_id": pl.Int64, "proportion": pl.Float64})
+    )
+    # Row 0's distribution round-trips intact.
+    row0 = detached.sort("document").row(0, named=True)
+    assert row0["TOPIC_distribution"] == [
+        {"topic_id": 0, "proportion": 0.9},
+        {"topic_id": 1, "proportion": 0.1},
+    ]

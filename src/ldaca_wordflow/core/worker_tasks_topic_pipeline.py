@@ -285,10 +285,16 @@ def _run_rust_topic_modeling(
         .unnest("__topic__")
     )
 
-    documents = [
-        {"doc_index": index, "dominant_topic": int(topic)}
-        for index, topic in enumerate(result["dominant_topic"].to_list())
-    ]
+    # ``topic_distribution`` is the per-document soft assignment: a list of
+    # ``{topic_id, proportion}`` (proportions sum to ~1 across the doc's
+    # chunks). It powers the Filter-tab tmdist function ("keep docs where
+    # topic N proportion >= x"), so it is carried through to the assignment
+    # parquet rather than dropped. Each document's distribution is padded to
+    # include *every* non-negative topic id (0.0 when the doc has no chunk in
+    # that topic) so the persisted column has a complete, uniform key set the
+    # frontend can render and offer as filter options.
+    dominant_list = result["dominant_topic"].to_list()
+    distribution_list = result["topic_distribution"].to_list()
 
     topics_frame = (
         result.filter(pl.col("dominant_topic") >= 0)
@@ -311,6 +317,33 @@ def _run_rust_topic_modeling(
         }
         for row in topics_frame.iter_rows(named=True)
     ]
+
+    all_topic_ids = sorted(topic["id"] for topic in topics)
+    documents = []
+    for index, topic in enumerate(dominant_list):
+        present = {
+            int(entry["topic_id"]): float(entry["proportion"])
+            for entry in (distribution_list[index] or [])
+        }
+        # Keep any outlier (-1) entry the pipeline emitted, then pad every
+        # non-negative topic id (0.0 if the doc has no presence there), sorted.
+        padded = {
+            topic_id: proportion
+            for topic_id, proportion in present.items()
+            if topic_id < 0
+        }
+        for topic_id in all_topic_ids:
+            padded[topic_id] = present.get(topic_id, 0.0)
+        documents.append(
+            {
+                "doc_index": index,
+                "dominant_topic": int(topic),
+                "topic_distribution": [
+                    {"topic_id": topic_id, "proportion": padded[topic_id]}
+                    for topic_id in sorted(padded)
+                ],
+            }
+        )
 
     n_chunks = int(result["n_chunks"][0]) if result.height else 0
 

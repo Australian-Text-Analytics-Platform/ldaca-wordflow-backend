@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 from ..api.workspaces.analyses.generated_columns import (
     TOPIC_COLUMN,
+    TOPIC_DISTRIBUTION_COLUMN,
     TOPIC_MEANING_COLUMN,
 )
 from .worker_tasks_topic_pipeline import (
@@ -56,6 +57,44 @@ def _dominant_topics_by_doc_index(
             raw = doc.get("dominant_topic", -1)
             dominant[doc_index] = int(raw) if isinstance(raw, (int, np.integer)) else -1
     return dominant
+
+
+def _distribution_by_doc_index(
+    documents: list[dict[str, Any]], total_docs: int
+) -> list[list[dict[str, Any]]]:
+    """Flatten Rust ``documents[]`` into per-doc topic-distribution lists.
+
+    Mirrors :func:`_dominant_topics_by_doc_index` but extracts the soft
+    ``topic_distribution`` (``[{topic_id, proportion}, ...]``) so it can be
+    written into the assignment parquet for the detach-time distribution filter.
+    Documents missing a distribution (or out of range) get an empty list, which
+    the filter treats as proportion 0 for every topic.
+
+    Called by:
+    - ``_build_topic_result_payload`` (this module).
+    """
+    distributions: list[list[dict[str, Any]]] = [[] for _ in range(total_docs)]
+    for doc in documents:
+        try:
+            doc_index = int(doc["doc_index"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not (0 <= doc_index < total_docs):
+            continue
+        entries = doc.get("topic_distribution") or []
+        normalized: list[dict[str, Any]] = []
+        for entry in entries:
+            try:
+                normalized.append(
+                    {
+                        "topic_id": int(entry["topic_id"]),
+                        "proportion": float(entry["proportion"]),
+                    }
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+        distributions[doc_index] = normalized
+    return distributions
 
 
 def _build_topic_result_payload(
@@ -90,6 +129,11 @@ def _build_topic_result_payload(
 
     total_docs = sum(int(size) for size in corpus_sizes)
     dominant_by_index = _dominant_topics_by_doc_index(documents, total_docs)
+    distribution_by_index = _distribution_by_doc_index(documents, total_docs)
+    # Polars dtype for the persisted per-row distribution column.
+    distribution_dtype = pl.List(
+        pl.Struct({"topic_id": pl.Int64, "proportion": pl.Float64})
+    )
 
     assignments: list[list[int]] = []
     node_artifacts: list[dict[str, Any]] = []
@@ -98,6 +142,7 @@ def _build_topic_result_payload(
         end = offset + size
         normalized_topics = [int(topic_id) for topic_id in dominant_by_index[offset:end]]
         assignments.append(normalized_topics)
+        corpus_distribution = distribution_by_index[offset:end]
 
         node_id = str(node_infos[idx]["node_id"])
         node_name = str(node_infos[idx].get("node_name") or node_id)
@@ -112,6 +157,11 @@ def _build_topic_result_payload(
             {
                 "__row_nr__": active_corpora_indices[idx],
                 TOPIC_COLUMN: normalized_topics,
+                TOPIC_DISTRIBUTION_COLUMN: pl.Series(
+                    TOPIC_DISTRIBUTION_COLUMN,
+                    corpus_distribution,
+                    dtype=distribution_dtype,
+                ),
             }
         ).with_columns(
             [

@@ -32,7 +32,7 @@ class ColumnSchema(BaseModel):
         description=(
             "JavaScript-compatible type "
             "(string, categorical, integer, float, boolean, datetime, "
-            "list_string, unknown)"
+            "list[string], annotation, tmdist, unknown)"
         ),
     )
 

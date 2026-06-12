@@ -37,6 +37,7 @@ from ...models import (
 from polars_text.models import PREDEFINED_MODELS, predefined_model_records
 
 from .schema_filter import frontend_node_info, project_visible
+from ...core.docworkspace_data_types import TM_DISTRIBUTION_POLARS_DTYPE
 from ...core.exceptions import InternalServiceError, InvalidInputError, NodeNotFoundError, NotFoundError, ValidationError
 from .utils import (
     Node,
@@ -343,6 +344,27 @@ async def get_column_unique_values(
         lazyframe = require_current_workspace(user_id).nodes[node_id].data
         schema = lazyframe.collect_schema()
         schema_map: dict[str, Any] = dict(schema.items())
+        if schema_map.get(column_name) == TM_DISTRIBUTION_POLARS_DTYPE:
+            # Topic-distribution column: return the distinct topic ids so the
+            # filter UI can offer a topic dropdown instead of a free-text id.
+            topic_df = cast(
+                pl.DataFrame,
+                lazyframe.select(
+                    pl.col(column_name).explode().struct.field("topic_id").alias("topic_id")
+                )
+                .unique(maintain_order=True)
+                .collect(),
+            )
+            topic_ids = sorted(
+                {int(value) for value in topic_df.get_column("topic_id").to_list() if value is not None}
+            )
+            return {
+                "column_name": column_name,
+                "unique_count": len(topic_ids),
+                "unique_values": topic_ids,
+                "has_null": False,
+            }
+
         if _is_string_list_dtype(schema_map.get(column_name)):
             unique_df = cast(
                 pl.DataFrame,

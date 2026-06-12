@@ -34,11 +34,48 @@ class Annotation:
     annotation: str
 
 
+@dataclass(frozen=True)
+class TopicProportion:
+    """One ``(topic_id, proportion)`` entry of a topic-distribution value.
+
+    The list-of-these is the logical payload of the ``TMDist`` semantic type
+    (see ``TM_DISTRIBUTION_POLARS_DTYPE``).
+
+    Used by:
+    - backend helpers and tests that construct/inspect topic-distribution
+      values; the wire/storage form is the canonical Polars dtype below.
+    """
+
+    topic_id: int
+    proportion: float
+
+
 ANNOTATION_POLARS_DTYPE = pl.List(
     pl.Struct(
         [
             pl.Field("provider", pl.Utf8),
             pl.Field("annotation", pl.Utf8),
+        ]
+    )
+)
+
+
+# ``TMDist`` — the semantic data type for a per-document topic distribution.
+#
+# Polars has no user-extensible dtype system (unlike pandas' ``ExtensionDtype``):
+# logical types are always backed by a native physical/Arrow type. The idiomatic
+# way to model a domain type is therefore a canonical ``Struct``/``List`` physical
+# dtype plus a semantic name by convention — exactly how ``annotation`` is handled
+# above. ``TMDist`` follows that pattern: it is physically a
+# ``List(Struct{topic_id: Int64, proportion: Float64})`` (proportions sum to ~1
+# across a document's chunks) and is surfaced to the frontend via the logical
+# ``js_type`` string ``"tmdist"`` so the data view can render it as a stacked
+# proportion bar instead of raw struct text.
+TM_DISTRIBUTION_POLARS_DTYPE = pl.List(
+    pl.Struct(
+        [
+            pl.Field("topic_id", pl.Int64),
+            pl.Field("proportion", pl.Float64),
         ]
     )
 )
@@ -69,6 +106,8 @@ class DocWorkspaceDataTypeUtils:
         """
         if polars_dtype == ANNOTATION_POLARS_DTYPE:
             return "annotation"
+        if polars_dtype == TM_DISTRIBUTION_POLARS_DTYPE:
+            return "tmdist"
         if polars_dtype in (
             pl.Int8,
             pl.Int16,
@@ -91,7 +130,7 @@ class DocWorkspaceDataTypeUtils:
         if polars_dtype in (pl.Date, pl.Datetime, pl.Time):
             return "datetime"
         if polars_dtype == pl.List(pl.String) or polars_dtype == pl.List(pl.Utf8):
-            return "list_string"
+            return "list[string]"
 
         cls_obj = getattr(polars_dtype, "__class__", None)
         cls_name = getattr(cls_obj, "__name__", "") if cls_obj else ""

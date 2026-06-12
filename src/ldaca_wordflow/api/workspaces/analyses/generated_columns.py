@@ -167,6 +167,14 @@ def concordance_struct_projection(struct_column: str) -> tuple[pl.Expr, ...]:
 
 TOPIC_COLUMN = "TOPIC_topic"
 TOPIC_MEANING_COLUMN = "TOPIC_topic_meaning"
+# Internal-only column on the per-node assignment parquet holding each row's
+# soft topic distribution (list of {topic_id, proportion}). Used by the
+# detach-time distribution filter; never projected into a detached node.
+TOPIC_DISTRIBUTION_COLUMN = "TOPIC_topic_distribution"
+# User-facing detached-node column names: the dominant ("top 1") topic id and
+# the full soft distribution (rendered as a TMDist proportion bar).
+TOPIC_TOP1_COLUMN = "TOPIC_top1"
+TOPIC_DISTRIBUTION_OUTPUT_COLUMN = "TOPIC_distribution"
 
 QUOTE_EXTRACTION_COLUMN = "QUOTE_extraction"
 QUOTE_SPEAKER_COLUMN = "QUOTE_speaker"

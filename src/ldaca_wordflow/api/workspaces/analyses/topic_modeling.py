@@ -61,11 +61,16 @@ from .cleanup import clear_previous_completed_analysis_task
 from .current_tasks import get_current_task_ids_for_analysis
 from .generated_columns import (
     TOPIC_COLUMN,
+    TOPIC_DISTRIBUTION_COLUMN,
+    TOPIC_DISTRIBUTION_OUTPUT_COLUMN,
     TOPIC_MEANING_COLUMN,
+    TOPIC_TOP1_COLUMN,
     is_tokenization_column_name,
 )
 
 router = APIRouter(prefix="/workspaces", tags=["topic-modeling"])
+
+
 logger = logging.getLogger(__name__)
 
 _TOPIC_SUBMISSION_LOCKS: dict[tuple[str, str], asyncio.Lock] = {}
@@ -761,6 +766,25 @@ def _resolve_topic_column_name(base_name: str, existing_columns: set[str]) -> st
     return f"{candidate}_{idx}"
 
 
+def _resolve_topic_output_columns(original_columns: list[str]) -> tuple[str, str]:
+    """Resolve the detached ``TOPIC_top1`` / ``TOPIC_distribution`` column names.
+
+    Both generated columns are renamed to avoid clashing with source columns
+    (and with each other). Used identically by the detach-options endpoint (to
+    advertise the names) and the detach route (to match the names the client
+    ticked), so they always agree.
+
+    Used by:
+    - ``topic_modeling_detach_options`` and ``detach_topic_modeling``.
+    """
+    taken = set(original_columns)
+    top1_name = _resolve_topic_column_name(TOPIC_TOP1_COLUMN, taken)
+    dist_name = _resolve_topic_column_name(
+        TOPIC_DISTRIBUTION_OUTPUT_COLUMN, taken | {top1_name}
+    )
+    return top1_name, dist_name
+
+
 @router.get(
     "/topic-modeling/tasks/{task_id}/detach-options",
     response_model=TopicModelingDetachOptionsResponse,
@@ -809,18 +833,17 @@ async def topic_modeling_detach_options(
             for c in source_data.collect_schema().names()
             if not is_tokenization_column_name(c)
         ]
-        topic_column_name = _resolve_topic_column_name(
-            TOPIC_COLUMN, set(original_columns)
-        )
+        topic_top1_name, topic_dist_name = _resolve_topic_output_columns(original_columns)
         nodes.append(
             TopicModelingDetachNodeOption(
                 node_id=source_node.id,
                 node_name=str(payload.get("node_name") or node_id),
                 text_column=str(payload.get("text_column") or ""),
-                available_columns=[topic_column_name, *original_columns],
-                # The topic column is user-choosable now (default-selected on
-                # the client, deselectable) — nothing is force-disabled.
+                available_columns=[topic_top1_name, topic_dist_name, *original_columns],
+                # The generated topic columns are user-choosable and default-on;
+                # source columns start unticked (matching concordance/quotation).
                 disabled_columns=[],
+                default_selected_columns=[topic_top1_name, topic_dist_name],
             )
         )
 
@@ -962,19 +985,16 @@ async def detach_topic_modeling(
         source_data = source_node.data
 
         original_columns = list(source_data.collect_schema().names())
-        # Resolve the topic column name the same way the detach-options
-        # endpoint does (against the source columns only) so it matches the
-        # name the client ticked in the dialog.
-        topic_column_name = _resolve_topic_column_name(
-            request.topic_column_name or TOPIC_COLUMN,
-            set(original_columns),
-        )
+        # Resolve the two generated output column names the same way the
+        # detach-options endpoint does, so they match what the client ticked.
+        topic_top1_name, topic_dist_name = _resolve_topic_output_columns(original_columns)
         raw_selected = list((request.selected_columns or {}).get(node_id) or [])
-        # The topic column is now user-choosable: include it only when ticked.
+        include_top1 = topic_top1_name in raw_selected
+        include_distribution = topic_dist_name in raw_selected
         # Everything else must be a real source column.
-        include_topic_column = topic_column_name in raw_selected
-        source_selected = [col for col in raw_selected if col != topic_column_name]
-        if not source_selected and not include_topic_column:
+        generated_names = {topic_top1_name, topic_dist_name}
+        source_selected = [col for col in raw_selected if col not in generated_names]
+        if not source_selected and not include_top1 and not include_distribution:
             raise InvalidInputError(
                 f"No columns selected for node {node_id}",
             )
@@ -985,8 +1005,14 @@ async def detach_topic_modeling(
             )
 
         projection = [pl.col(col) for col in source_selected]
-        if include_topic_column:
-            projection.append(pl.col(TOPIC_COLUMN).alias(topic_column_name))
+        if include_top1:
+            projection.append(pl.col(TOPIC_COLUMN).alias(topic_top1_name))
+        if include_distribution:
+            # The persisted distribution column is already the canonical TMDist
+            # physical dtype (List(Struct{topic_id, proportion})); just rename it.
+            projection.append(
+                pl.col(TOPIC_DISTRIBUTION_COLUMN).alias(topic_dist_name)
+            )
         output_lf = assignments_lf.join(
             source_data.with_row_index("__row_nr__"),
             on="__row_nr__",

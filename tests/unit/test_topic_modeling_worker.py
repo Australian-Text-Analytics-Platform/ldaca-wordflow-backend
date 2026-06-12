@@ -132,6 +132,7 @@ def _fake_topic_modeling_expr_factory(
     xs: list[float],
     ys: list[float],
     n_chunks: int,
+    distribution: list[list[dict[str, Any]]] | None = None,
 ):
     """Build a fake ``.text.topic_modeling`` method returning a canned struct.
 
@@ -142,10 +143,25 @@ def _fake_topic_modeling_expr_factory(
     """
 
     n = len(dominant)
+    # Default each row's distribution to a single entry at its dominant topic
+    # (proportion 1.0); outliers (-1) get an empty distribution.
+    dist = distribution
+    if dist is None:
+        dist = [
+            ([{"topic_id": int(t), "proportion": 1.0}] if t >= 0 else [])
+            for t in dominant
+        ]
 
     def _fake(self, **_kwargs):  # noqa: ANN001 - mirrors namespace method shape
         return pl.struct(
             pl.Series("dominant_topic", dominant, dtype=pl.Int32),
+            pl.Series(
+                "topic_distribution",
+                dist,
+                dtype=pl.List(
+                    pl.Struct({"topic_id": pl.Int32, "proportion": pl.Float32})
+                ),
+            ),
             pl.Series("representative_words", words, dtype=pl.List(pl.String)),
             pl.Series("x", xs, dtype=pl.Float32),
             pl.Series("y", ys, dtype=pl.Float32),
@@ -168,6 +184,12 @@ def test_run_rust_topic_modeling_reconstructs_result_dict(monkeypatch):
             xs=[1.0, 1.0, 2.0, 0.0],
             ys=[3.0, 3.0, 4.0, 0.0],
             n_chunks=5,
+            distribution=[
+                [{"topic_id": 0, "proportion": 0.9}, {"topic_id": 1, "proportion": 0.1}],
+                [{"topic_id": 0, "proportion": 1.0}],
+                [{"topic_id": 1, "proportion": 1.0}],
+                [],
+            ],
         ),
     )
 
@@ -182,11 +204,45 @@ def test_run_rust_topic_modeling_reconstructs_result_dict(monkeypatch):
         embedder_model="fake-model",
     )
 
+    # Documents carry both the dominant topic and the soft topic_distribution.
+    # The distribution is padded so every non-negative topic id (here 0 and 1)
+    # appears in every document, with 0.0 where the doc has no presence; this
+    # powers the Filter-tab tmdist function and the dataview bars. The outlier
+    # document (-1) has no non-negative dominant topics of its own but still
+    # gets the full padded key set.
     assert result["documents"] == [
-        {"doc_index": 0, "dominant_topic": 0},
-        {"doc_index": 1, "dominant_topic": 0},
-        {"doc_index": 2, "dominant_topic": 1},
-        {"doc_index": 3, "dominant_topic": -1},
+        {
+            "doc_index": 0,
+            "dominant_topic": 0,
+            "topic_distribution": [
+                {"topic_id": 0, "proportion": pytest.approx(0.9)},
+                {"topic_id": 1, "proportion": pytest.approx(0.1)},
+            ],
+        },
+        {
+            "doc_index": 1,
+            "dominant_topic": 0,
+            "topic_distribution": [
+                {"topic_id": 0, "proportion": pytest.approx(1.0)},
+                {"topic_id": 1, "proportion": pytest.approx(0.0)},
+            ],
+        },
+        {
+            "doc_index": 2,
+            "dominant_topic": 1,
+            "topic_distribution": [
+                {"topic_id": 0, "proportion": pytest.approx(0.0)},
+                {"topic_id": 1, "proportion": pytest.approx(1.0)},
+            ],
+        },
+        {
+            "doc_index": 3,
+            "dominant_topic": -1,
+            "topic_distribution": [
+                {"topic_id": 0, "proportion": pytest.approx(0.0)},
+                {"topic_id": 1, "proportion": pytest.approx(0.0)},
+            ],
+        },
     ]
     # Outlier topic (-1) is excluded; topics are sorted by id and carry the
     # replicated representative words and coordinates.
@@ -236,8 +292,19 @@ def test_run_topic_modeling_task_writes_parquet_and_meaning_lists(
     def fake_run(**_kwargs):
         return _canned_rust_result(
             documents=[
-                {"doc_index": 0, "dominant_topic": 0},
-                {"doc_index": 1, "dominant_topic": 0},
+                {
+                    "doc_index": 0,
+                    "dominant_topic": 0,
+                    "topic_distribution": [{"topic_id": 0, "proportion": 1.0}],
+                },
+                {
+                    "doc_index": 1,
+                    "dominant_topic": 0,
+                    "topic_distribution": [
+                        {"topic_id": 0, "proportion": 0.7},
+                        {"topic_id": 1, "proportion": 0.3},
+                    ],
+                },
             ],
             topics=[
                 {
@@ -266,9 +333,18 @@ def test_run_topic_modeling_task_writes_parquet_and_meaning_lists(
     assignments = pl.read_parquet(tmp_path / "tm_test_topic_assignments_node-1.parquet")
     meanings = pl.read_parquet(tmp_path / "tm_test_topic_meanings.parquet")
 
-    assert assignments.columns == ["__row_nr__", "TOPIC_topic"]
+    # The assignment parquet now carries the per-row soft distribution column
+    # used by the detach-time distribution filter.
+    assert assignments.columns == ["__row_nr__", "TOPIC_topic", "TOPIC_topic_distribution"]
     assert assignments.schema["TOPIC_topic"] == pl.Int64
     assert assignments["TOPIC_topic"].to_list() == [0, 0]
+    assert assignments.schema["TOPIC_topic_distribution"] == pl.List(
+        pl.Struct({"topic_id": pl.Int64, "proportion": pl.Float64})
+    )
+    assert assignments["TOPIC_topic_distribution"].to_list() == [
+        [{"topic_id": 0, "proportion": 1.0}],
+        [{"topic_id": 0, "proportion": 0.7}, {"topic_id": 1, "proportion": 0.3}],
+    ]
     assert meanings.schema["TOPIC_topic_meaning"] == pl.List(pl.String)
     assert meanings.to_dicts() == [
         {"TOPIC_topic": 0, "TOPIC_topic_meaning": ["alpha", "beta", "gamma"]}
