@@ -1,8 +1,8 @@
 """Tests for the workspace analysis-tab sidecar endpoints.
 
 Drive both handlers directly with a monkey-patched ``workspace_manager`` that
-maps workspace_id → a tmp_path, mirroring ``test_ui_state_endpoint.py``. The
-endpoints load/save a JSON sidecar at ``<workspace_dir>/tabs.json``.
+maps workspace_id → a tmp_path. The endpoints load/save a JSON sidecar at
+``<workspace_dir>/tabs.json``.
 """
 
 from __future__ import annotations

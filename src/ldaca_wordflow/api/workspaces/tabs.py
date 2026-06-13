@@ -21,8 +21,8 @@ Endpoints:
         Replaces the file contents with the request body.
 
 Why PUT (not PATCH): the frontend tab store maintains the canonical tab
-structure in memory and writes the whole thing back, mirroring the existing
-``ui_state.json`` sidecar. Full replacement keeps both sides simple and avoids
+structure in memory and writes the whole thing back via a JSON sidecar file.
+Full replacement keeps both sides simple and avoids
 recursive merge logic in the backend.
 
 Used by:
@@ -172,7 +172,7 @@ async def put_workspace_tabs(
 
     Used by the frontend tab store whenever tabs are created, closed, renamed,
     reordered, activated, or wired to a new task id. Full-replacement semantics
-    mirror the ``ui_state.json`` sidecar.
+    write the whole tabs.json sidecar on every change.
     """
     user_id = current_user["id"]
     path = _tabs_path_for(user_id, workspace_id)

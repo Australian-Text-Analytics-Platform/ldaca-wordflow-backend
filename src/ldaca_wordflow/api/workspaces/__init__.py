@@ -11,7 +11,7 @@ Why:
 
 Flow:
 - Create the package-level workspace router consumed by `main.py`.
-- Include lifecycle, node, base, analysis, and UI-state subrouters in one place.
+- Include lifecycle, node, base, analysis, and tabs subrouters in one place.
 - Re-export the workspace manager so existing tests can patch the historical path.
 """
 
@@ -20,8 +20,9 @@ from fastapi import APIRouter
 from ...core.workspace import (
     workspace_manager,
 )
-from . import base, lifecycle, tabs, ui_state
 from . import (
+    base,
+    lifecycle,
     nodes_concat,
     nodes_crud,
     nodes_expression,
@@ -29,6 +30,7 @@ from . import (
     nodes_join,
     nodes_replace,
     nodes_slice,
+    tabs,
 )
 from .analyses import (
     ai_annotation,
@@ -55,7 +57,6 @@ router.include_router(quotation.router)
 router.include_router(concordance.router)
 router.include_router(topic_modeling.router)
 router.include_router(ai_annotation.router)
-router.include_router(ui_state.router)
 router.include_router(tabs.router)
 
 __all__ = ["router", "workspace_manager"]
