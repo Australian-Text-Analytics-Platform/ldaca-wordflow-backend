@@ -32,17 +32,6 @@ async def get_json(client: AsyncClient, path: str):
     return await client.get(path)
 
 
-async def get_current_task_id(client: AsyncClient, workspace_id: str, analysis: str):
-    """Fetch the current task id for a given analysis tab."""
-    slug = analysis.replace("_", "-")
-    response = await client.get(f"/api/workspaces/{slug}/tasks/current")
-    if response.status_code != 200:
-        return None
-    payload = response.json()
-    task_ids = payload.get("task_ids") or []
-    return task_ids[0] if task_ids else None
-
-
 def assert_analysis_record_structure(record_dict: dict, expected_task: str):
     """Assert that a record dict has the expected structure."""
     required_keys = {"task", "saved_at", "request", "result"}
@@ -70,9 +59,14 @@ def _simulate_token_frequency_completion(workspace_id: str):
     """Run token frequencies synchronously and persist the result via TaskManager."""
 
     task_manager = get_task_manager("test")
-    task_ids = task_manager.get_current_task_ids("token_frequencies")
-    assert task_ids
-    task = task_manager.get_task(task_ids[0])
+    token_tasks = [
+        task
+        for task in task_manager.get_all_tasks()
+        if getattr(task, "workspace_id", None) == workspace_id
+    ]
+    token_tasks.sort(key=lambda task: task.updated_at or task.created_at, reverse=True)
+    assert token_tasks
+    task = token_tasks[0]
     assert task is not None
 
     req = task.request.model_dump() if hasattr(task.request, "model_dump") else {}
@@ -124,8 +118,7 @@ def _list_analysis_records(user_id: str, workspace_id: str, task: str | None = N
         if getattr(t, "workspace_id", None) == workspace_id
     ]
     if task:
-        task_ids = set(task_manager.get_current_task_ids(task))
-        tasks = [t for t in tasks if t.task_id in task_ids]
+        tasks = [t for t in tasks if _record_analysis_name(t) == task]
     tasks.sort(key=lambda t: t.updated_at or t.created_at)
 
     def _to_record(t):
@@ -142,11 +135,39 @@ def _list_analysis_records(user_id: str, workspace_id: str, task: str | None = N
     return [_to_record(t) for t in tasks]
 
 
+def _record_analysis_name(task) -> str | None:
+    """Return the analysis family name encoded by a persisted task request."""
+    request_class = task.request.__class__.__name__
+    if request_class == "AnalysisTokenFrequencyRequest":
+        return "token_frequencies"
+    if request_class == "ConcordanceAnalysisRequest":
+        return "concordance_analysis"
+    if request_class == "QuotationRequest":
+        return "quotation_analysis"
+    if request_class == "SequentialAnalysisRequest":
+        return "sequential_analysis"
+    if request_class == "TopicModelingRequest":
+        return "topic_modeling"
+    if request_class == "AIAnnotationRequest":
+        return "ai_annotation"
+    return None
+
+
+def _task_id_from_response(response) -> str:
+    """Extract the explicit task id returned by task-backed submit endpoints."""
+    task_id = response.json().get("metadata", {}).get("task_id")
+    assert task_id
+    return task_id
+
+
 @pytest.fixture(autouse=True)
 def _stub_task_manager(monkeypatch):
     """Avoid spawning real worker processes in tests; mimic immediate task submission."""
 
     class ImmediateTaskManager:
+        def __init__(self):
+            self.counter = 0
+
         async def any_running(self, **_kwargs):  # pragma: no cover
             return False
 
@@ -154,10 +175,13 @@ def _stub_task_manager(monkeypatch):
             return None
 
         async def submit_task(self, **_kwargs):  # pragma: no cover
-            return SimpleNamespace(id="test-task")
+            self.counter += 1
+            return SimpleNamespace(id=f"test-task-{self.counter}")
+
+    immediate_task_manager = ImmediateTaskManager()
 
     def fake_get_task_manager(self, _user_id):
-        return ImmediateTaskManager()
+        return immediate_task_manager
 
     monkeypatch.setattr(
         workspace_manager.__class__, "get_task_manager", fake_get_task_manager
@@ -261,10 +285,7 @@ class TestTokenFrequencyPersistence:
         assert result_data.get("state") == "running"
 
         _simulate_token_frequency_completion(workspace_id)
-        task_id = await get_current_task_id(
-            authenticated_client, workspace_id, "token_frequencies"
-        )
-        assert task_id
+        task_id = _task_id_from_response(response)
         result_resp = await get_json(
             authenticated_client,
             f"/api/workspaces/token-frequencies/tasks/{task_id}/result",
@@ -288,11 +309,11 @@ class TestTokenFrequencyPersistence:
         assert final_result.get("metadata", {}).get("stop_words") == []
         assert final_result.get("analysis_params", {}).get("stop_words") == []
 
-    async def test_token_frequency_overwrites_previous_analysis(
+    async def test_token_frequency_preserves_independent_tab_tasks(
         self, authenticated_client, workspace_id, tiny_node_id, test_user
     ):
-        """Test that repeated analysis overwrites previous results."""
-        # Given: We run token frequency analysis twice with different limits
+        """Token-frequency runs are independent task records, not one current task."""
+        # Given: We run token frequency analysis twice from different tabs
         first_request = {
             "node_ids": [tiny_node_id],
             "node_columns": {tiny_node_id: "document"},
@@ -313,6 +334,8 @@ class TestTokenFrequencyPersistence:
             first_request,
         )
         assert first_resp.status_code == 200
+        first_task_id = first_resp.json().get("metadata", {}).get("task_id")
+        assert first_task_id
 
         second_resp = await post_json(
             authenticated_client,
@@ -320,16 +343,25 @@ class TestTokenFrequencyPersistence:
             second_request,
         )
         assert second_resp.status_code == 200
+        second_task_id = second_resp.json().get("metadata", {}).get("task_id")
+        assert second_task_id
+        assert second_task_id != first_task_id
 
-        # Then: Only one analysis record exists (the latest)
+        # Then: both analysis records exist independently
         analyses = _list_analysis_records(test_user["id"], workspace_id)
-        assert len(analyses) == 1
+        assert len(analyses) == 2
 
-        record = analyses[0]
-        assert record.request["node_ids"] == second_request["node_ids"]
-        assert record.request["token_limit"] == DEFAULT_TOKEN_LIMIT
-        assert record.request.get("stop_words") == ["alpha", "beta"]
-        assert "limit" not in record.request
+        by_task_id = {record.task_id: record for record in analyses}
+        assert by_task_id[first_task_id].request.get("stop_words") == []
+        assert by_task_id[second_task_id].request.get("stop_words") == ["alpha", "beta"]
+
+        # And: the first task remains addressable by explicit id after the second run.
+        first_request_resp = await get_json(
+            authenticated_client,
+            f"/api/workspaces/token-frequencies/tasks/{first_task_id}/request",
+        )
+        assert first_request_resp.status_code == 200
+        assert "tab_id" not in first_request_resp.json()
 
     async def test_token_frequency_multiple_nodes(
         self,
@@ -361,10 +393,7 @@ class TestTokenFrequencyPersistence:
         assert result_data.get("metadata", {}).get("task_id")
 
         _simulate_token_frequency_completion(workspace_id)
-        task_id = await get_current_task_id(
-            authenticated_client, workspace_id, "token_frequencies"
-        )
-        assert task_id
+        task_id = _task_id_from_response(response)
         result_resp = await get_json(
             authenticated_client,
             f"/api/workspaces/token-frequencies/tasks/{task_id}/result",
@@ -406,10 +435,7 @@ class TestTokenFrequencyPersistence:
         )
         assert initial_response.status_code == 200
         assert initial_response.json().get("state") == "running"
-        task_id = await get_current_task_id(
-            authenticated_client, workspace_id, "token_frequencies"
-        )
-        assert task_id
+        task_id = _task_id_from_response(initial_response)
 
         update_payload = {"token_limit": 30, "stop_words": ["alpha", "beta"]}
         update_response = await post_json(
@@ -557,9 +583,7 @@ class TestSequentialAnalysisPersistence:
         analyses = _list_analysis_records(test_user["id"], workspace_id)
         assert len(analyses) == 1
         record = analyses[0]
-        task_id = await get_current_task_id(
-            authenticated_client, workspace_id, "sequential_analysis"
-        )
+        task_id = result_data.get("metadata", {}).get("task_id")
         assert task_id
         assert record.task_id == task_id
         assert record.result.get("chart_type") == "line"
@@ -583,13 +607,11 @@ class TestSequentialAnalysisPersistence:
     ):
         """Updating the chart type should persist via current-result endpoint."""
 
-        await self._run_sequential_analysis(
+        result_data = await self._run_sequential_analysis(
             authenticated_client, workspace_id, timeline_node_id, monkeypatch
         )
 
-        task_id = await get_current_task_id(
-            authenticated_client, workspace_id, "sequential_analysis"
-        )
+        task_id = result_data.get("metadata", {}).get("task_id")
         assert task_id
         update_response = await post_json(
             authenticated_client,
@@ -627,13 +649,11 @@ class TestSequentialAnalysisPersistence:
     ):
         """Invalid chart types should be rejected with clear feedback."""
 
-        await self._run_sequential_analysis(
+        result_data = await self._run_sequential_analysis(
             authenticated_client, workspace_id, timeline_node_id, monkeypatch
         )
 
-        task_id = await get_current_task_id(
-            authenticated_client, workspace_id, "sequential_analysis"
-        )
+        task_id = result_data.get("metadata", {}).get("task_id")
         assert task_id
         invalid_response = await post_json(
             authenticated_client,
@@ -829,9 +849,7 @@ class TestSequentialAnalysisPersistence:
             "get_current_workspace",
             lambda *_args, **_kwargs: dummy_workspace,
         )
-        task_id = await get_current_task_id(
-            authenticated_client, workspace_id, "sequential_analysis"
-        )
+        task_id = result_data.get("metadata", {}).get("task_id")
         assert task_id
 
         selected_period = result_data["data"][0]
@@ -936,9 +954,7 @@ class TestSequentialAnalysisPersistence:
         )
         assert response.status_code == 200
 
-        task_id = await get_current_task_id(
-            authenticated_client, workspace_id, "sequential_analysis"
-        )
+        task_id = response.json().get("metadata", {}).get("task_id")
         assert task_id
 
         detach_response = await post_json(
@@ -995,7 +1011,7 @@ class TestWorkspaceGraphEnrichment:
         tokenization_name = tokenization_column_name(
             "document", "huggingface:bert-base-uncased"
         )
-        node.register_tokenization(  # type: ignore[arg-type]
+        node.register_tokenization(
             "document",
             {
                 "column_name": tokenization_name,

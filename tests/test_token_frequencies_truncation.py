@@ -18,9 +18,14 @@ from ldaca_wordflow.core.workspace import workspace_manager
 
 def _simulate_token_frequency_completion(workspace_id: str):
     task_manager = get_task_manager("test")
-    task_ids = task_manager.get_current_task_ids("token_frequencies")
-    assert task_ids
-    task = task_manager.get_task(task_ids[0])
+    token_tasks = [
+        task
+        for task in task_manager.get_all_tasks()
+        if getattr(task, "workspace_id", None) == workspace_id
+    ]
+    token_tasks.sort(key=lambda task: task.updated_at or task.created_at, reverse=True)
+    assert token_tasks
+    task = token_tasks[0]
     assert task is not None
     req = task.request.model_dump() if hasattr(task.request, "model_dump") else {}
     workspace = workspace_manager.get_current_workspace("test")
@@ -62,19 +67,12 @@ def _simulate_token_frequency_completion(workspace_id: str):
     task_manager.save_task(task)
 
 
-async def _get_current_task_id(client, workspace_id: str, analysis: str):
-    slug = analysis.replace("_", "-")
-    response = await client.get(f"/api/workspaces/{slug}/tasks/current")
-    if response.status_code != 200:
-        return None
-    payload = response.json()
-    task_ids = payload.get("task_ids") or []
-    return task_ids[0] if task_ids else None
-
-
 @pytest.fixture
 def _stub_task_manager(monkeypatch):
     class ImmediateTaskManager:
+        def __init__(self):
+            self.counter = 0
+
         async def any_running(self, **_kwargs):  # pragma: no cover
             return False
 
@@ -82,10 +80,13 @@ def _stub_task_manager(monkeypatch):
             return None
 
         async def submit_task(self, **_kwargs):  # pragma: no cover
-            return SimpleNamespace(id="test-task")
+            self.counter += 1
+            return SimpleNamespace(id=f"test-task-{self.counter}")
+
+    immediate_task_manager = ImmediateTaskManager()
 
     def fake_get_task_manager(self, _user_id):
-        return ImmediateTaskManager()
+        return immediate_task_manager
 
     monkeypatch.setattr(
         workspace_manager.__class__, "get_task_manager", fake_get_task_manager
@@ -151,11 +152,7 @@ async def test_token_frequencies_full_table_and_metadata(
     assert response.status_code == 200, response.text
     start_payload = response.json()
     assert start_payload.get("state") == "running"
-    assert start_payload.get("metadata", {}).get("task_id")
-
-    running_task_id = await _get_current_task_id(
-        authenticated_client, workspace_id, "token_frequencies"
-    )
+    running_task_id = start_payload.get("metadata", {}).get("task_id")
     assert running_task_id
     running_result_response = await authenticated_client.get(
         f"/api/workspaces/token-frequencies/tasks/{running_task_id}/result"
@@ -166,10 +163,7 @@ async def test_token_frequencies_full_table_and_metadata(
     assert running_payload.get("metadata", {}).get("task_id") == running_task_id
 
     _simulate_token_frequency_completion(workspace_id)
-    task_id = await _get_current_task_id(
-        authenticated_client, workspace_id, "token_frequencies"
-    )
-    assert task_id
+    task_id = running_task_id
     result_response = await authenticated_client.get(
         f"/api/workspaces/token-frequencies/tasks/{task_id}/result"
     )

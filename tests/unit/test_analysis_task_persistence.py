@@ -5,8 +5,7 @@ tab to re-show its result after the workspace is unloaded and loaded again (or
 after a server restart), the underlying ``AnalysisTask`` records must be
 snapshotted to disk on unload and rehydrated on load. These tests exercise that
 round-trip through the real `WorkspaceManager` lifecycle hooks plus the
-`analysis.persistence` helpers, mirroring the bootstrap pattern used by
-``test_set_current_task_eviction.py``.
+`analysis.persistence` helpers.
 """
 
 from __future__ import annotations
@@ -70,10 +69,8 @@ def reset_task_store(monkeypatch):
     yield
 
 
-def _save_concordance_task(
-    tm: TaskManager, user_id: str, workspace_id: str, tab_id: str
-) -> str:
-    """Persist a completed concordance-style task pinned to ``tab_id``."""
+def _save_concordance_task(tm: TaskManager, user_id: str, workspace_id: str) -> str:
+    """Persist a completed concordance-style task."""
     task_id = str(uuid.uuid4())
     request = BaseAnalysisRequest.model_validate(
         {"node_ids": ["node-1"], "search_word": "hello"}
@@ -88,19 +85,15 @@ def _save_concordance_task(
             result=GenericAnalysisResult({"ready": True}),
         )
     )
-    tm.set_current_task(tab_id, task_id)
     return task_id
 
 
-def test_analysis_task_survives_unload_and_reload(
-    isolated_manager, reset_task_store
-):
+def test_analysis_task_survives_unload_and_reload(isolated_manager, reset_task_store):
     user_id = "tab_user"
     workspace_id, ws_dir = _bootstrap_workspace(isolated_manager, user_id, "ws")
 
     tm = TaskManager(user_id)
-    tab_id = str(uuid.uuid4())
-    task_id = _save_concordance_task(tm, user_id, workspace_id, tab_id)
+    task_id = _save_concordance_task(tm, user_id, workspace_id)
 
     # Unload persists the snapshot to <workspace_dir>/analysis_tasks.json and
     # then wipes the in-memory store.
@@ -108,7 +101,7 @@ def test_analysis_task_survives_unload_and_reload(
     assert (ws_dir / "analysis_tasks.json").exists()
     assert TaskManager(user_id).get_task(task_id) is None
 
-    # Reload rehydrates the task record + the tab's current-task pointer.
+    # Reload rehydrates the task record so persisted tabs can resolve task ids.
     assert isolated_manager.set_current_workspace(user_id, workspace_id) is True
 
     restored = TaskManager(user_id)
@@ -117,7 +110,6 @@ def test_analysis_task_survives_unload_and_reload(
     assert task.workspace_id == workspace_id
     assert task.status == AnalysisStatus.COMPLETED
     assert task.request.model_dump().get("search_word") == "hello"
-    assert restored.get_current_task_ids(tab_id) == [task_id]
 
 
 def test_no_sidecar_written_when_workspace_has_no_tasks(
@@ -141,8 +133,7 @@ def test_persistence_helpers_round_trip_directly(tmp_path, reset_task_store):
     ws_dir.mkdir()
 
     tm = TaskManager(user_id)
-    tab_id = str(uuid.uuid4())
-    task_id = _save_concordance_task(tm, user_id, workspace_id, tab_id)
+    task_id = _save_concordance_task(tm, user_id, workspace_id)
 
     analysis_persistence.save_workspace_analysis_tasks(user_id, workspace_id, ws_dir)
     assert (ws_dir / "analysis_tasks.json").exists()
@@ -155,4 +146,3 @@ def test_persistence_helpers_round_trip_directly(tmp_path, reset_task_store):
 
     restored = TaskManager(user_id)
     assert restored.get_task(task_id) is not None
-    assert restored.get_current_task_ids(tab_id) == [task_id]

@@ -19,7 +19,7 @@ from typing import cast
 from uuid import uuid4
 
 import polars as pl
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 
 from docworkspace import Node
 
@@ -43,7 +43,6 @@ from ....core.workspace import workspace_manager
 from ....models import (
     AnalysisClearResponse,
     AnalysisTaskMetadata,
-    CurrentAnalysisTasksResponse,
     TopicModelingData,
     TopicModelingDetachData,
     TopicModelingDetachedNode,
@@ -57,8 +56,6 @@ from ....models import (
     TopicModelingResponse,
 )
 from ..utils import ensure_task_synced, update_workspace
-from .cleanup import clear_previous_completed_analysis_task
-from .current_tasks import get_current_task_ids_for_analysis
 from .generated_columns import (
     TOPIC_COLUMN,
     TOPIC_DISTRIBUTION_COLUMN,
@@ -354,21 +351,25 @@ async def clear_topic_modeling_results(
     - Frontend clear action: `DELETE /workspaces/{id}/topic-modeling` because they need this unit's "Clear stored topic-modeling task state for a workspace" behavior.
 
     Why:
-    - Removes stale result/task pointers before reruns and keeps UI state
-        aligned with backend task registries.
+    - Removes explicit topic-modeling task records for broad legacy clear actions.
     """
     user_id = current_user["id"]
     workspace_id = workspace_manager.get_current_workspace_id(user_id)
     if not workspace_id:
         raise NoActiveWorkspaceError("No active workspace selected")
     task_manager = get_task_manager(user_id)
-    current_id = task_manager.get_current_task_ids("topic_modeling")
-    if current_id:
-        task_manager.clear_task(current_id[0])
+    task_ids = [
+        task.task_id
+        for task in task_manager.get_all_tasks()
+        if task.workspace_id == workspace_id
+        and task.request.__class__.__name__ == "TopicModelingRequest"
+    ]
+    for task_id in task_ids:
+        task_manager.clear_task(task_id)
 
     worker_tm = workspace_manager.get_task_manager(user_id)
-    if current_id:
-        await worker_tm.clear_task(current_id[0])
+    for task_id in task_ids:
+        await worker_tm.clear_task(task_id)
 
     return {
         "state": "successful",
@@ -528,33 +529,6 @@ async def run_topic_modeling(
     tm = workspace_manager.get_task_manager(user_id)
     submission_lock = _topic_submission_lock(user_id, workspace_id)
     async with submission_lock:
-        # Match token-frequencies behavior: short-circuit when topic modeling is
-        # already running for this workspace/user, with lock to avoid duplicate
-        # concurrent submissions.
-        try:
-            if await tm.any_running(
-                task_type="topic_modeling", user_id=user_id, workspace_id=workspace_id
-            ):
-                latest = await tm.latest_by_type(
-                    "topic_modeling", user_id=user_id, workspace_id=workspace_id
-                )
-                return TopicModelingResponse(
-                    state="running",
-                    message="Topic Modeling analysis already running",
-                    data=None,
-                    metadata=_task_metadata(latest.id if latest else None),
-                )
-        except Exception:
-            # Non-fatal: proceed to submit a new task.
-            pass
-
-        # Drop any prior completed/failed topic-modeling task before submitting
-        # a new one. Prevents unbounded accumulation of in-memory task records
-        # and on-disk parquet artifacts as the user iterates on parameters.
-        await clear_previous_completed_analysis_task(
-            user_id, workspace_id, ["topic_modeling", "topic-modeling"]
-        )
-
         workspace_dir = update_workspace(user_id, workspace_id, ws)
         if workspace_dir is None:
             raise InternalServiceError(
@@ -611,37 +585,11 @@ async def run_topic_modeling(
             status=AnalysisStatus.RUNNING,
         )
     )
-    analysis_tm.set_current_task("topic_modeling", worker_task.id)
     return TopicModelingResponse(
         state="running",
         message="Topic Modeling analysis started",
         data=None,
         metadata=_task_metadata(worker_task.id),
-    )
-
-
-@router.get(
-    "/topic-modeling/tasks/current", response_model=CurrentAnalysisTasksResponse
-)
-async def topic_modeling_current_tasks(
-    current_user: dict = Depends(get_current_user),
-):
-    """Return current task IDs for topic-modeling analysis.
-
-    Flow:
-    - Resolve authentication and request parameters from FastAPI dependencies.
-    - Delegate validation, manager calls, artifacts, or state changes to the owning helper.
-    - Shape the response payload or raise the HTTP error the client should see.
-
-    Used by:
-    - Frontend and API clients through the FastAPI GET /topic-modeling/tasks/current route because they need this unit's "Return current task IDs for topic-modeling analysis" behavior.
-    """
-    user_id = current_user["id"]
-    workspace_id = workspace_manager.get_current_workspace_id(user_id)
-    if not workspace_id:
-        raise NoActiveWorkspaceError("No active workspace selected")
-    return await get_current_task_ids_for_analysis(
-        user_id, ["topic_modeling", "topic-modeling"]
     )
 
 
@@ -833,7 +781,9 @@ async def topic_modeling_detach_options(
             for c in source_data.collect_schema().names()
             if not is_tokenization_column_name(c)
         ]
-        topic_top1_name, topic_dist_name = _resolve_topic_output_columns(original_columns)
+        topic_top1_name, topic_dist_name = _resolve_topic_output_columns(
+            original_columns
+        )
         nodes.append(
             TopicModelingDetachNodeOption(
                 node_id=source_node.id,
@@ -987,7 +937,9 @@ async def detach_topic_modeling(
         original_columns = list(source_data.collect_schema().names())
         # Resolve the two generated output column names the same way the
         # detach-options endpoint does, so they match what the client ticked.
-        topic_top1_name, topic_dist_name = _resolve_topic_output_columns(original_columns)
+        topic_top1_name, topic_dist_name = _resolve_topic_output_columns(
+            original_columns
+        )
         raw_selected = list((request.selected_columns or {}).get(node_id) or [])
         include_top1 = topic_top1_name in raw_selected
         include_distribution = topic_dist_name in raw_selected
@@ -1010,9 +962,7 @@ async def detach_topic_modeling(
         if include_distribution:
             # The persisted distribution column is already the canonical TMDist
             # physical dtype (List(Struct{topic_id, proportion})); just rename it.
-            projection.append(
-                pl.col(TOPIC_DISTRIBUTION_COLUMN).alias(topic_dist_name)
-            )
+            projection.append(pl.col(TOPIC_DISTRIBUTION_COLUMN).alias(topic_dist_name))
         output_lf = assignments_lf.join(
             source_data.with_row_index("__row_nr__"),
             on="__row_nr__",
@@ -1028,10 +978,9 @@ async def detach_topic_modeling(
 
         # Materialize the detached outputs into workspace-owned parquet files
         # so the new nodes are self-contained. The originals live under
-        # `data/artifacts/` which gets cleaned by the next analysis submit
-        # (clear_previous_completed_analysis_task) and by workspace unload —
-        # a detached node that still scanned them would silently corrupt on
-        # the next run. The top-level workspace data dir is protected by
+        # `data/artifacts/` which gets cleaned by explicit task cleanup and
+        # workspace unload. A detached node that still scanned them would
+        # silently corrupt later. The top-level workspace data dir is protected by
         # `_garbage_collect_workspace_data` (deletes only unreferenced files).
         workspace_data_dir = Path(ws.ws_root_dir) / "data"
         workspace_data_dir.mkdir(parents=True, exist_ok=True)

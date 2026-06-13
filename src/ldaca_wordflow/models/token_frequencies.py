@@ -4,9 +4,13 @@ Split from models/__init__.py.
 """
 
 from __future__ import annotations
+
 from typing import Any, Dict, List, Optional
+
 from pydantic import BaseModel, ConfigDict
+
 from .analysis_common import AnalysisSorting, AnalysisTaskMetadata, AnalysisTaskState
+
 
 class StopWordsPayload(BaseModel):
     """API schema used by routes and generated clients for stop words payload.
@@ -20,7 +24,6 @@ class StopWordsPayload(BaseModel):
     """
 
     stop_words: List[str]
-
 
 
 class TokenFrequencyRequest(BaseModel):
@@ -58,7 +61,6 @@ class TokenFrequencyRequest(BaseModel):
     )
 
 
-
 class TokenFrequencyPreferenceUpdateRequest(BaseModel):
     """Request schema used by API routes and generated clients for token frequency preference update request.
 
@@ -74,7 +76,6 @@ class TokenFrequencyPreferenceUpdateRequest(BaseModel):
     stop_words: list[str] | None = None
 
 
-
 class TokenFrequencyData(BaseModel):
     """Data payload schema embedded in API responses for token frequency data.
 
@@ -88,7 +89,6 @@ class TokenFrequencyData(BaseModel):
 
     token: str
     frequency: int
-
 
 
 class TokenStatisticsData(BaseModel):
@@ -127,7 +127,6 @@ class TokenStatisticsData(BaseModel):
     significance: str  # Significance level indicator
 
 
-
 class TokenFrequencyNodeResult(BaseModel):
     """API schema used by routes and generated clients for token frequency node result.
 
@@ -143,7 +142,6 @@ class TokenFrequencyNodeResult(BaseModel):
     columns: List[str] = ["token", "frequency"]
     # Optional metadata (e.g., server-side truncation info)
     metadata: AnalysisTaskMetadata | None = None
-
 
 
 class TokenFrequencyResponse(BaseModel):
@@ -174,6 +172,3 @@ class TokenFrequencyResponse(BaseModel):
 # =============================================================================
 # AI ANNOTATION MODELS
 # =============================================================================
-
-
-

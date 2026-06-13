@@ -4,7 +4,7 @@ import time
 import polars as pl
 import pytest
 from ldaca_wordflow.analysis.manager import get_task_manager
-from ldaca_wordflow.api.workspaces.analyses.concordance import (
+from ldaca_wordflow.api.workspaces.analyses.concordance_core import (
     DEFAULT_CONCORDANCE_PAGE_SIZE,
 )
 from ldaca_wordflow.api.workspaces.analyses.page_size_estimation import (
@@ -81,19 +81,9 @@ def _add_node(workspace_id: str, data: pl.LazyFrame, node_name: str):
     return node
 
 
-async def _get_current_task_id(client, workspace_id: str, analysis: str):
-    slug = analysis.replace("_", "-")
-    response = await client.get(f"/api/workspaces/{slug}/tasks/current")
-    if response.status_code != 200:
-        return None
-    payload = response.json()
-    task_ids = payload.get("task_ids") or []
-    return task_ids[0] if task_ids else None
-
-
 @pytest.mark.anyio
 async def test_concordance_single_node_roundtrip(authenticated_client, workspace_id):
-    """Single-node concordance should store results and expose current-request/result endpoints."""
+    """Single-node concordance should store results and expose task request/result endpoints."""
     # Ensure clean state for this workspace/user
     _clear_concordance_state("test", workspace_id)
 
@@ -128,11 +118,7 @@ async def test_concordance_single_node_roundtrip(authenticated_client, workspace
     assert resp.status_code == 200, resp.text
     payload = resp.json()
     assert payload["state"] == "successful"
-    assert payload.get("metadata", {}).get("task_id")
-
-    task_id = await _get_current_task_id(
-        authenticated_client, workspace_id, "concordance"
-    )
+    task_id = payload.get("metadata", {}).get("task_id")
     assert task_id
 
     result_payload = await _wait_for_concordance_result(
@@ -171,10 +157,10 @@ async def test_concordance_single_node_roundtrip(authenticated_client, workspace
     assert "pagination" not in current_req_payload
 
     task_manager = get_task_manager("test")
-    current_task = task_manager.get_task(task_id)
+    stored_task = task_manager.get_task(task_id)
     stored_request = (
-        current_task.request.model_dump()
-        if current_task and hasattr(current_task.request, "model_dump")
+        stored_task.request.model_dump()
+        if stored_task and hasattr(stored_task.request, "model_dump")
         else {}
     )
     assert "page" not in stored_request
@@ -267,9 +253,7 @@ async def test_concordance_multi_node_separated(authenticated_client, workspace_
     assert resp.status_code == 200, resp.text
     payload = resp.json()
     assert payload["state"] == "successful"
-    task_id = await _get_current_task_id(
-        authenticated_client, workspace_id, "concordance"
-    )
+    task_id = payload.get("metadata", {}).get("task_id")
     assert task_id
 
     result_payload = await _wait_for_concordance_result(
@@ -346,9 +330,7 @@ async def test_concordance_multi_node_mismatched_columns(
     assert resp.status_code == 200, resp.text
     payload = resp.json()
     assert payload["state"] == "successful"
-    task_id = await _get_current_task_id(
-        authenticated_client, workspace_id, "concordance"
-    )
+    task_id = payload.get("metadata", {}).get("task_id")
     assert task_id
 
     result_payload = await _wait_for_concordance_result(

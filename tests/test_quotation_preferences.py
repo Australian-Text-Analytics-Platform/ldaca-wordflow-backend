@@ -84,7 +84,6 @@ def _seed_paginated_analysis(rows: list[dict[str, Any]], context_length: int = 1
     result = GenericAnalysisResult(result_dict)
     task.complete(result)
     task_manager.save_task(task)
-    task_manager.set_current_task("quotation", task_id)
     return task_id
 
 
@@ -157,7 +156,6 @@ def seeded_quotation_analysis():
     )
     task.complete(result)
     task_manager.save_task(task)
-    task_manager.set_current_task("quotation", task_id)
 
     yield task_id
     _cleanup_workspace_state()

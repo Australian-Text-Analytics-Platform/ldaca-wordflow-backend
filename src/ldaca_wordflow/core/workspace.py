@@ -616,8 +616,8 @@ class WorkspaceManager:
     def _clear_workspace_tasks(self, user_id: str, workspace_id: str) -> None:
         """Drop analysis + worker task records belonging to a workspace.
 
-        Without this, per-user task stores (current_task_ids in the analysis
-        manager, TaskInfo records in the worker manager) leak across workspace
+        Without this, per-user task records (analysis manager tasks and worker
+        manager TaskInfo records) leak across workspace
         switches and cause UI state from the previous workspace to hydrate on
         the next one.
 

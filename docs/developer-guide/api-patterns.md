@@ -48,6 +48,10 @@ Many task and operation routes return a state envelope:
 
 Long-running operations should return a `task_id`. Clients should cancel or
 clear by `task_id`, not by task type. Task type is for grouping and display.
+For tabbed analysis views, the backend does not own a global "current" task:
+the tab sidecar maps each `tab_id` to its task id, and request/result endpoints
+must remain addressable by that explicit id even after sibling tabs run. Keep
+`tab_id` out of analysis request/result payloads; it is frontend sidecar state.
 
 Node/table responses use the shared API models in `core/api_models.py` where
 possible. Column schema entries include both the Polars dtype string and a

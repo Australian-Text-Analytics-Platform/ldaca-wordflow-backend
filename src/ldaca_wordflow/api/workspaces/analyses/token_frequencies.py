@@ -35,19 +35,23 @@ from ....analysis.manager import get_task_manager
 from ....analysis.models import AnalysisStatus, AnalysisTask
 from ....core.analysis_helpers import sanitize_stop_words
 from ....core.auth import get_current_user
+from ....core.exceptions import (
+    InternalServiceError,
+    InvalidInputError,
+    NoActiveWorkspaceError,
+    NotFoundError,
+    TaskNotFoundError,
+    WorkspaceNotFoundError,
+)
 from ....core.tokens_cache import hydrate_tokenization_lazyframe
 from ....core.workspace import workspace_manager
 from ....models import (
     AnalysisClearResponse,
-    CurrentAnalysisTasksResponse,
     TokenFrequencyPreferenceUpdateRequest,
     TokenFrequencyRequest,
     TokenFrequencyResponse,
 )
 from ..utils import ensure_task_synced
-from .cleanup import clear_previous_completed_analysis_task
-from .current_tasks import get_current_task_ids_for_analysis
-from ....core.exceptions import InternalServiceError, InvalidInputError, NoActiveWorkspaceError, NotFoundError, TaskNotFoundError, WorkspaceNotFoundError
 
 router = APIRouter(prefix="/workspaces")
 logger = logging.getLogger(__name__)
@@ -106,8 +110,9 @@ async def clear_token_frequencies(
 ):
     """Clear Token Frequency analysis state for a workspace.
 
-    Mirrors topic-modeling clear behavior by removing the currently tracked
-    analysis task link for the token frequency tab.
+    Legacy broad clear endpoint: removes all token-frequency task records for
+    the active workspace. Tabbed clients should normally clear by explicit
+    task_id through `/api/tasks/clear` instead.
 
     Flow:
     - Resolve authentication and request parameters from FastAPI dependencies.
@@ -122,13 +127,13 @@ async def clear_token_frequencies(
     if not workspace_id:
         raise NoActiveWorkspaceError("No active workspace selected")
     task_manager = get_task_manager(user_id)
-    current_ids = task_manager.get_current_task_ids("token_frequencies")
-    if current_ids:
-        task_manager.clear_task(current_ids[0])
+    task_ids = _token_frequency_task_ids(user_id, workspace_id)
+    for task_id in task_ids:
+        task_manager.clear_task(task_id)
 
     worker_tm = workspace_manager.get_task_manager(user_id)
-    if current_ids:
-        await worker_tm.clear_task(current_ids[0])
+    for task_id in task_ids:
+        await worker_tm.clear_task(task_id)
 
     return {
         "state": "successful",
@@ -248,7 +253,9 @@ def _token_artifacts_from_task(
     payload = _task_result_payload(task)
     artifacts = payload.get("artifacts")
     if not isinstance(artifacts, dict):
-        raise NotFoundError("Token-frequency artifacts are not available for this task",)
+        raise NotFoundError(
+            "Token-frequency artifacts are not available for this task",
+        )
     node_artifacts = artifacts.get("nodes")
     if not isinstance(node_artifacts, list):
         raise _invalid_artifact_manifest()
@@ -274,6 +281,32 @@ def _server_limit(token_limit: int) -> int:
         max(token_limit * SERVER_LIMIT_MULTIPLIER, DEFAULT_TOKEN_LIMIT),
         MAX_SERVER_TOKEN_LIMIT,
     )
+
+
+def _is_token_frequency_task(task: AnalysisTask, workspace_id: str) -> bool:
+    """Return whether an analysis task belongs to token-frequency for a workspace."""
+    if task.workspace_id != workspace_id:
+        return False
+    if isinstance(task.request, AnalysisTokenFrequencyRequest):
+        return True
+    payload = task.request.model_dump() if hasattr(task.request, "model_dump") else {}
+    return (
+        isinstance(payload, dict)
+        and "node_ids" in payload
+        and "node_columns" in payload
+    )
+
+
+def _token_frequency_task_ids(user_id: str, workspace_id: str) -> list[str]:
+    """List token-frequency task ids for broad workspace clear operations."""
+    task_manager = get_task_manager(user_id)
+    tasks = [
+        task
+        for task in task_manager.get_all_tasks()
+        if _is_token_frequency_task(task, workspace_id)
+    ]
+    tasks.sort(key=lambda task: task.updated_at or task.created_at, reverse=True)
+    return [task.task_id for task in tasks]
 
 
 def _safe_float(value: Any) -> float | str | None:
@@ -325,7 +358,9 @@ def _rebuild_token_result(task: AnalysisTask) -> dict:
     node_results: dict[str, dict] = {}
     for node_artifact in artifacts.nodes:
         if not node_artifact.token_parquet_path.exists():
-            raise NotFoundError(f"Token artifact missing for node {node_artifact.node_id}",)
+            raise NotFoundError(
+                f"Token artifact missing for node {node_artifact.node_id}",
+            )
         token_df = cast(
             pl.DataFrame, pl.scan_parquet(node_artifact.token_parquet_path).collect()
         )
@@ -410,32 +445,6 @@ def _rebuild_token_result(task: AnalysisTask) -> dict:
         "metadata": metadata,
         "stop_words": stop_words,
     }
-
-
-@router.get(
-    "/token-frequencies/tasks/current",
-    response_model=CurrentAnalysisTasksResponse,
-)
-async def token_frequencies_current_tasks(
-    current_user: dict = Depends(get_current_user),
-):
-    """Return current task IDs for token-frequencies analysis.
-
-    Flow:
-    - Resolve authentication and request parameters from FastAPI dependencies.
-    - Delegate validation, manager calls, artifacts, or state changes to the owning helper.
-    - Shape the response payload or raise the HTTP error the client should see.
-
-    Used by:
-    - Frontend and API clients through the FastAPI GET /token-frequencies/tasks/current route because they need this unit's "Return current task IDs for token-frequencies analysis" behavior.
-    """
-    user_id = current_user["id"]
-    workspace_id = workspace_manager.get_current_workspace_id(user_id)
-    if not workspace_id:
-        raise NoActiveWorkspaceError("No active workspace selected")
-    return await get_current_task_ids_for_analysis(
-        user_id, ["token_frequencies", "token-frequencies"]
-    )
 
 
 @router.get(
@@ -566,7 +575,9 @@ async def update_token_frequencies_task_result(
         task.request = AnalysisTokenFrequencyRequest(**request_payload)
         task_manager.save_task(task)
     except Exception as exc:  # pragma: no cover
-        raise InternalServiceError(f"Failed to persist token frequency preferences: {exc}",)
+        raise InternalServiceError(
+            f"Failed to persist token frequency preferences: {exc}",
+        )
     return {"state": "successful", "message": "saved"}
 
 
@@ -708,37 +719,6 @@ async def calculate_token_frequencies(
 
     submission_lock = _token_freq_submission_lock(user_id, workspace_id)
     async with submission_lock:
-        # Re-check inside lock to prevent duplicate submissions from
-        # concurrent requests that both passed the earlier unlocked check.
-        try:
-            if await tm.any_running(
-                task_type="token_frequencies",
-                user_id=user_id,
-                workspace_id=workspace_id,
-            ):
-                latest = await tm.latest_by_type(
-                    "token_frequencies", user_id=user_id, workspace_id=workspace_id
-                )
-                return {
-                    "state": "running",
-                    "message": "Token frequency analysis already running",
-                    "data": None,
-                    "metadata": {"task_id": latest.id if latest else None},
-                }
-        except Exception:
-            logger.debug(
-                "Failed to query existing running token-frequency task for user=%s workspace=%s",
-                user_id,
-                workspace_id,
-                exc_info=True,
-            )
-
-        # Drop any prior completed/failed token-frequency task before submitting
-        # a new one to keep per-user analysis state and artifacts bounded.
-        await clear_previous_completed_analysis_task(
-            user_id, workspace_id, ["token_frequencies", "token-frequencies"]
-        )
-
         task_info = await tm.submit_task(
             user_id=user_id,
             workspace_id=workspace_id,
@@ -775,7 +755,6 @@ async def calculate_token_frequencies(
             status=AnalysisStatus.RUNNING,
         )
     )
-    task_manager.set_current_task("token_frequencies", task_info.id)
 
     return {
         "state": "running",

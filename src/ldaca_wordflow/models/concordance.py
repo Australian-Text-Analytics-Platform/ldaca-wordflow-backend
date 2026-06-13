@@ -4,9 +4,20 @@ Split from models/__init__.py.
 """
 
 from __future__ import annotations
+
 from typing import Any, Dict, List, Literal, Optional
+
 from pydantic import BaseModel, ConfigDict, Field
-from .analysis_common import AnalysisSorting, AnalysisTaskMetadata, AnalysisTaskState, DetachNodeOption, PaginationInfo, SourceRowPagination
+
+from .analysis_common import (
+    AnalysisSorting,
+    AnalysisTaskMetadata,
+    AnalysisTaskState,
+    DetachNodeOption,
+    PaginationInfo,
+    SourceRowPagination,
+)
+
 
 class ConcordanceAnalysisRequest(BaseModel):
     """Request schema used by API routes and generated clients for concordance analysis request.
@@ -37,13 +48,7 @@ class ConcordanceAnalysisRequest(BaseModel):
     # Sorting parameters
     sort_by: Optional[str] = None  # column name to sort by
     descending: bool = True
-    # Analysis-tab association. When provided, the resulting task becomes the
-    # current task for this tab, superseding (and cleaning up) the tab's prior
-    # task. ``None`` falls back to the analysis-type key for backward compat.
-    tab_id: Optional[str] = None
-
     model_config = ConfigDict(extra="forbid")
-
 
 
 class ConcordanceDetachRequest(BaseModel):
@@ -68,7 +73,6 @@ class ConcordanceDetachRequest(BaseModel):
     new_node_name: Optional[str] = None  # If not provided, will be auto-generated
     selected_columns: Optional[list[str]] = None
     materialized_path: Optional[str] = None  # Reuse existing flattened parquet
-
 
 
 class ConcordanceDispersionDetachRequest(BaseModel):
@@ -117,7 +121,6 @@ class ConcordanceDispersionDetachRequest(BaseModel):
     match_case_insensitive: bool = False
 
 
-
 class ConcordanceMaterializeRequest(BaseModel):
     """Request schema used by API routes and generated clients for concordance materialize request.
 
@@ -143,7 +146,6 @@ class ConcordanceMaterializeRequest(BaseModel):
     parent_task_id: str
 
 
-
 ConcordanceDetachNodeOption = DetachNodeOption  # shared base, kept for backwards compat
 
 
@@ -167,6 +169,7 @@ class ConcordanceDetachOptionsResponse(BaseModel):
 
 # Quotation requests (mirror concordance shape but without search parameters)
 
+
 class ConcordanceMetadata(BaseModel):
     """Metadata about concordance columns to help frontend display logic
 
@@ -183,7 +186,6 @@ class ConcordanceMetadata(BaseModel):
     ]  # Core concordance columns (CONC_left_context, CONC_matched_text, CONC_right_context, etc.)
     metadata_columns: List[str]  # Original document metadata columns
     all_columns: List[str]  # All available columns
-
 
 
 class ConcordanceNodeResult(BaseModel):
@@ -206,7 +208,6 @@ class ConcordanceNodeResult(BaseModel):
     materialized: bool | None = None
 
 
-
 class ConcordanceAnalysisResponse(BaseModel):
     """Unified concordance response for single or multi-node requests.
 
@@ -227,7 +228,6 @@ class ConcordanceAnalysisResponse(BaseModel):
     metadata: AnalysisTaskMetadata | None = None
 
 
-
 class ConcordanceDispersionBinRow(BaseModel):
     """API schema used by routes and generated clients for concordance dispersion bin row.
 
@@ -242,7 +242,6 @@ class ConcordanceDispersionBinRow(BaseModel):
     matched_text: str | None = None
     bin_idx: int | None = None
     count: int | None = None
-
 
 
 class ConcordanceDispersionBinsResponse(BaseModel):
@@ -267,6 +266,3 @@ class ConcordanceDispersionBinsResponse(BaseModel):
 # =============================================================================
 # COLUMN DESCRIBE MODELS
 # =============================================================================
-
-
-

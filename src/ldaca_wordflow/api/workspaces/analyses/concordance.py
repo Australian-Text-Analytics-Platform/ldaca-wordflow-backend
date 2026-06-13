@@ -11,7 +11,7 @@ Used by:
 
 Flow:
 - FastAPI mounts these routes through the workspace package router.
-- Route handlers validate concordance requests, current task state, and saved result overrides.
+- Route handlers validate concordance requests, task records, and saved result overrides.
 - Helpers hydrate tokenized nodes, submit worker tasks, read artifacts, and detach generated columns.
 - Responses return task metadata, paged concordance rows, dispersion bins, or workspace updates.
 """
@@ -53,19 +53,15 @@ from ....models import (
     ConcordanceDispersionBinsResponse,
     ConcordanceDispersionDetachRequest,
     ConcordanceMaterializeRequest,
-    CurrentAnalysisTasksResponse,
 )
 from ..utils import _build_detach_options
-from .cleanup import clear_previous_completed_analysis_task
 from .concordance_core import (
     CORE_CONCORDANCE_COLUMNS,
     DEFAULT_CONCORDANCE_PAGE,
-    DEFAULT_CONCORDANCE_PAGE_SIZE,
     build_concordance_response,
     normalize_saved_request,
     read_dispersion_bins,
 )
-from .current_tasks import get_current_task_ids_for_analysis
 from .generated_columns import (
     CONC_EXTRACTION_COLUMN,
 )
@@ -222,11 +218,6 @@ async def run_concordance(
         )
 
         task_id = str(uuid4())
-        # Drop any prior completed/failed concordance task before recording the
-        # new one to keep the per-user analysis store bounded.
-        await clear_previous_completed_analysis_task(
-            user_id, workspace_id, ["concordance", "concordance_analysis"]
-        )
         task_manager.save_task(
             AnalysisTask(
                 task_id=task_id,
@@ -237,12 +228,6 @@ async def run_concordance(
                 result=GenericAnalysisResult({"ready": True}),
             )
         )
-        # Key the current-task pointer by tab when the frontend supplies a
-        # tab_id so re-running inside a tab supersedes that tab's previous
-        # task (set_current_task clears the superseded task + its artifacts).
-        # Fall back to the analysis-type key for older clients.
-        task_manager.set_current_task(request.tab_id or "concordance", task_id)
-
         normalized_request = (
             normalize_saved_request(analysis_request.model_dump()) or {}
         )
@@ -260,30 +245,6 @@ async def run_concordance(
         return response
     except Exception as exc:
         raise InternalServiceError(f"Failed to run concordance: {exc}")
-
-
-@router.get("/concordance/tasks/current", response_model=CurrentAnalysisTasksResponse)
-async def concordance_current_tasks(
-    current_user: dict = Depends(get_current_user),
-):
-    """Return current task IDs for concordance analysis.
-
-    Flow:
-    - Resolve authentication and request parameters from FastAPI dependencies.
-    - Delegate validation, manager calls, artifacts, or state changes to the owning helper.
-    - Shape the response payload or raise the HTTP error the client should see.
-
-    Used by:
-    - Frontend and API clients through the FastAPI GET /concordance/tasks/current route because they need this unit's "Return current task IDs for concordance analysis" behavior.
-    """
-    user_id = current_user["id"]
-    workspace_id = workspace_manager.get_current_workspace_id(user_id)
-    if not workspace_id:
-        raise NoActiveWorkspaceError("No active workspace selected")
-    return await get_current_task_ids_for_analysis(
-        user_id,
-        ["concordance_analysis", "concordance-analysis", "concordance"],
-    )
 
 
 @router.get(

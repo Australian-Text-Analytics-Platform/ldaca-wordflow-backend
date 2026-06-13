@@ -42,8 +42,21 @@ def _sample_group() -> dict:
         "groups": {
             "concordance": {
                 "tabs": [
-                    {"tab_id": "t1", "task_id": "task-1", "title": "First"},
-                    {"tab_id": "t2", "task_id": None, "title": "Untitled"},
+                    {
+                        "tab_id": "t1",
+                        "task_id": "task-1",
+                        "title": "First",
+                        "inputs": [
+                            {"node_id": "n1", "column": "text"},
+                            {"node_id": "n2", "column": None},
+                        ],
+                    },
+                    {
+                        "tab_id": "t2",
+                        "task_id": None,
+                        "title": "Untitled",
+                        "inputs": [],
+                    },
                 ],
                 "active_tab_id": "t1",
             }
@@ -120,7 +133,9 @@ async def test_put_replaces_existing_contents_not_merges(fake_workspace):
     new_payload = {
         "groups": {
             "token_frequencies": {
-                "tabs": [{"tab_id": "x", "task_id": None, "title": "New"}],
+                "tabs": [
+                    {"tab_id": "x", "task_id": None, "title": "New", "inputs": []}
+                ],
                 "active_tab_id": "x",
             }
         }
@@ -140,3 +155,22 @@ async def test_put_404s_on_unknown_workspace(fake_workspace):
             payload=_state(),
             current_user={"id": "u"},
         )
+
+
+@pytest.mark.asyncio
+async def test_put_then_get_round_trips_tab_inputs(fake_workspace):
+    """Per-tab ``inputs`` (node_id + optional column) survive a PUT/GET cycle.
+
+    Guards the add-node-as-needed model: each tab owns its node selection, so
+    the sidecar must persist and restore it verbatim.
+    """
+    payload = _sample_group()
+    await tabs_api.put_workspace_tabs(
+        workspace_id="ws1", payload=_state(payload), current_user={"id": "u"}
+    )
+    result = await tabs_api.get_workspace_tabs(
+        workspace_id="ws1", current_user={"id": "u"}
+    )
+    tab = result.groups["concordance"].tabs[0]
+    assert [(i.node_id, i.column) for i in tab.inputs] == [("n1", "text"), ("n2", None)]
+    assert result.groups["concordance"].tabs[1].inputs == []

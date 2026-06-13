@@ -4,7 +4,6 @@ Includes:
     - POST /workspaces/ai-annotation/models  (list models for a given endpoint)
     - POST /workspaces/ai-annotation          (run classification)
     - DELETE /workspaces/ai-annotation        (clear results)
-    - GET  /workspaces/ai-annotation/tasks/current
     - GET  /workspaces/ai-annotation/tasks/{task_id}/request
     - GET  /workspaces/ai-annotation/tasks/{task_id}/result
     - POST /workspaces/ai-annotation/tasks/{task_id}/result
@@ -18,7 +17,7 @@ Used by:
 
 Flow:
 - FastAPI mounts these routes through the workspace package router.
-- Route handlers validate model/category requests, node selections, and current task state.
+- Route handlers validate model/category requests, node selections, and task records.
 - Helpers submit classification work, page stored results, and attach/detach generated columns.
 - Responses return model lists, task metadata, paged annotations, or saved workspace updates.
 """
@@ -38,6 +37,13 @@ from ....analysis.manager import get_task_manager
 from ....analysis.models import AnalysisStatus, AnalysisTask
 from ....analysis.results import GenericAnalysisResult
 from ....core.auth import get_current_user
+from ....core.exceptions import (
+    InternalServiceError,
+    InvalidInputError,
+    NoActiveWorkspaceError,
+    TaskNotFoundError,
+    WorkspaceNotFoundError,
+)
 from ....core.workspace import workspace_manager
 from ....models import (
     AiAnnotationCategoriesResponse,
@@ -52,13 +58,9 @@ from ....models import (
     AiAnnotationSaveRequest,
     AiAnnotationSaveResponse,
     AnalysisClearResponse,
-    CurrentAnalysisTasksResponse,
 )
 from ..utils import update_workspace
 from .ai_annotation_core import classify_texts, list_models
-from .cleanup import clear_previous_completed_analysis_task
-from .current_tasks import get_current_task_ids_for_analysis
-from ....core.exceptions import InternalServiceError, InvalidInputError, NoActiveWorkspaceError, TaskNotFoundError, WorkspaceNotFoundError
 
 router = APIRouter(prefix="/workspaces", tags=["ai-annotation"])
 logger = logging.getLogger(__name__)
@@ -346,12 +348,6 @@ async def run_ai_annotation(
         node = ws.nodes[node_id]
         node.data
 
-    # Drop any prior completed/failed AI annotation task to keep the analysis
-    # store and any referenced parquet artifacts bounded across reruns.
-    await clear_previous_completed_analysis_task(
-        user_id, workspace_id, ["ai_annotation", "ai-annotation"]
-    )
-
     task_id = str(uuid4())
     task_manager = get_task_manager(user_id)
 
@@ -379,8 +375,6 @@ async def run_ai_annotation(
             result=analysis_result,
         )
     )
-    task_manager.set_current_task("ai_annotation", task_id)
-
     saved_task = task_manager.get_task(task_id)
     if saved_task is None:
         raise InternalServiceError("Failed to save task")
@@ -418,9 +412,12 @@ async def clear_ai_annotation(
     if not workspace_id:
         raise NoActiveWorkspaceError("No active workspace selected")
     task_manager = get_task_manager(user_id)
-    current_ids = task_manager.get_current_task_ids("ai_annotation")
-    for tid in current_ids:
-        task_manager.clear_task(tid)
+    for task in list(task_manager.get_all_tasks()):
+        if (
+            task.workspace_id == workspace_id
+            and task.request.__class__.__name__ == "AiAnnotationRequest"
+        ):
+            task_manager.clear_task(task.task_id)
 
     return {
         "state": "successful",
@@ -431,29 +428,6 @@ async def clear_ai_annotation(
 # ---------------------------------------------------------------------------
 # Task result endpoints
 # ---------------------------------------------------------------------------
-
-
-@router.get("/ai-annotation/tasks/current", response_model=CurrentAnalysisTasksResponse)
-async def ai_annotation_current_tasks(
-    current_user: dict = Depends(get_current_user),
-):
-    """Return current task IDs for AI annotation analysis.
-
-    Flow:
-    - Resolve authentication and request parameters from FastAPI dependencies.
-    - Delegate validation, manager calls, artifacts, or state changes to the owning helper.
-    - Shape the response payload or raise the HTTP error the client should see.
-
-    Used by:
-    - Frontend and API clients through the FastAPI GET /ai-annotation/tasks/current route because they need this unit's "Return current task IDs for AI annotation analysis" behavior.
-    """
-    user_id = current_user["id"]
-    workspace_id = workspace_manager.get_current_workspace_id(user_id)
-    if not workspace_id:
-        raise NoActiveWorkspaceError("No active workspace selected")
-    return await get_current_task_ids_for_analysis(
-        user_id, ["ai_annotation", "ai-annotation"]
-    )
 
 
 @router.get(
@@ -635,9 +609,8 @@ async def detach_ai_annotation(
 
     # Detach output must live in the workspace-owned top-level `data/`
     # directory, NOT in `data/artifacts/`. Artifacts get wiped on workspace
-    # unload (`clear_workspace_artifacts_dir`) and on every new analysis
-    # submit (`clear_previous_completed_analysis_task`), so a detached node
-    # scanning an artifact path would silently corrupt on next reload. The
+    # unload (`clear_workspace_artifacts_dir`), so a detached node scanning an
+    # artifact path would silently corrupt on next reload. The
     # workspace GC (`_garbage_collect_workspace_data`) keeps top-level
     # parquets alive while they're referenced by any node's plbin.
     workspace_data_dir = _workspace_data_dir(user_id, workspace_id)
@@ -660,7 +633,9 @@ async def detach_ai_annotation(
     try:
         ws.add_node(new_node)
     except Exception as exc:
-        raise InternalServiceError(f"Failed to add detached node: {exc}",)
+        raise InternalServiceError(
+            f"Failed to add detached node: {exc}",
+        )
     update_workspace(user_id, workspace_id, best_effort=True)
 
     return {

@@ -33,9 +33,16 @@ from ....analysis.manager import get_task_manager
 from ....analysis.models import AnalysisStatus, AnalysisTask
 from ....analysis.results import GenericAnalysisResult
 from ....core.auth import get_current_user
+from ....core.exceptions import (
+    InternalServiceError,
+    InvalidInputError,
+    NoActiveWorkspaceError,
+    NotFoundError,
+    ResourceConflictError,
+    TaskNotFoundError,
+)
 from ....core.workspace import workspace_manager
 from ....models import (
-    CurrentAnalysisTasksResponse,
     SequentialAnalysisDetachResponse,
     SequentialAnalysisPreferenceUpdateRequest,
     SequentialAnalysisPreferenceUpdateResponse,
@@ -44,8 +51,6 @@ from ....models import (
     SequentialAnalysisResponse,
 )
 from ..utils import ensure_task_synced, update_workspace
-from .current_tasks import get_current_task_ids_for_analysis
-from ....core.exceptions import InternalServiceError, InvalidInputError, NoActiveWorkspaceError, NotFoundError, ResourceConflictError, TaskNotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +121,9 @@ def _coerce_period_bound(value: Any, *, column_type: str, time_dtype: Any) -> An
         try:
             return float(value)
         except (TypeError, ValueError) as exc:
-            raise InvalidInputError(f"Invalid numeric period bound: {value!r}",) from exc
+            raise InvalidInputError(
+                f"Invalid numeric period bound: {value!r}",
+            ) from exc
     if isinstance(value, datetime | date):
         parsed: datetime | date = value
     elif isinstance(value, str):
@@ -124,9 +131,13 @@ def _coerce_period_bound(value: Any, *, column_type: str, time_dtype: Any) -> An
         try:
             parsed = datetime.fromisoformat(normalized)
         except ValueError as exc:
-            raise InvalidInputError(f"Invalid datetime period bound: {value!r}",) from exc
+            raise InvalidInputError(
+                f"Invalid datetime period bound: {value!r}",
+            ) from exc
     else:
-        raise InvalidInputError(f"Unsupported datetime period bound: {value!r}",)
+        raise InvalidInputError(
+            f"Unsupported datetime period bound: {value!r}",
+        )
     if time_dtype == pl.Date and isinstance(parsed, datetime):
         return parsed.date()
     return parsed
@@ -157,7 +168,9 @@ def _build_group_filter_expression(
         value_expr: pl.Expr | None = None
         for column_name, raw_value in group_selection.values.items():
             if schema.get(column_name) is None:
-                raise InvalidInputError(f"Group column '{column_name}' is not available on the source node",)
+                raise InvalidInputError(
+                    f"Group column '{column_name}' is not available on the source node",
+                )
             column_expr = pl.col(column_name)
             if raw_value is None:
                 current_expr = column_expr.is_null()
@@ -570,6 +583,8 @@ async def preview_sequential_analysis(
     except Exception as exc:  # pragma: no cover
         logger.error("Sequential analysis preview error: %s", exc, exc_info=True)
         raise InternalServiceError(f"Internal server error: {exc}")
+
+
 @router.post(
     "/nodes/{node_id}/sequential-analysis",
     response_model=SequentialAnalysisResponse,
@@ -590,34 +605,12 @@ async def run_sequential_analysis(
     - frontend sequential-analysis run action because they need this unit's "Run sequential analysis for one node and persist/update task payload" behavior.
 
     Why:
-    - Produces aggregated time-series counts and stores them as current task data.
+    - Produces aggregated time-series counts and stores them under an explicit task id.
     """
     user_id = current_user["id"]
     workspace_id, ws = _get_active_workspace(user_id)
 
     task_manager = get_task_manager(user_id)
-    existing_task_ids = task_manager.get_current_task_ids("sequential_analysis")
-    existing_task = (
-        task_manager.get_task(existing_task_ids[0]) if existing_task_ids else None
-    )
-    if existing_task and existing_task.request:
-        try:
-            existing_req_dict = existing_task.request.model_dump()
-            current_req_dict = request.model_dump()
-            current_req_dict["node_id"] = node_id
-
-            # Remove task_id if present in existing request
-            existing_req_dict.pop("task_id", None)
-
-            if existing_req_dict != current_req_dict:
-                raise ResourceConflictError("Clear current sequential analysis results before starting a new run",)
-        except HTTPException:
-            raise
-        except Exception as exc:
-            logger.debug(
-                "Failed to compare sequential-analysis request payloads for task reuse: %s",
-                exc,
-            )
 
     try:
         node = ws.nodes[node_id]
@@ -673,7 +666,9 @@ async def run_sequential_analysis(
             request.column_type == "datetime"
             and request.frequency not in valid_frequencies
         ):
-            raise InvalidInputError(f"Invalid frequency '{request.frequency}'. Valid options: {valid_frequencies}",)
+            raise InvalidInputError(
+                f"Invalid frequency '{request.frequency}'. Valid options: {valid_frequencies}",
+            )
         sequential_result = _run_sequential_analysis(
             node_data,
             time_column=request.time_column,
@@ -688,16 +683,6 @@ async def run_sequential_analysis(
             case_sensitive=request.case_sensitive,
         )
 
-        inherited_chart_type = DEFAULT_CHART_TYPE
-        if existing_task and existing_task.result:
-            previous_result = existing_task.result.to_json()
-            if (
-                isinstance(previous_result, dict)
-                and isinstance(previous_result.get("chart_type"), str)
-                and previous_result["chart_type"] in VALID_CHART_TYPES
-            ):
-                inherited_chart_type = previous_result["chart_type"]
-
         result_payload: dict[str, Any] = {
             "state": "successful",
             "data": sequential_result.to_dicts(),
@@ -705,7 +690,7 @@ async def run_sequential_analysis(
             "total_records": len(sequential_result),
         }
 
-        result_payload["chart_type"] = inherited_chart_type
+        result_payload["chart_type"] = DEFAULT_CHART_TYPE
 
         # Create/Update task
         req_dict = request.model_dump()
@@ -713,15 +698,13 @@ async def run_sequential_analysis(
 
         req_model = AnalysisSequentialAnalysisRequest(**req_dict)
 
-        if existing_task:
-            task = existing_task
-        else:
-            task_id = task_manager.create_task(req_model)
-            task = task_manager.get_task(task_id)
-            task_manager.set_current_task("sequential_analysis", task_id)
+        task_id = task_manager.create_task(req_model)
+        task = task_manager.get_task(task_id)
 
         if task is None:
-            raise InternalServiceError("Failed to load sequential analysis task",)
+            raise InternalServiceError(
+                "Failed to load sequential analysis task",
+            )
         task.request = req_model
         task.complete(GenericAnalysisResult(result_payload))
         task_manager.save_task(task)
@@ -732,30 +715,6 @@ async def run_sequential_analysis(
     except Exception as e:  # pragma: no cover
         logger.error("Unexpected sequential analysis error: %s", e, exc_info=True)
         raise InternalServiceError(f"Internal server error: {e}")
-@router.get(
-    "/sequential-analysis/tasks/current",
-    response_model=CurrentAnalysisTasksResponse,
-)
-async def sequential_analysis_current_tasks(
-    current_user: dict = Depends(get_current_user),
-):
-    """Return current task IDs for sequential-analysis.
-
-    Flow:
-    - Resolve authentication and request parameters from FastAPI dependencies.
-    - Delegate validation, manager calls, artifacts, or state changes to the owning helper.
-    - Shape the response payload or raise the HTTP error the client should see.
-
-    Used by:
-    - Frontend and API clients through the FastAPI GET /sequential-analysis/tasks/current route because they need this unit's "Return current task IDs for sequential-analysis" behavior.
-    """
-    user_id = current_user["id"]
-    workspace_id = workspace_manager.get_current_workspace_id(user_id)
-    if not workspace_id:
-        raise NoActiveWorkspaceError("No active workspace selected")
-    return await get_current_task_ids_for_analysis(
-        user_id, ["sequential_analysis", "sequential-analysis"]
-    )
 
 
 @router.get(
@@ -867,7 +826,9 @@ async def update_sequential_analysis_task_result(
     if updates is not None and updates.chart_type is not None:
         candidate = updates.chart_type
         if not isinstance(candidate, str) or candidate not in VALID_CHART_TYPES:
-            raise InvalidInputError("Invalid chart type. Valid options are: line, bar, area",)
+            raise InvalidInputError(
+                "Invalid chart type. Valid options are: line, bar, area",
+            )
         chart_type = candidate
 
     result_payload["chart_type"] = chart_type
@@ -928,7 +889,9 @@ async def detach_sequential_analysis_task(
     schema = source_lazy.collect_schema()
     time_dtype = schema.get(time_column)
     if time_dtype is None:
-        raise InvalidInputError(f"Time column '{time_column}' is not available on the source node",)
+        raise InvalidInputError(
+            f"Time column '{time_column}' is not available on the source node",
+        )
     filter_expr: pl.Expr | None = None
     for selected_period in request.selected_periods:
         period_start = _coerce_period_bound(

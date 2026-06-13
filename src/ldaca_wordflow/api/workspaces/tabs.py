@@ -3,11 +3,13 @@
 Persists the analysis tab system's structure into
 ``<workspace_dir>/tabs.json`` — a Chrome-style tab model layered on top of the
 analysis task system. Each analysis type (e.g. ``concordance``) owns a *tab
-group*: an ordered list of tabs plus the active tab id. Tabs are deliberately
-*thin*: a tab carries only its own id, an optional ``task_id`` (the analysis
-result it currently shows), and a display ``title``. Node selection and all
-analysis parameters live in the referenced ``AnalysisTask.request`` — never on
-the tab — so the task remains the single source of truth.
+group*: an ordered list of tabs plus the active tab id. A tab carries its own
+id, an optional ``task_id`` (the analysis result it currently shows), a display
+``title``, and its ``inputs`` — the node set the tab analyses under the
+"add-node-as-needed" model. Each tab owns its inputs so switching tabs never
+reconfigures another tab's node selection. Remaining analysis parameters
+(search words, thresholds, ...) still live on the referenced
+``AnalysisTask.request``.
 
 Endpoints:
 
@@ -53,11 +55,31 @@ logger = logging.getLogger(__name__)
 _TABS_FILENAME = "tabs.json"
 
 
-class AnalysisTab(BaseModel):
-    """A single thin analysis tab.
+class AnalysisTabInput(BaseModel):
+    """One node selected as input for an analysis tab.
 
-    Carries only identity and a pointer to the analysis result it shows. All
-    parameters/node selection live on the referenced ``AnalysisTask.request``.
+    Pairs a workspace ``node_id`` with an optional ``column`` pick (the single
+    text/data column the analysis runs on; ``None`` until a column is chosen or
+    for views that need no column). The frontend ``useNodeInputs`` hook adds,
+    removes, and column-assigns these entries under the add-node-as-needed
+    model.
+
+    Used by:
+    - `AnalysisTab.inputs` and the GET/PUT tab routes because the frontend tab
+      store round-trips this exact shape.
+    """
+
+    node_id: str
+    column: str | None = None
+
+
+class AnalysisTab(BaseModel):
+    """A single analysis tab.
+
+    Carries identity (``tab_id``), a pointer to the analysis result it shows
+    (``task_id``), a display ``title``, and the ``inputs`` node set it analyses.
+    Remaining analysis parameters live on the referenced
+    ``AnalysisTask.request``.
 
     Used by:
     - `AnalysisTabGroup` and the GET/PUT tab routes because the frontend tab
@@ -67,6 +89,7 @@ class AnalysisTab(BaseModel):
     tab_id: str
     task_id: str | None = None
     title: str = "Untitled"
+    inputs: list[AnalysisTabInput] = Field(default_factory=list)
 
 
 class AnalysisTabGroup(BaseModel):

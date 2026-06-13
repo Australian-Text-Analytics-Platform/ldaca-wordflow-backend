@@ -5,7 +5,7 @@ Used by:
 
 Flow:
 - FastAPI mounts these routes through the workspace package router.
-- Route handlers validate quotation requests, and manage current task state.
+- Route handlers validate quotation requests and manage task records.
 - Helpers submit extraction work, read on-demand result pages, and attach/detach generated columns.
 - Responses return task metadata, quotation pages, preference updates, or saved workspace changes.
 """
@@ -57,7 +57,6 @@ from ....models import (
 from ....settings import settings
 from ..utils import _build_detach_options
 from . import quotation_core as qcore
-from .current_tasks import get_current_task_ids_for_analysis
 from .generated_columns import QUOTE_EXTRACTION_COLUMN, is_tokenization_column_name
 
 logger = logging.getLogger(__name__)
@@ -110,29 +109,6 @@ async def _compute_on_demand_page(
 
 
 router = APIRouter(prefix="/workspaces", tags=["quotation"])
-
-
-@router.get("/quotation/tasks/current", response_model=CurrentAnalysisTasksResponse)
-async def quotation_current_tasks(
-    current_user: dict = Depends(get_current_user),
-):
-    """Return current task IDs for quotation analysis.
-
-    Flow:
-    - Resolve authentication and request parameters from FastAPI dependencies.
-    - Delegate validation, manager calls, artifacts, or state changes to the owning helper.
-    - Shape the response payload or raise the HTTP error the client should see.
-
-    Used by:
-    - Frontend and API clients through the FastAPI GET /quotation/tasks/current route because they need this unit's "Return current task IDs for quotation analysis" behavior.
-    """
-    user_id = current_user["id"]
-    workspace_id = workspace_manager.get_current_workspace_id(user_id)
-    if not workspace_id:
-        raise NoActiveWorkspaceError("No active workspace selected")
-    return await get_current_task_ids_for_analysis(
-        user_id, ["quotation_analysis", "quotation-analysis", "quotation"]
-    )
 
 
 @router.get(
@@ -416,16 +392,6 @@ async def get_quotation(
         )
 
         context_length_pref = DEFAULT_CONTEXT_LENGTH
-        try:
-            prev_task_ids = task_manager.get_current_task_ids("quotation")
-            prev_task = (
-                task_manager.get_task(prev_task_ids[0]) if prev_task_ids else None
-            )
-            if prev_task and prev_task.result:
-                prev_result = prev_task.result.to_json()
-                context_length_pref = qcore.extract_context_preference(prev_result)
-        except Exception:  # pragma: no cover
-            context_length_pref = DEFAULT_CONTEXT_LENGTH
 
         result_payload: dict[str, Any] = {
             **page_payload,
@@ -443,23 +409,8 @@ async def get_quotation(
             context_length=context_length_pref,
         )
 
-        existing_task_ids = task_manager.get_current_task_ids("quotation")
-        existing_task = (
-            task_manager.get_task(existing_task_ids[0]) if existing_task_ids else None
-        )
-
-        if existing_task:
-            existing_req = existing_task.request
-            if existing_req.node_id != node_id or existing_req.column != request.column:
-                raise ResourceConflictError(
-                    "Clear current quotation results before starting a new quotation analysis",
-                )
-            task = existing_task
-
-        else:
-            task_id = task_manager.create_task(analysis_request)
-            task = task_manager.get_task(task_id)
-            task_manager.set_current_task("quotation", task_id)
+        task_id = task_manager.create_task(analysis_request)
+        task = task_manager.get_task(task_id)
 
         if task is None:
             raise InternalServiceError(

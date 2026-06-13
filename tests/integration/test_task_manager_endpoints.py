@@ -12,20 +12,18 @@ from ldaca_wordflow.core.workspace import workspace_manager
 
 @pytest.mark.asyncio
 async def test_task_manager_endpoints_roundtrip(authenticated_client, workspace_id):
-    """Current endpoint returns task_id and task request/result endpoints serve data."""
+    """Task request/result endpoints serve data by explicit task id."""
     user_id = "test"
     manager = get_task_manager(user_id)
 
-    task_id = manager.create_task({"node_ids": ["node-1"]})
-    manager.set_current_task("token-frequencies", task_id)
-    manager.update_task(task_id, {"state": "successful", "data": {}})
-
-    resp = await authenticated_client.get(
-        "/api/workspaces/token-frequencies/tasks/current"
+    task_id = manager.create_task(
+        {
+            "node_ids": ["node-1"],
+            "node_columns": {"node-1": "text"},
+            "tokenizer_model": "native:plain_words_en",
+        }
     )
-    assert resp.status_code == 200
-    payload = resp.json()
-    assert payload["task_ids"] == [task_id]
+    manager.update_task(task_id, {"state": "successful", "data": {}})
 
     req_resp = await authenticated_client.get(
         f"/api/workspaces/token-frequencies/tasks/{task_id}/request"
@@ -49,7 +47,6 @@ async def test_clear_analysis_only_task_emits_task_removed(
     user_id = "test"
     analysis_manager = get_task_manager(user_id)
     task_id = analysis_manager.create_task({"node_ids": ["node-1"]})
-    analysis_manager.set_current_task("token-frequencies", task_id)
 
     worker_manager = workspace_manager.get_task_manager(user_id)
     queue = await worker_manager.subscribe(user_id)
@@ -151,7 +148,6 @@ async def test_clear_analysis_task_removes_child_worker_tasks(
     user_id = "test"
     analysis_manager = get_task_manager(user_id)
     parent_task_id = analysis_manager.create_task({"node_ids": ["node-1"]})
-    analysis_manager.set_current_task("concordance", parent_task_id)
 
     child_task_id = "task-concordance-materialize-child"
     grandchild_task_id = "task-concordance-materialize-grandchild"

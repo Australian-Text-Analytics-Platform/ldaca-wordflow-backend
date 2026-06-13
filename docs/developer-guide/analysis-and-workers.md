@@ -5,9 +5,9 @@
 The backend has two related but separate task concepts.
 
 `analysis/manager.py` stores user-visible analysis tasks. These records track
-which feature ran, what request produced the result, the current task for a
-tab, the terminal result or error, and parent/child relationships for follow-up
-tasks such as materialization.
+which feature ran, what request produced the result, the terminal result or
+error, and parent/child relationships for follow-up tasks such as
+materialization.
 
 `core/worker_task_manager.py` manages process-pool futures. It starts workers,
 captures progress, tracks worker pids, cancels running work, emits SSE events,
@@ -21,6 +21,13 @@ task must recursively clear registered child analysis tasks and worker tasks,
 remove any related analysis caches, and emit `task_removed` for every removed
 record. Frontend task lists should reconcile from `/api/tasks/clear`,
 `tasks_snapshot`, and stream events rather than guessing related task ids.
+
+Tabbed analysis tasks are equal, independent records. The backend must not treat
+one task as the current task for an analysis type, and submitting a task in one
+tab must not delete or replace another tab's task. The frontend persists the
+tab-to-task relationship in `tabs.json` (`tab_id -> task_id`) and should fetch
+request/result payloads by explicit `task_id`. Analysis request/result APIs do
+not accept frontend `tab_id`; tab identity stays in the frontend tab sidecar.
 
 ## Worker Registry
 
@@ -82,8 +89,8 @@ also accepts `?token=...` and adapts it to the normal auth dependency.
 
 The analysis routes live under `api/workspaces/analyses/`.
 
-- Token frequencies submit worker jobs, store result artifacts, support
-  current request/result endpoints, and expose update/clear flows.
+- Token frequencies submit independent worker jobs, store result artifacts,
+  support explicit task request/result endpoints, and expose update/clear flows.
 - Concordance supports regex and token modes, result paging, dispersion bins,
   detach, dispersion detach, and materialization.
 - Quotation can use a local extractor or remote quotation service, then pages,
