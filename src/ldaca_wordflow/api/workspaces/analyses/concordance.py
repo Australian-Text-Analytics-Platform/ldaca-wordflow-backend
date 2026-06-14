@@ -64,6 +64,7 @@ from .concordance_core import (
 )
 from .generated_columns import (
     CONC_EXTRACTION_COLUMN,
+    MATERIALIZED_CONCORDANCE_COLUMNS,
 )
 
 router = APIRouter(prefix="/workspaces", tags=["concordance"])
@@ -434,7 +435,16 @@ async def detach_concordance(
     include_document_column = False
     include_extraction = False
     columns_to_select: list[str] = []
-    if request.selected_columns:
+    # The generated CONC_* columns are user-choosable like any other column.
+    # Record exactly which ones the client kept so the worker drops the rest.
+    # `None` (no selection sent) preserves the legacy "keep all generated"
+    # behavior for older callers. Generated columns must NOT be projected from
+    # the source node here — they don't exist in `node_data` and are produced
+    # by the detach worker; selecting them off source raises ColumnNotFound.
+    generated_names = set(MATERIALIZED_CONCORDANCE_COLUMNS)
+    selected_generated_columns: list[str] | None = None
+    if request.selected_columns is not None:
+        selected_generated_columns = []
         for col in request.selected_columns:
             if col == request.column:
                 include_document_column = True
@@ -444,6 +454,9 @@ async def detach_concordance(
             # source selection.
             if col == CONC_EXTRACTION_COLUMN:
                 include_extraction = True
+                continue
+            if col in generated_names:
+                selected_generated_columns.append(col)
                 continue
             columns_to_select.append(col)
 
@@ -496,6 +509,7 @@ async def detach_concordance(
                 "new_node_name": request.new_node_name,
                 "include_document_column": include_document_column,
                 "include_extraction": include_extraction,
+                "selected_generated_columns": selected_generated_columns,
                 "extra_columns_data": extra_columns_data
                 if extra_columns_data
                 else None,

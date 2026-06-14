@@ -226,6 +226,20 @@ class WorkspaceGraphResponse(BaseModel):
     edges: list[WorkspaceGraphEdge]
 
 
+class WorkspaceNodeReorderRequest(BaseModel):
+    """Request body for persisting a new workspace node order.
+
+    Used by:
+    - backend ``reorder_workspace_nodes`` route and the generated client because the
+      list-view drag-to-reorder gesture commits the full node id sequence.
+
+    Flow: the route validates the active workspace, applies ``ordered_ids`` via
+        ``Workspace.reorder_nodes``, persists, and returns the rebuilt graph.
+    """
+
+    ordered_ids: list[str]
+
+
 class WorkspaceNodesResponse(BaseModel):
     """Response schema returned by API routes and consumed by generated clients for workspace nodes response.
 

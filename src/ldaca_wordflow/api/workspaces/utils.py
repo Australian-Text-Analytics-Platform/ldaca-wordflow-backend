@@ -494,6 +494,9 @@ def _create_and_persist_child_node(
         document=document,
     )
     workspace.add_node(new_node)
+    # Smart insertion: keep the list view and connector arrows tidy by placing the
+    # derived node directly below its mother node instead of at the end of the list.
+    workspace.place_node_after_parent(new_node)
     update_workspace(user_id, workspace_id)
     return new_node
 

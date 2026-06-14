@@ -44,6 +44,68 @@ async def test_concordance_detach_starts_task(authenticated_client, workspace_id
 
 
 @pytest.mark.anyio
+async def test_concordance_detach_accepts_generated_columns(
+    authenticated_client, workspace_id
+):
+    """Selecting CONC_* generated columns must not be projected off the source.
+
+    Regression: the dialog now default-selects the generated concordance
+    columns (CONC_matched_text, CONC_l1, ...). Those columns are produced by
+    the detach worker and do not exist in the source node, so the endpoint
+    must route them to ``selected_generated_columns`` instead of trying to
+    ``select`` them off ``node_data`` (which raised ColumnNotFoundError -> 500).
+    """
+    df = pl.DataFrame(
+        {
+            "text": ["alpha beta", "beta gamma", "alpha gamma"],
+            "speaker": ["a", "b", "c"],
+        }
+    )
+    workspace = workspace_manager.get_current_workspace("test")
+    assert workspace is not None
+
+    node = Node(
+        data=df.lazy(),
+        name="text_node",
+        workspace=workspace,
+        operation="test_add",
+        parents=[],
+    )
+    workspace.add_node(node)
+
+    resp = await authenticated_client.post(
+        f"/api/workspaces/nodes/{node.id}/concordance/detach",
+        json={
+            "node_id": node.id,
+            "column": "text",
+            "search_word": "alpha",
+            "num_left_tokens": 2,
+            "num_right_tokens": 2,
+            "regex": False,
+            "case_sensitive": False,
+            # Mix of generated CONC_* columns, the extraction column, and a
+            # real source metadata column — the shape the dialog now sends.
+            "selected_columns": [
+                "CONC_left_context",
+                "CONC_matched_text",
+                "CONC_right_context",
+                "CONC_start_idx",
+                "CONC_end_idx",
+                "CONC_l1",
+                "CONC_r1",
+                "CONC_extraction",
+                "speaker",
+            ],
+        },
+    )
+
+    assert resp.status_code == 200, resp.text
+    payload = resp.json()
+    assert payload.get("state") == "running"
+    assert payload.get("metadata", {}).get("task_id")
+
+
+@pytest.mark.anyio
 async def test_concordance_detach_options_include_mandatory_and_optional_columns(
     authenticated_client, workspace_id
 ):

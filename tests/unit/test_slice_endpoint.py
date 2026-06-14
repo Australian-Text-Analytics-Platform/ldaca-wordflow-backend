@@ -44,6 +44,9 @@ class DummyWorkspace:
         self.nodes[node.id] = node
         self._manager.add_calls.append({"node": node})
 
+    def place_node_after_parent(self, _node):
+        return None
+
     def save(self, _target_dir):
         return None
 

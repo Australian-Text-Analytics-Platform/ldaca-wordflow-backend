@@ -25,62 +25,143 @@ from pydantic import BaseModel, Field
 # These classes and type aliases were split out of __init__.py into dedicated
 # domain files. They are re-exported here for backward compatibility.
 # =============================================================================
-
-from .ai_annotation import AiAnnotationCategoriesResponse, AiAnnotationDetachRequest
-from .ai_annotation import AiAnnotationDetachResponse, AiAnnotationModelsRequest
-from .ai_annotation import AiAnnotationModelsResponse, AiAnnotationProvidersResponse
-from .ai_annotation import AiAnnotationRequest, AiAnnotationResponse, AiAnnotationResultQuery
-from .ai_annotation import AiAnnotationSaveRequest, AiAnnotationSaveResponse
-from .analysis_common import AnalysisClearResponse, AnalysisSorting, AnalysisTaskActionResponse
-from .analysis_common import AnalysisTaskMetadata, CurrentAnalysisTasksResponse, DetachNodeOption
-from .analysis_common import PaginationInfo
+from .ai_annotation import (
+    AiAnnotationCategoriesResponse,
+    AiAnnotationDetachRequest,
+    AiAnnotationDetachResponse,
+    AiAnnotationModelsRequest,
+    AiAnnotationModelsResponse,
+    AiAnnotationProvidersResponse,
+    AiAnnotationRequest,
+    AiAnnotationResponse,
+    AiAnnotationResultQuery,
+    AiAnnotationSaveRequest,
+    AiAnnotationSaveResponse,
+)
+from .analysis_common import (
+    AnalysisClearResponse,
+    AnalysisSorting,
+    AnalysisTaskActionResponse,
+    AnalysisTaskMetadata,
+    CurrentAnalysisTasksResponse,
+    DetachNodeOption,
+    PaginationInfo,
+)
 from .auth import AuthInfoResponse, GoogleIn, GoogleOut, User, UserResponse
-from .concordance import ConcordanceAnalysisRequest, ConcordanceAnalysisResponse
-from .concordance import ConcordanceDetachNodeOption, ConcordanceDetachOptionsResponse
-from .concordance import ConcordanceDetachRequest, ConcordanceDispersionBinsResponse
-from .concordance import ConcordanceDispersionDetachRequest, ConcordanceMaterializeRequest
-from .files import CreateFolderRequest, CreateFolderResponse, FileInfoResponse
-from .files import FileTreeNodeResponse, FileUploadResponse, FilesImportTaskStartResponse
-from .files import FilesTaskActionResponse, FilesTasksListResponse, ImportSampleDataRequest
-from .files import ImportSampleDataResponse, LDaCAImportRequest, MessageResponse, MoveFileRequest
-from .files import OniSearchRequest, OniSearchResponse, OniSearchResult, RenameColumnRequest
-from .files import SampleDataCatalogueResponse, SampleDataCollection, SampleDataFileEntry
-from .files import TaskCancelActionResponse, TaskClearActionResponse, TaskListResponse
-from .nodes import ColumnDescribeResponse, ColumnOperationsResponse, ColumnUniqueValuesResponse
-from .nodes import FilterCondition, FilterPreviewResponse, FilterRequest, NodeDataResponse
-from .nodes import NodeQueryPlanResponse, NodeShapeResponse, SliceRequest
-from .polars_expression import PolarsExpressionApplyResponse, PolarsExpressionContext
-from .polars_expression import PolarsExpressionItem, PolarsExpressionRequest
+from .concordance import (
+    ConcordanceAnalysisRequest,
+    ConcordanceAnalysisResponse,
+    ConcordanceDetachNodeOption,
+    ConcordanceDetachOptionsResponse,
+    ConcordanceDetachRequest,
+    ConcordanceDispersionBinsResponse,
+    ConcordanceDispersionDetachRequest,
+    ConcordanceMaterializeRequest,
+)
+from .files import (
+    CreateFolderRequest,
+    CreateFolderResponse,
+    FileInfoResponse,
+    FilesImportTaskStartResponse,
+    FilesTaskActionResponse,
+    FilesTasksListResponse,
+    FileTreeNodeResponse,
+    FileUploadResponse,
+    ImportSampleDataRequest,
+    ImportSampleDataResponse,
+    LDaCAImportRequest,
+    MessageResponse,
+    MoveFileRequest,
+    OniSearchRequest,
+    OniSearchResponse,
+    OniSearchResult,
+    RenameColumnRequest,
+    SampleDataCatalogueResponse,
+    SampleDataCollection,
+    SampleDataFileEntry,
+    TaskCancelActionResponse,
+    TaskClearActionResponse,
+    TaskListResponse,
+)
+from .nodes import (
+    ColumnDescribeResponse,
+    ColumnOperationsResponse,
+    ColumnUniqueValuesResponse,
+    FilterCondition,
+    FilterPreviewResponse,
+    FilterRequest,
+    NodeDataResponse,
+    NodeQueryPlanResponse,
+    NodeShapeResponse,
+    SliceRequest,
+)
+from .polars_expression import (
+    PolarsExpressionApplyResponse,
+    PolarsExpressionContext,
+    PolarsExpressionItem,
+    PolarsExpressionRequest,
+)
 from .preferences import QuotationPreferences
-from .quotation import QuotationAnalysisResponse, QuotationDetachNodeOption
-from .quotation import QuotationDetachOptionsResponse, QuotationDetachRequest
-from .quotation import QuotationEngineConfig, QuotationEngineType
-from .quotation import QuotationMaterializeRequest, QuotationPreferenceUpdateResponse
-from .quotation import QuotationRequest, QuotationResultQuery
-from .sequential_analysis import SequentialAnalysisDetachResponse
-from .sequential_analysis import SequentialAnalysisPreferenceUpdateRequest
-from .sequential_analysis import SequentialAnalysisPreferenceUpdateResponse
-from .sequential_analysis import SequentialAnalysisPreviewResponse, SequentialAnalysisRequest
-from .sequential_analysis import SequentialAnalysisResponse
-from .token_frequencies import TokenFrequencyPreferenceUpdateRequest, TokenFrequencyRequest
-from .token_frequencies import TokenFrequencyResponse
-from .topic_modeling import TopicModelingData, TopicModelingDetachData
-from .topic_modeling import TopicModelingDetachNodeOption, TopicModelingDetachOptionsResponse
-from .topic_modeling import TopicModelingDetachRequest, TopicModelingDetachResponse
-from .topic_modeling import TopicModelingDetachedNode
-from .topic_modeling import TopicModelingEmbeddingCacheClearResponse
-from .topic_modeling import TopicModelingEmbeddingCacheSizeResponse, TopicModelingRequest
-from .topic_modeling import TopicModelingResponse
-from .workspace import CurrentWorkspaceResponse, NodeDocumentColumnUpdateRequest
-from .workspace import NodeTokenizationPreferenceRequest, SetCurrentWorkspaceResponse
-from .workspace import TokenizerModelsResponse, WorkspaceActionResponse, WorkspaceCreateRequest
-from .workspace import WorkspaceGraphResponse, WorkspaceInfo, WorkspaceNodeInfo
-from .workspace import WorkspaceNodesResponse, WorkspaceSummary, WorkspaceTaskStartResponse
-from .workspace import WorkspaceUploadResponse
+from .quotation import (
+    QuotationAnalysisResponse,
+    QuotationDetachNodeOption,
+    QuotationDetachOptionsResponse,
+    QuotationDetachRequest,
+    QuotationEngineConfig,
+    QuotationEngineType,
+    QuotationMaterializeRequest,
+    QuotationPreferenceUpdateResponse,
+    QuotationRequest,
+    QuotationResultQuery,
+)
+from .sequential_analysis import (
+    SequentialAnalysisDetachResponse,
+    SequentialAnalysisPreferenceUpdateRequest,
+    SequentialAnalysisPreferenceUpdateResponse,
+    SequentialAnalysisPreviewResponse,
+    SequentialAnalysisRequest,
+    SequentialAnalysisResponse,
+)
+from .token_frequencies import (
+    TokenFrequencyPreferenceUpdateRequest,
+    TokenFrequencyRequest,
+    TokenFrequencyResponse,
+)
+from .topic_modeling import (
+    TopicModelingData,
+    TopicModelingDetachData,
+    TopicModelingDetachedNode,
+    TopicModelingDetachNodeOption,
+    TopicModelingDetachOptionsResponse,
+    TopicModelingDetachRequest,
+    TopicModelingDetachResponse,
+    TopicModelingEmbeddingCacheClearResponse,
+    TopicModelingEmbeddingCacheSizeResponse,
+    TopicModelingRequest,
+    TopicModelingResponse,
+)
+from .workspace import (
+    CurrentWorkspaceResponse,
+    NodeDocumentColumnUpdateRequest,
+    NodeTokenizationPreferenceRequest,
+    SetCurrentWorkspaceResponse,
+    TokenizerModelsResponse,
+    WorkspaceActionResponse,
+    WorkspaceCreateRequest,
+    WorkspaceGraphResponse,
+    WorkspaceInfo,
+    WorkspaceNodeInfo,
+    WorkspaceNodeReorderRequest,
+    WorkspaceNodesResponse,
+    WorkspaceSummary,
+    WorkspaceTaskStartResponse,
+    WorkspaceUploadResponse,
+)
 
 # =============================================================================
 # CLASSES UNIQUE TO THIS MODULE (no domain-file equivalent)
 # =============================================================================
+
 
 class ReplaceRequest(BaseModel):
     """Request schema used by API routes and generated clients for replace request.

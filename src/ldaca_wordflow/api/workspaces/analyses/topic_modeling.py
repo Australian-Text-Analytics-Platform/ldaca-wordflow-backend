@@ -996,6 +996,8 @@ async def detach_topic_modeling(
             parents=parents,
         )
         ws.add_node(new_node)
+        # Smart insertion: keep the detached topic node directly below its mother.
+        ws.place_node_after_parent(new_node)
 
         text_column = artifact_payload.get("text_column")
         if text_column and text_column in source_selected:
@@ -1026,6 +1028,9 @@ async def detach_topic_modeling(
             parents=[new_node],
         )
         ws.add_node(meanings_node)
+        # Smart insertion: keep the meanings node directly below the topic node it
+        # was derived from.
+        ws.place_node_after_parent(meanings_node)
 
         detached_nodes.append(
             TopicModelingDetachedNode(

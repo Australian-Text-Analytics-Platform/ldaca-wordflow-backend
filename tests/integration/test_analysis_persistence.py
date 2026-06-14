@@ -806,6 +806,9 @@ class TestSequentialAnalysisPersistence:
                 self.added_nodes.append(node)
                 self.nodes[node.id] = node
 
+            def place_node_after_parent(self, _node):
+                return None
+
         dummy_workspace = DummyWorkspace()
 
         monkeypatch.setattr(
@@ -914,6 +917,9 @@ class TestSequentialAnalysisPersistence:
             def add_node(self, node):
                 self.added_nodes.append(node)
                 self.nodes[node.id] = node
+
+            def place_node_after_parent(self, _node):
+                return None
 
         dummy_workspace = DummyWorkspace()
 

@@ -646,6 +646,10 @@ class WorkerTaskManager:
 
                         new_node = node_from_dict(node_payload, base_dir=target_dir)
                         workspace.add_node(new_node)
+                        # Smart insertion: keep async-detached result nodes directly
+                        # below their mother node in the list view, matching the
+                        # synchronous creation path.
+                        workspace.place_node_after_parent(new_node)
                         workspace.modified_at = datetime.now().isoformat()
                         workspace.save(target_dir)
                         workspace_manager._set_cached_path(

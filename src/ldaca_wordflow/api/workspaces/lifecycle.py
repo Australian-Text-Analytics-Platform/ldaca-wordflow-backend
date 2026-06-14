@@ -25,6 +25,14 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 
 from ...core.auth import get_current_user
+from ...core.exceptions import (
+    AccessDeniedError,
+    InvalidInputError,
+    ResourceConflictError,
+    ResourceGoneError,
+    TaskNotFoundError,
+    WorkspaceNotFoundError,
+)
 from ...core.utils import validate_workspace_name
 from ...core.workspace import workspace_manager
 from ...models import (
@@ -34,14 +42,18 @@ from ...models import (
     WorkspaceCreateRequest,
     WorkspaceGraphResponse,
     WorkspaceInfo,
+    WorkspaceNodeReorderRequest,
     WorkspaceNodesResponse,
     WorkspaceSummary,
     WorkspaceTaskStartResponse,
     WorkspaceUploadResponse,
 )
 from .schema_filter import frontend_node_info
-from .utils import require_current_workspace, require_current_workspace_id, update_workspace
-from ...core.exceptions import AccessDeniedError, InvalidInputError, ResourceConflictError, ResourceGoneError, TaskNotFoundError, WorkspaceNotFoundError
+from .utils import (
+    require_current_workspace,
+    require_current_workspace_id,
+    update_workspace,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -396,7 +408,9 @@ async def download_workspace_artifact(
     from ...core.worker_task_manager import TaskStatus
 
     if task_info.status != TaskStatus.SUCCESSFUL:
-        raise ResourceConflictError(f"Task is not completed (state: {task_info.status.value})",)
+        raise ResourceConflictError(
+            f"Task is not completed (state: {task_info.status.value})",
+        )
     result = task_info.result
     if not isinstance(result, dict) or not result.get("artifact_path"):
         raise ResourceGoneError("Artifact metadata missing")
@@ -480,7 +494,9 @@ async def upload_workspace_zip(
                     if p.name == "metadata.json" and "__MACOSX" not in p.parts
                 ]
                 if not metadata_candidates:
-                    raise InvalidInputError("ZIP must contain workspace metadata.json",)
+                    raise InvalidInputError(
+                        "ZIP must contain workspace metadata.json",
+                    )
                 metadata_path_in_zip = min(
                     metadata_candidates, key=lambda p: len(p.parts)
                 )
@@ -515,7 +531,9 @@ async def upload_workspace_zip(
             extracted_root = Path(extraction_dir)
             metadata_file = extracted_root / "metadata.json"
             if not metadata_file.exists():
-                raise InvalidInputError("ZIP missing required metadata.json at workspace root",)
+                raise InvalidInputError(
+                    "ZIP missing required metadata.json at workspace root",
+                )
             with metadata_file.open("r", encoding="utf-8") as f:
                 metadata = json.load(f)
 
@@ -568,6 +586,8 @@ async def upload_workspace_zip(
         return {"state": "successful", "workspace": summary}
     except zipfile.BadZipFile as exc:
         raise InvalidInputError(f"Invalid ZIP file: {exc}")
+
+
 @router.get("/info", response_model=WorkspaceInfo)
 async def get_workspace_info(
     current_user: dict = Depends(get_current_user),
@@ -604,6 +624,38 @@ async def get_workspace_graph(
     """
     user_id = current_user["id"]
     workspace = require_current_workspace(user_id)
+    graph = workspace.graph_json()
+    graph["nodes"] = [
+        frontend_node_info(workspace.nodes[entry["id"]])
+        for entry in graph.get("nodes", [])
+        if entry.get("id") in workspace.nodes
+    ]
+    return graph
+
+
+@router.put("/nodes/order", response_model=WorkspaceGraphResponse)
+async def reorder_workspace_nodes(
+    request: WorkspaceNodeReorderRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """Persist a new node order for the current workspace and return the graph.
+
+    Flow:
+    - Resolve the authenticated user's active workspace id and workspace object.
+    - Apply ``ordered_ids`` through ``Workspace.reorder_nodes`` (unknown ids are
+      ignored and any omitted node keeps its tail position, so a stale client
+      payload can never drop nodes).
+    - Persist the workspace and return the rebuilt graph in the new order.
+
+    Used by:
+    - Frontend workspace list-view drag-to-reorder gesture because dropping a row
+      commits the full node sequence as the durable source of truth.
+    """
+    user_id = current_user["id"]
+    workspace_id = require_current_workspace_id(user_id)
+    workspace = require_current_workspace(user_id)
+    workspace.reorder_nodes(request.ordered_ids)
+    update_workspace(user_id, workspace_id, workspace)
     graph = workspace.graph_json()
     graph["nodes"] = [
         frontend_node_info(workspace.nodes[entry["id"]])

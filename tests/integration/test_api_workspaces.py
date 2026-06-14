@@ -1353,3 +1353,68 @@ class TestWorkspaceAPI:
         payload = response.json()
         assert payload["pagination"]["total_rows"] == 2
         assert [row["left_value"] for row in payload["data"]] == ["a", "b"]
+
+
+@pytest.mark.integration
+@pytest.mark.workspace
+class TestWorkspaceNodeOrdering:
+    """Tests for node reordering and smart child insertion in the list view."""
+
+    async def _add_three_nodes(self, client, tiny_text_file):
+        """Add the tiny file three times to produce three appended root nodes."""
+        ids = []
+        for _ in range(3):
+            resp = await client.post(
+                "/api/workspaces/nodes",
+                params={"filename": tiny_text_file.name},
+            )
+            assert resp.status_code == 200, resp.text
+            ids.append(resp.json()["id"])
+        return ids
+
+    async def test_reorder_workspace_nodes_persists_new_order(
+        self, authenticated_client, workspace_id, tiny_text_file
+    ):
+        a, b, c = await self._add_three_nodes(authenticated_client, tiny_text_file)
+
+        resp = await authenticated_client.put(
+            "/api/workspaces/nodes/order",
+            json={"ordered_ids": [c, a, b]},
+        )
+        assert resp.status_code == 200, resp.text
+        returned = [node["id"] for node in resp.json()["nodes"]]
+        assert returned == [c, a, b]
+
+        # The new order must survive a fresh graph read (persisted source of truth).
+        graph = await authenticated_client.get("/api/workspaces/graph")
+        assert graph.status_code == 200, graph.text
+        assert [node["id"] for node in graph.json()["nodes"]] == [c, a, b]
+
+    async def test_reorder_ignores_unknown_ids_without_dropping_nodes(
+        self, authenticated_client, workspace_id, tiny_text_file
+    ):
+        a, b, c = await self._add_three_nodes(authenticated_client, tiny_text_file)
+
+        resp = await authenticated_client.put(
+            "/api/workspaces/nodes/order",
+            json={"ordered_ids": [b, "ghost-id"]},
+        )
+        assert resp.status_code == 200, resp.text
+        returned = [node["id"] for node in resp.json()["nodes"]]
+        # b moves to the front; a and c keep their relative order at the tail.
+        assert returned == [b, a, c]
+
+    async def test_clone_inserts_directly_below_source_node(
+        self, authenticated_client, workspace_id, tiny_text_file
+    ):
+        a, b, c = await self._add_three_nodes(authenticated_client, tiny_text_file)
+
+        resp = await authenticated_client.post(f"/api/workspaces/nodes/{a}/clone")
+        assert resp.status_code == 200, resp.text
+        clone_id = resp.json()["id"]
+
+        graph = await authenticated_client.get("/api/workspaces/graph")
+        assert graph.status_code == 200, graph.text
+        order = [node["id"] for node in graph.json()["nodes"]]
+        # The clone sits immediately after its source rather than at the end.
+        assert order == [a, clone_id, b, c]

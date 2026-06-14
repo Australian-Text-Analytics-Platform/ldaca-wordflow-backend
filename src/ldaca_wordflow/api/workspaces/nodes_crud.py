@@ -16,8 +16,17 @@ from typing import Any, cast
 
 import polars as pl
 from fastapi import APIRouter, Depends, HTTPException, Query
+from polars_text.models import PREDEFINED_MODELS, predefined_model_records
 
 from ...core.auth import get_current_user
+from ...core.docworkspace_data_types import TM_DISTRIBUTION_POLARS_DTYPE
+from ...core.exceptions import (
+    InternalServiceError,
+    InvalidInputError,
+    NodeNotFoundError,
+    NotFoundError,
+    ValidationError,
+)
 from ...core.polars_operations import get_operations_for_dtype
 from ...core.tokenization import tokenise_column
 from ...core.utils import stringify_unsafe_integers
@@ -34,11 +43,7 @@ from ...models import (
     TokenizerModelsResponse,
     WorkspaceNodeInfo,
 )
-from polars_text.models import PREDEFINED_MODELS, predefined_model_records
-
 from .schema_filter import frontend_node_info, project_visible
-from ...core.docworkspace_data_types import TM_DISTRIBUTION_POLARS_DTYPE
-from ...core.exceptions import InternalServiceError, InvalidInputError, NodeNotFoundError, NotFoundError, ValidationError
 from .utils import (
     Node,
     _is_string_list_dtype,
@@ -66,7 +71,9 @@ def _normalise_iso6391_language_code(code: str | None) -> str | None:
         return None
     primary = re.split(r"[-_]", trimmed, maxsplit=1)[0]
     if not re.fullmatch(r"[a-z]{2}", primary):
-        raise ValidationError("language must be an ISO 639-1 two-letter code",)
+        raise ValidationError(
+            "language must be an ISO 639-1 two-letter code",
+        )
     return primary
 
 
@@ -243,6 +250,9 @@ async def clone_node(
             tokenization=_propagated_tokenization(node, cloned_lazy),
         )
         workspace.add_node(new_node)
+        # Smart insertion: place the clone right below its source node so the list
+        # view keeps the clone next to the node it was derived from.
+        workspace.place_node_after_parent(new_node)
         update_workspace(user_id, workspace_id)
         try:
             return frontend_node_info(new_node)
@@ -251,6 +261,8 @@ async def clone_node(
             return {"id": getattr(new_node, "id", None), "name": new_name}
     except Exception as exc:
         raise InternalServiceError(str(exc)) from exc
+
+
 @router.put("/nodes/{node_id}/document-column", response_model=WorkspaceNodeInfo)
 async def set_node_document_column(
     node_id: str,
@@ -350,13 +362,20 @@ async def get_column_unique_values(
             topic_df = cast(
                 pl.DataFrame,
                 lazyframe.select(
-                    pl.col(column_name).explode().struct.field("topic_id").alias("topic_id")
+                    pl.col(column_name)
+                    .explode()
+                    .struct.field("topic_id")
+                    .alias("topic_id")
                 )
                 .unique(maintain_order=True)
                 .collect(),
             )
             topic_ids = sorted(
-                {int(value) for value in topic_df.get_column("topic_id").to_list() if value is not None}
+                {
+                    int(value)
+                    for value in topic_df.get_column("topic_id").to_list()
+                    if value is not None
+                }
             )
             return {
                 "column_name": column_name,
@@ -401,6 +420,8 @@ async def get_column_unique_values(
         }
     except Exception as exc:
         raise InternalServiceError(str(exc)) from exc
+
+
 @router.get(
     "/nodes/{node_id}/columns/{column_name}/describe",
     response_model=ColumnDescribeResponse,
@@ -444,11 +465,11 @@ async def describe_column(
                     if dt.tzinfo is None:
                         dt = dt.replace(tzinfo=timezone.utc)
                     return dt.isoformat()
-                except (ValueError, AttributeError):
+                except ValueError, AttributeError:
                     return val
             try:
                 return float(val)
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 return val
 
         return ColumnDescribeResponse(
@@ -469,6 +490,8 @@ async def describe_column(
         )
     except Exception as exc:
         raise InternalServiceError(str(exc)) from exc
+
+
 @router.get(
     "/nodes/{node_id}/columns/{column_name}/operations",
     response_model=ColumnOperationsResponse,

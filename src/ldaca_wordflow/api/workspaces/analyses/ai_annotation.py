@@ -636,6 +636,8 @@ async def detach_ai_annotation(
         raise InternalServiceError(
             f"Failed to add detached node: {exc}",
         )
+    # Smart insertion: keep the annotated node directly below its source node.
+    ws.place_node_after_parent(new_node)
     update_workspace(user_id, workspace_id, best_effort=True)
 
     return {

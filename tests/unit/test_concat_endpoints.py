@@ -92,6 +92,9 @@ def fake_workspace_manager(monkeypatch: pytest.MonkeyPatch, sample_nodes):
             self.nodes[node.node_id] = node
             self._manager.add_calls.append({"node": node})
 
+        def place_node_after_parent(self, _node):
+            return None
+
         def save(self, _target_dir):
             return None
 
