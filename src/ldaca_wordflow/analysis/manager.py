@@ -1,8 +1,9 @@
 """Analysis storage manager.
 
 Provides per-user in-memory storage for analysis task records.  Each
-``AnalysisTask`` tracks the ``workspace_id`` it was created for, so
-tasks can be bulk-cleared when a workspace is unloaded.
+``AnalysisTask`` tracks the ``workspace_id`` it was created for, so inactive
+workspace records can be evicted from memory without deleting reloadable
+artifacts, while explicit task clears still reclaim owned files.
 
 Used by:
 - Analysis routes, worker result persistence, and backend tests because they need a
@@ -371,6 +372,22 @@ class TaskManager:
         ]
         for task_id in to_remove:
             self.clear_task(task_id)
+        return to_remove
+
+    def evict_workspace(self, workspace_id: str) -> list[str]:
+        """Drop workspace task records without deleting task-owned artifacts.
+
+        Used by `WorkspaceManager` unload/switch flows after task records are
+        snapshotted to disk. Persisted tabs can rehydrate those task ids on the
+        next load, so artifact cleanup must remain tied to explicit task clear.
+        """
+        to_remove = [
+            task.task_id
+            for task in self.store.get_all_tasks()
+            if task.workspace_id == workspace_id
+        ]
+        for task_id in to_remove:
+            self.store.clear_task(task_id)
         return to_remove
 
     def get_all_tasks(self) -> list[AnalysisTask]:

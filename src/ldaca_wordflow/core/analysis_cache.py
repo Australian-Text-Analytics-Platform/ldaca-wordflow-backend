@@ -161,7 +161,10 @@ def cleanup_task_caches(user_id: str, workspace_id: str, task_id: str) -> int:
 def cleanup_workspace_caches(user_id: str, workspace_id: str) -> int:
     """Delete every analysis cache parquet in a workspace's data dir.
 
-    Used on workspace unload. Returns number of files unlinked.
+    Reserved for explicit workspace-scoped cache maintenance. Normal workspace
+    unload preserves these files because persisted tabs may rehydrate task
+    results backed by materialized cache parquets. Returns number of files
+    unlinked.
 
     Used by:
     - backend tests, core workspace and worker services because tests need the same

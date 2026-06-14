@@ -332,6 +332,33 @@ class TestWorkspaceAPI:
             assert response.status_code == 200
             mock_delete.assert_called_once_with("test", "workspace-b")
 
+    async def test_set_current_workspace_delegates_lifecycle_eviction(
+        self, authenticated_client
+    ):
+        """Route must not evict task records before manager persistence runs."""
+        with (
+            patch(
+                "ldaca_wordflow.api.workspaces.workspace_manager.set_current_workspace"
+            ) as mock_set_current,
+            patch(
+                "ldaca_wordflow.api.workspaces.workspace_manager.get_current_workspace_id"
+            ) as mock_current_entry,
+            patch(
+                "ldaca_wordflow.api.workspaces.workspace_manager.clear_workspace_tasks"
+            ) as mock_clear_tasks,
+        ):
+            mock_current_entry.return_value = "workspace-a"
+            mock_set_current.return_value = True
+
+            response = await authenticated_client.post(
+                "/api/workspaces/current",
+                params={"workspace_id": "workspace-b"},
+            )
+
+            assert response.status_code == 200
+            mock_set_current.assert_called_once_with("test", "workspace-b")
+            mock_clear_tasks.assert_not_called()
+
     async def test_download_workspace_zip(self, authenticated_client, tmp_path):
         """Workspace download kickoff submits a running background task."""
         workspace_dir = tmp_path / "ws1"
@@ -674,6 +701,9 @@ class TestWorkspaceAPI:
             patch(
                 "ldaca_wordflow.api.workspaces.workspace_manager.get_current_workspace_id"
             ) as mock_current_entry,
+            patch(
+                "ldaca_wordflow.api.workspaces.workspace_manager.clear_workspace_tasks"
+            ) as mock_clear_tasks,
         ):
             mock_unload.return_value = True
             mock_current_entry.return_value = "workspace-123"
@@ -683,6 +713,7 @@ class TestWorkspaceAPI:
             assert data.get("state") == "successful"
             assert data["id"] == "workspace-123"
             mock_unload.assert_called_once_with("test", "workspace-123", save=True)
+            mock_clear_tasks.assert_not_called()
 
     async def test_unload_workspace_not_found(self, authenticated_client):
         """Test unloading non-existent workspace returns 404"""
@@ -1141,7 +1172,6 @@ class TestWorkspaceAPI:
     ):
         """Topic-distribution (tmdist) columns return distinct topic ids."""
         import polars as pl
-
         from ldaca_wordflow.core.docworkspace_data_types import (
             TM_DISTRIBUTION_POLARS_DTYPE,
         )

@@ -541,7 +541,9 @@ class WorkspaceManager:
     def clear_workspace_artifacts_dir(self, user_id: str, workspace_id: str) -> bool:
         """Delete workspace analysis artifact directory if it exists.
 
-        Called on workspace unload to remove transient analysis artifacts.
+        This is a destructive helper for explicit cleanup flows. Normal workspace
+        unload preserves artifacts because persisted tabs may still reference
+        task results backed by files in this directory.
 
         Called by:
         - `WorkspaceManager` instances owned by backend services, routes, and tests because they
@@ -590,20 +592,10 @@ class WorkspaceManager:
             self._attach_workspace_dir(cws, target_dir)
             cws.save(target_dir)
             self._set_cached_path(user_id, cid, target_dir)
-        self.clear_workspace_artifacts_dir(user_id, cid)
-        # Sweep analysis-cache parquets BEFORE evicting task records, so the
-        # workspace dir is still resolvable. The sweep is workspace-scoped and
-        # cannot touch another user's data.
-        try:
-            from .analysis_cache import cleanup_workspace_caches
-
-            cleanup_workspace_caches(user_id, cid)
-        except Exception as exc:  # pragma: no cover — defensive
-            logger.debug("Failed to sweep analysis caches on unload: %s", exc)
         # Snapshot analysis task records to disk BEFORE clearing the in-memory
         # store, so task ids referenced by persisted tabs (tabs.json) stay
-        # resolvable after reload. Concordance rebuilds results from the stored
-        # request + on-disk node parquet, so the request alone is sufficient.
+        # resolvable after reload. The artifact files themselves are preserved
+        # here and reclaimed only when their owning task or workspace is cleared.
         workspace_dir = self.get_workspace_dir(user_id, cid)
         if workspace_dir is not None:
             from ..analysis.persistence import save_workspace_analysis_tasks
@@ -617,9 +609,10 @@ class WorkspaceManager:
         """Drop analysis + worker task records belonging to a workspace.
 
         Without this, per-user task records (analysis manager tasks and worker
-        manager TaskInfo records) leak across workspace
-        switches and cause UI state from the previous workspace to hydrate on
-        the next one.
+        manager TaskInfo records) leak across workspace switches and cause UI
+        state from the previous workspace to hydrate on the next one. This is a
+        non-destructive eviction path: task artifacts survive unload so persisted
+        tabs can rehydrate them after the next load.
 
         Called by:
         - `WorkspaceManager` instances owned by backend services, routes, and tests because they
@@ -632,7 +625,7 @@ class WorkspaceManager:
         try:
             from ..analysis.manager import get_task_manager as _get_analysis_tm
 
-            _get_analysis_tm(user_id).clear_workspace(workspace_id)
+            _get_analysis_tm(user_id).evict_workspace(workspace_id)
         except Exception as exc:
             logger.debug("Failed to clear analysis tasks on unload: %s", exc)
 
@@ -646,20 +639,20 @@ class WorkspaceManager:
         except RuntimeError:
             try:
                 asyncio.run(
-                    worker_tm.clear_tasks(user_id=user_id, workspace_id=workspace_id)
+                    worker_tm.evict_tasks(user_id=user_id, workspace_id=workspace_id)
                 )
             except Exception as exc:
                 logger.debug("Failed to clear worker tasks on unload: %s", exc)
             return
         try:
             loop.create_task(
-                worker_tm.clear_tasks(user_id=user_id, workspace_id=workspace_id)
+                worker_tm.evict_tasks(user_id=user_id, workspace_id=workspace_id)
             )
         except Exception as exc:
             logger.debug("Failed to schedule worker task cleanup on unload: %s", exc)
 
     async def clear_workspace_tasks(self, user_id: str, workspace_id: str) -> None:
-        """Await task cleanup for a workspace.
+        """Await non-destructive task record eviction for a workspace.
 
         Called by:
         - `WorkspaceManager` instances owned by backend services, routes, and tests because they
@@ -672,7 +665,7 @@ class WorkspaceManager:
         try:
             from ..analysis.manager import get_task_manager as _get_analysis_tm
 
-            _get_analysis_tm(user_id).clear_workspace(workspace_id)
+            _get_analysis_tm(user_id).evict_workspace(workspace_id)
         except Exception as exc:
             logger.debug("Failed to clear analysis tasks for workspace: %s", exc)
 
@@ -680,7 +673,7 @@ class WorkspaceManager:
         if worker_tm is None:
             return
         try:
-            await worker_tm.clear_tasks(user_id=user_id, workspace_id=workspace_id)
+            await worker_tm.evict_tasks(user_id=user_id, workspace_id=workspace_id)
         except Exception as exc:
             logger.debug("Failed to clear worker tasks for workspace: %s", exc)
 

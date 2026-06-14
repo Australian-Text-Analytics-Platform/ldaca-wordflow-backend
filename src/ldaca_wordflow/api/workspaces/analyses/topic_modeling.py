@@ -978,9 +978,9 @@ async def detach_topic_modeling(
 
         # Materialize the detached outputs into workspace-owned parquet files
         # so the new nodes are self-contained. The originals live under
-        # `data/artifacts/` which gets cleaned by explicit task cleanup and
-        # workspace unload. A detached node that still scanned them would
-        # silently corrupt later. The top-level workspace data dir is protected by
+        # `data/artifacts/` which gets cleaned by explicit task cleanup. A
+        # detached node that still scanned them would silently corrupt later.
+        # The top-level workspace data dir is protected by
         # `_garbage_collect_workspace_data` (deletes only unreferenced files).
         workspace_data_dir = Path(ws.ws_root_dir) / "data"
         workspace_data_dir.mkdir(parents=True, exist_ok=True)

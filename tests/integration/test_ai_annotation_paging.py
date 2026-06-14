@@ -96,10 +96,9 @@ async def test_ai_annotation_detach_survives_artifact_cleanup(
     """Regression: detached AI-annotation node must not depend on the artifacts dir.
 
     Previously the detach handler wrote `result_df` into `data/artifacts/`
-    and pointed the new node's LazyFrame at it. `clear_workspace_artifacts_dir`
-    (workspace unload) and `clear_previous_completed_analysis_task` (next
-    analysis submit) wipe that directory, silently corrupting the detached
-    node — the same failure mode that affected topic-modeling detach.
+    and pointed the new node's LazyFrame at it. Explicit artifact cleanup could
+    then wipe that directory, silently corrupting the detached node — the same
+    failure mode that affected topic-modeling detach.
     """
 
     async def fake_classify_texts(*, texts, text_column_name="text", **_kwargs):
@@ -133,8 +132,7 @@ async def test_ai_annotation_detach_survives_artifact_cleanup(
     )
     assert detach_response.status_code == 200, detach_response.text
 
-    # Simulate the artifact cleanup that runs on workspace unload / next
-    # analysis submit: wipe everything under `data/artifacts/`.
+    # Simulate explicit artifact cleanup: wipe everything under `data/artifacts/`.
     workspace_dir = workspace_manager.get_workspace_dir("test", workspace_id)
     assert workspace_dir is not None
     artifacts_dir = workspace_dir / "data" / "artifacts"
@@ -164,8 +162,8 @@ async def test_ai_annotation_save_survives_artifact_cleanup(
     """Regression: saving AI annotations must not point the node at the artifacts dir.
 
     `save_ai_annotation` mutates an existing node's `.data` — if it scans
-    a transient artifact parquet, the next workspace unload corrupts the
-    user's data. This used to be the case before the fix.
+    a transient artifact parquet, later explicit artifact cleanup corrupts
+    the user's data. This used to be the case before the fix.
     """
 
     async def fake_classify_texts(*, texts, text_column_name="text", **_kwargs):
@@ -210,9 +208,7 @@ async def test_ai_annotation_save_survives_artifact_cleanup(
         f"/api/workspaces/nodes/{detached_id}/ai-annotation/save",
         json={
             "annotation_column": "ai_annotation",
-            "edits": [
-                {"row_index": 0, "provider": "test", "annotation": "edited"}
-            ],
+            "edits": [{"row_index": 0, "provider": "test", "annotation": "edited"}],
         },
     )
     assert save_response.status_code == 200, save_response.text

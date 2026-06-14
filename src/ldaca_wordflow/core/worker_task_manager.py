@@ -1461,3 +1461,55 @@ class WorkerTaskManager:
             )
 
         return len(removed_tasks)
+
+    async def evict_tasks(
+        self,
+        task_type: str | None = None,
+        *,
+        user_id: str | None = None,
+        workspace_id: str | None = None,
+    ) -> int:
+        """Remove worker task records without deleting task-owned artifacts.
+
+        Used by workspace unload/switch after persistence has snapshotted
+        reloadable task state. This mirrors `clear_tasks` record eviction and
+        event emission, but leaves artifacts for restored tabs and task results.
+        """
+        removed_tasks: list[tuple[str, str, str]] = []
+        async with self._lock:
+            task_ids_to_remove = []
+            for task_id, task_info in self._tasks.items():
+                if task_type and task_info.task_type != task_type:
+                    continue
+                if user_id and task_info.user_id != user_id:
+                    continue
+                if workspace_id and task_info.workspace_id != workspace_id:
+                    continue
+
+                self._reconcile_task_progress(task_info)
+                if not task_info.future.done():
+                    task_info.future.cancel()
+                task_ids_to_remove.append(task_id)
+
+            for task_id in task_ids_to_remove:
+                task_info = self._tasks[task_id]
+                removed_tasks.append(
+                    (task_id, task_info.user_id, task_info.workspace_id)
+                )
+                del self._tasks[task_id]
+                self._progress_store.pop(task_id, None)
+                self._cleanup_progress_queue(task_id)
+
+        for task_id, removed_user_id, removed_workspace_id in removed_tasks:
+            await self.emit(
+                removed_user_id,
+                removed_workspace_id,
+                {
+                    "type": "task_removed",
+                    "task_id": task_id,
+                    "workspace_id": removed_workspace_id,
+                    "timestamp": time.time(),
+                },
+            )
+
+        return len(removed_tasks)

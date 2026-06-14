@@ -140,10 +140,12 @@ not manually unlink artifact files. Cleanup only deletes files inside
 top-level `data` directory, where ownership transfers from the task to the
 workspace node.
 
-Workspace unload and workspace switching must clear analysis and worker task
-records for the unloaded workspace. The unload lifecycle also removes the whole
-`data/artifacts` directory so no transient analysis output survives the active
-workspace session.
+Workspace unload and workspace switching must snapshot reloadable analysis task
+records, then evict the in-memory analysis and worker task records for the
+inactive workspace. The unload lifecycle preserves `data/artifacts` so persisted
+tabs can rehydrate task results after the workspace is loaded again. Artifact
+files are reclaimed by explicit task cleanup or workspace deletion; do not wire
+workspace unload to whole-artifact-directory cleanup.
 
 Tokenisation and embeddings are performance caches rather than workspace
 artifacts. Token specs live in `Node.tokenization`; Wordflow resolves a per-user

@@ -25,6 +25,7 @@ from ldaca_wordflow.analysis.models import (
 from ldaca_wordflow.analysis.results import GenericAnalysisResult
 from ldaca_wordflow.core import utils as core_utils
 from ldaca_wordflow.core import workspace as workspace_module
+from ldaca_wordflow.core.analysis_cache import materialized_cache_path
 from ldaca_wordflow.core.workspace import WorkspaceManager
 
 
@@ -110,6 +111,54 @@ def test_analysis_task_survives_unload_and_reload(isolated_manager, reset_task_s
     assert task.workspace_id == workspace_id
     assert task.status == AnalysisStatus.COMPLETED
     assert task.request.model_dump().get("search_word") == "hello"
+
+
+def test_analysis_task_artifacts_survive_unload_and_reload(
+    isolated_manager, reset_task_store
+):
+    user_id = "artifact_user"
+    workspace_id, ws_dir = _bootstrap_workspace(isolated_manager, user_id, "ws")
+
+    materialized_path = materialized_cache_path(
+        ws_dir, "concordance", str(uuid.uuid4()), "node-1"
+    )
+    materialized_path.parent.mkdir(parents=True, exist_ok=True)
+    materialized_path.write_text("materialized", encoding="utf-8")
+    result_path = materialized_path.parent / "topic_modeling_result.parquet"
+    result_path.write_text("result", encoding="utf-8")
+
+    task_id = str(uuid.uuid4())
+    request = BaseAnalysisRequest.model_validate({"node_ids": ["node-1"]})
+    TaskManager(user_id).save_task(
+        AnalysisTask(
+            task_id=task_id,
+            user_id=user_id,
+            workspace_id=workspace_id,
+            request=request,
+            status=AnalysisStatus.COMPLETED,
+            result=GenericAnalysisResult(
+                {
+                    "artifacts": {
+                        "materialized_parquet_path": str(materialized_path),
+                        "result_parquet_path": str(result_path),
+                    }
+                }
+            ),
+        )
+    )
+
+    assert isolated_manager.unload_workspace(user_id, save=True) is True
+    assert (ws_dir / "analysis_tasks.json").exists()
+    assert materialized_path.exists()
+    assert result_path.exists()
+
+    assert isolated_manager.set_current_workspace(user_id, workspace_id) is True
+    restored_task = TaskManager(user_id).get_task(task_id)
+    assert restored_task is not None
+    restored_result = restored_task.result.to_json() if restored_task.result else {}
+    restored_artifacts = restored_result.get("artifacts", {})
+    assert restored_artifacts["materialized_parquet_path"] == str(materialized_path)
+    assert restored_artifacts["result_parquet_path"] == str(result_path)
 
 
 def test_no_sidecar_written_when_workspace_has_no_tasks(

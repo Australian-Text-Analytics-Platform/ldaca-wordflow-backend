@@ -608,11 +608,11 @@ async def detach_ai_annotation(
     )
 
     # Detach output must live in the workspace-owned top-level `data/`
-    # directory, NOT in `data/artifacts/`. Artifacts get wiped on workspace
-    # unload (`clear_workspace_artifacts_dir`), so a detached node scanning an
-    # artifact path would silently corrupt on next reload. The
-    # workspace GC (`_garbage_collect_workspace_data`) keeps top-level
-    # parquets alive while they're referenced by any node's plbin.
+    # directory, NOT in `data/artifacts/`. Artifacts are task-owned and may be
+    # reclaimed by explicit task cleanup, so a detached node scanning an artifact
+    # path would silently corrupt later. The workspace GC
+    # (`_garbage_collect_workspace_data`) keeps top-level parquets alive while
+    # they're referenced by any node's plbin.
     workspace_data_dir = _workspace_data_dir(user_id, workspace_id)
     detach_parquet_path = (
         workspace_data_dir / f"ai_annotation_detach_{uuid4().hex}.parquet"
@@ -693,10 +693,10 @@ async def save_ai_annotation(
     df = df.with_columns(pl.Series(annotation_col, annotations))
 
     # Same rationale as `detach_ai_annotation`: the updated node's data
-    # must live under the workspace-owned `data/` dir, not the transient
+    # must live under the workspace-owned `data/` dir, not the task-owned
     # `data/artifacts/` dir. Reassigning `node.data` to a scan of a
-    # to-be-deleted artifact would corrupt the existing node on the next
-    # workspace unload or analysis submit.
+    # to-be-deleted artifact would corrupt the existing node after explicit
+    # artifact cleanup.
     workspace_data_dir = _workspace_data_dir(user_id, workspace_id)
     save_parquet_path = workspace_data_dir / f"ai_annotation_save_{uuid4().hex}.parquet"
     df.write_parquet(str(save_parquet_path))

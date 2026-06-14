@@ -147,9 +147,6 @@ async def set_current_workspace(
     - Ensures subsequent node/analysis operations target the intended workspace.
     """
     user_id = current_user["id"]
-    previous_workspace_id = workspace_manager.get_current_workspace_id(user_id)
-    if previous_workspace_id is not None and previous_workspace_id != workspace_id:
-        await workspace_manager.clear_workspace_tasks(user_id, previous_workspace_id)
     success = workspace_manager.set_current_workspace(user_id, workspace_id)
     if not success and workspace_id is not None:
         raise WorkspaceNotFoundError("Workspace not found")
@@ -236,8 +233,6 @@ async def unload_workspace(
 
     user_id = current_user["id"]
     workspace_id = workspace_manager.get_current_workspace_id(user_id)
-    if workspace_id is not None:
-        await workspace_manager.clear_workspace_tasks(user_id, workspace_id)
     existed = workspace_manager.unload_workspace(user_id, workspace_id, save=save)
     if not existed:
         raise WorkspaceNotFoundError("Workspace not found")

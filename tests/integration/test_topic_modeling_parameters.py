@@ -325,10 +325,9 @@ async def test_topic_modeling_detach_survives_artifact_cleanup(
 
     Prior to materialising the detach output into a workspace-owned parquet,
     the detached node's LazyFrame still scanned files under
-    `data/artifacts/` that get wiped by `clear_previous_completed_analysis_task`
-    on the next analysis submit (and by `clear_workspace_artifacts_dir` on
-    workspace unload). Wiping those mid-session corrupted every prior detach
-    so the next workspace load showed zero nodes.
+    `data/artifacts/` that get wiped by explicit task cleanup. Wiping those
+    mid-session corrupted every prior detach so the next workspace load showed
+    zero nodes.
     """
     user_id = "test"
     workspace = workspace_manager.get_current_workspace(user_id)
@@ -435,8 +434,7 @@ async def test_topic_modeling_detach_survives_artifact_cleanup(
         "topic_meanings_node_id"
     ]
 
-    # Simulate the artifact cleanup that runs on the next analysis submit
-    # / on workspace unload: both transient parquet files vanish.
+    # Simulate explicit artifact cleanup: both transient parquet files vanish.
     assignments_path.unlink()
     meanings_path.unlink()
 
@@ -583,7 +581,9 @@ async def test_topic_modeling_detach_with_meanings_override_replaces_meanings(
     assert len(override_files) == 1
 
 
-def _save_distribution_task(user_id, workspace_id, source_node, assignments_path, meanings_path):
+def _save_distribution_task(
+    user_id, workspace_id, source_node, assignments_path, meanings_path
+):
     """Persist a completed topic task whose assignment parquet carries a soft
     ``TOPIC_topic_distribution`` column, for the distribution-filter tests."""
     payload = {
@@ -668,9 +668,18 @@ def _distribution_fixture(workspace, tmp_path):
             "__row_nr__": [0, 1, 2, 3],
             "TOPIC_topic": [0, 1, 0, -1],
             "TOPIC_topic_distribution": [
-                [{"topic_id": 0, "proportion": 0.9}, {"topic_id": 1, "proportion": 0.1}],
-                [{"topic_id": 1, "proportion": 0.6}, {"topic_id": 0, "proportion": 0.4}],
-                [{"topic_id": 0, "proportion": 0.96}, {"topic_id": 1, "proportion": 0.04}],
+                [
+                    {"topic_id": 0, "proportion": 0.9},
+                    {"topic_id": 1, "proportion": 0.1},
+                ],
+                [
+                    {"topic_id": 1, "proportion": 0.6},
+                    {"topic_id": 0, "proportion": 0.4},
+                ],
+                [
+                    {"topic_id": 0, "proportion": 0.96},
+                    {"topic_id": 1, "proportion": 0.04},
+                ],
                 [],
             ],
         },
@@ -691,8 +700,6 @@ def _distribution_fixture(workspace, tmp_path):
     return source_node, assignments_path, meanings_path
 
 
-
-
 @pytest.mark.asyncio
 async def test_topic_modeling_detach_emits_top1_and_distribution_columns(
     authenticated_client, workspace_id, tmp_path
@@ -702,7 +709,9 @@ async def test_topic_modeling_detach_emits_top1_and_distribution_columns(
     user_id = "test"
     workspace = workspace_manager.get_current_workspace(user_id)
     assert workspace is not None
-    source_node, assignments_path, meanings_path = _distribution_fixture(workspace, tmp_path)
+    source_node, assignments_path, meanings_path = _distribution_fixture(
+        workspace, tmp_path
+    )
     task_id = _save_distribution_task(
         user_id, workspace_id, source_node, assignments_path, meanings_path
     )
@@ -718,7 +727,10 @@ async def test_topic_modeling_detach_emits_top1_and_distribution_columns(
     )
     assert response.status_code == 200, response.text
     detached_node_id = (
-        response.json().get("data", {}).get("detached_nodes", [{}])[0].get("new_node_id")
+        response.json()
+        .get("data", {})
+        .get("detached_nodes", [{}])[0]
+        .get("new_node_id")
     )
     assert detached_node_id
     detached = workspace.nodes[detached_node_id].data.collect()
