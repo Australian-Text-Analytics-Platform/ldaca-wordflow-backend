@@ -20,7 +20,7 @@ from __future__ import annotations
 from typing import cast
 
 import polars as pl
-from ldaca_wordflow.api.workspaces.nodes import _build_filter_expression
+from ldaca_wordflow.api.workspaces.nodes_filter import _build_filter_expression
 from ldaca_wordflow.models import FilterCondition, FilterRequest
 
 

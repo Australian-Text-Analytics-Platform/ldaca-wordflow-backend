@@ -1,6 +1,6 @@
 import polars as pl
 import pytest
-from ldaca_wordflow.api.workspaces import nodes as nodes_api
+from ldaca_wordflow.api.workspaces import utils as workspace_utils
 
 
 class _DummyNode:
@@ -32,12 +32,12 @@ async def test_replace_preview_returns_masked_values(authenticated_client, monke
     dummy_ws = _DummyWorkspace({"count": 0}, nodes={"node-123": node})
 
     monkeypatch.setattr(
-        nodes_api.workspace_manager,
+        workspace_utils.workspace_manager,
         "get_current_workspace_id",
         lambda user_id: workspace_id,
     )
     monkeypatch.setattr(
-        nodes_api.workspace_manager,
+        workspace_utils.workspace_manager,
         "get_current_workspace",
         lambda _user_id: dummy_ws,
     )
@@ -69,27 +69,27 @@ async def test_replace_apply_mutates_node_data(authenticated_client, monkeypatch
     dummy_ws = _DummyWorkspace(persist_calls, nodes={"node-123": node})
 
     monkeypatch.setattr(
-        nodes_api.workspace_manager,
+        workspace_utils.workspace_manager,
         "get_current_workspace_id",
         lambda user_id: workspace_id,
     )
     monkeypatch.setattr(
-        nodes_api.workspace_manager,
+        workspace_utils.workspace_manager,
         "get_current_workspace",
         lambda user_id: dummy_ws,
     )
     monkeypatch.setattr(
-        nodes_api.workspace_manager,
+        workspace_utils.workspace_manager,
         "_resolve_workspace_dir",
         lambda user_id, workspace_id, workspace_name: "/tmp/ws",
     )
     monkeypatch.setattr(
-        nodes_api.workspace_manager,
+        workspace_utils.workspace_manager,
         "_attach_workspace_dir",
         lambda workspace, path: None,
     )
     monkeypatch.setattr(
-        nodes_api.workspace_manager,
+        workspace_utils.workspace_manager,
         "_set_cached_path",
         lambda user_id, workspace_id, path: None,
     )
@@ -121,12 +121,12 @@ async def test_replace_preview_returns_raw_polars_error_for_missing_source_colum
     dummy_ws = _DummyWorkspace({"count": 0}, nodes={"node-123": node})
 
     monkeypatch.setattr(
-        nodes_api.workspace_manager,
+        workspace_utils.workspace_manager,
         "get_current_workspace_id",
         lambda user_id: workspace_id,
     )
     monkeypatch.setattr(
-        nodes_api.workspace_manager,
+        workspace_utils.workspace_manager,
         "get_current_workspace",
         lambda _user_id: dummy_ws,
     )
@@ -159,12 +159,12 @@ async def test_replace_apply_returns_raw_polars_error_for_non_string_column(
     dummy_ws = _DummyWorkspace(persist_calls, nodes={"node-123": node})
 
     monkeypatch.setattr(
-        nodes_api.workspace_manager,
+        workspace_utils.workspace_manager,
         "get_current_workspace_id",
         lambda user_id: workspace_id,
     )
     monkeypatch.setattr(
-        nodes_api.workspace_manager,
+        workspace_utils.workspace_manager,
         "get_current_workspace",
         lambda _user_id: dummy_ws,
     )

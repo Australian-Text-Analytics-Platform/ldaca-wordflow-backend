@@ -42,10 +42,10 @@ from ....core.workspace import workspace_manager
 from ....models import (
     AnalysisClearResponse,
     AnalysisTaskMetadata,
+    DetachNodeOption,
     TopicModelingData,
     TopicModelingDetachData,
     TopicModelingDetachedNode,
-    TopicModelingDetachNodeOption,
     TopicModelingDetachOptionsResponse,
     TopicModelingDetachRequest,
     TopicModelingDetachResponse,
@@ -653,7 +653,7 @@ async def topic_modeling_detach_options(
     artifacts = _topic_artifacts_from_task(task)
     node_artifacts = artifacts.get("nodes") or []
 
-    nodes: list[TopicModelingDetachNodeOption] = []
+    nodes: list[DetachNodeOption] = []
     for payload in node_artifacts:
         if not isinstance(payload, dict):
             continue
@@ -673,7 +673,7 @@ async def topic_modeling_detach_options(
             original_columns
         )
         nodes.append(
-            TopicModelingDetachNodeOption(
+            DetachNodeOption(
                 node_id=source_node.id,
                 node_name=str(payload.get("node_name") or node_id),
                 text_column=str(payload.get("text_column") or ""),

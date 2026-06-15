@@ -4,8 +4,11 @@ Split from models/__init__.py.
 """
 
 from __future__ import annotations
+
 from typing import Literal, Optional
+
 from pydantic import BaseModel, ConfigDict, Field
+
 
 class TextSetupRequest(BaseModel):
     """Request schema used by API routes and generated clients for text setup request.
@@ -21,7 +24,6 @@ class TextSetupRequest(BaseModel):
     document_column: str
     content_column: Optional[str] = None
     auto_detect: bool = True
-
 
 
 class DTMRequest(BaseModel):
@@ -42,7 +44,6 @@ class DTMRequest(BaseModel):
     use_tfidf: bool = False
 
 
-
 class KeywordExtractionRequest(BaseModel):
     """Request schema used by API routes and generated clients for keyword extraction request.
 
@@ -57,7 +58,6 @@ class KeywordExtractionRequest(BaseModel):
     method: str  # 'tfidf', 'count', 'custom'
     top_k: int = 20
     by_document: bool = False
-
 
 
 class AnalysisTaskActionResponse(BaseModel):
@@ -77,7 +77,6 @@ class AnalysisTaskActionResponse(BaseModel):
     metadata: AnalysisTaskMetadata | None = None
 
 
-
 class AnalysisClearResponse(BaseModel):
     """Response schema returned by API routes and consumed by generated clients for analysis clear response.
 
@@ -93,7 +92,6 @@ class AnalysisClearResponse(BaseModel):
     message: str
 
 
-
 class CurrentAnalysisTasksResponse(BaseModel):
     """Response schema returned by API routes and consumed by generated clients for current analysis tasks response.
 
@@ -106,7 +104,6 @@ class CurrentAnalysisTasksResponse(BaseModel):
     """
 
     task_ids: list[str]
-
 
 
 class TextAnalysisInfo(BaseModel):
@@ -125,7 +122,6 @@ class TextAnalysisInfo(BaseModel):
     total_documents: int
     vocabulary_size: Optional[int]
     is_text_ready: bool
-
 
 
 class PaginationInfo(BaseModel):
@@ -147,7 +143,6 @@ class PaginationInfo(BaseModel):
     has_prev: bool
 
 
-
 class AnalysisTaskMetadata(BaseModel):
     """API schema used by routes and generated clients for analysis task metadata.
 
@@ -162,7 +157,6 @@ class AnalysisTaskMetadata(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     task_id: str | None = None
-
 
 
 class SourceRowPagination(BaseModel):
@@ -185,7 +179,6 @@ class SourceRowPagination(BaseModel):
     has_prev: bool
 
 
-
 class AnalysisSorting(BaseModel):
     """API schema used by routes and generated clients for analysis sorting.
 
@@ -201,16 +194,8 @@ class AnalysisSorting(BaseModel):
     descending: bool
 
 
-
-NodeDataSorting = AnalysisSorting  # structurally identical, kept for backwards compat
-
-
-
 class DetachNodeOption(BaseModel):
     """Shared base for detach-node-option responses across analysis tools.
-
-    ConcordanceDetachNodeOption, QuotationDetachNodeOption, and
-    TopicModelingDetachNodeOption are kept as backwards-compatible aliases.
 
     Used by:
     - backend request/response models because they need a stable JSON contract shared by
@@ -232,7 +217,6 @@ class DetachNodeOption(BaseModel):
     default_selected_columns: Optional[list[str]] = None
 
 
-
 class NodeDataFiltering(BaseModel):
     """API schema used by routes and generated clients for node data filtering.
 
@@ -247,8 +231,6 @@ class NodeDataFiltering(BaseModel):
     column: str | None = None
     value: str | None = None
     op: str
-
-
 
 
 ColumnScalarValue = str | int | float | bool

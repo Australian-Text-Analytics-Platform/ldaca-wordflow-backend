@@ -1,6 +1,6 @@
 import polars as pl
 import pytest
-from ldaca_wordflow.api.workspaces import nodes as nodes_api
+from ldaca_wordflow.api.workspaces import utils as workspace_utils
 
 
 class DummyWorkspace:
@@ -25,12 +25,12 @@ async def test_filter_preview_returns_paginated_rows(authenticated_client, monke
     dummy_ws = DummyWorkspace({"node456": DummyNode()})
 
     monkeypatch.setattr(
-        nodes_api.workspace_manager,
+        workspace_utils.workspace_manager,
         "get_current_workspace_id",
         lambda user_id: workspace_id,
     )
     monkeypatch.setattr(
-        nodes_api.workspace_manager,
+        workspace_utils.workspace_manager,
         "get_current_workspace",
         lambda user_id: dummy_ws,
     )
@@ -59,10 +59,12 @@ async def test_filter_preview_returns_paginated_rows(authenticated_client, monke
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_filter_preview_in_operator(authenticated_client, monkeypatch):
-    df = pl.DataFrame({
-        "value": [1, 2, 3, 4],
-        "category": ["a", "b", "a", "c"],
-    })
+    df = pl.DataFrame(
+        {
+            "value": [1, 2, 3, 4],
+            "category": ["a", "b", "a", "c"],
+        }
+    )
 
     class DummyNode:
         def __init__(self):
@@ -73,12 +75,12 @@ async def test_filter_preview_in_operator(authenticated_client, monkeypatch):
     dummy_ws = DummyWorkspace({"node456": DummyNode()})
 
     monkeypatch.setattr(
-        nodes_api.workspace_manager,
+        workspace_utils.workspace_manager,
         "get_current_workspace_id",
         lambda user_id: workspace_id,
     )
     monkeypatch.setattr(
-        nodes_api.workspace_manager,
+        workspace_utils.workspace_manager,
         "get_current_workspace",
         lambda user_id: dummy_ws,
     )
@@ -104,10 +106,12 @@ async def test_filter_preview_in_operator(authenticated_client, monkeypatch):
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_filter_preview_in_operator_with_null(authenticated_client, monkeypatch):
-    df = pl.DataFrame({
-        "value": [1, 2, 3, 4],
-        "category": ["a", None, "b", None],
-    })
+    df = pl.DataFrame(
+        {
+            "value": [1, 2, 3, 4],
+            "category": ["a", None, "b", None],
+        }
+    )
 
     class DummyNode:
         def __init__(self):
@@ -118,12 +122,12 @@ async def test_filter_preview_in_operator_with_null(authenticated_client, monkey
     dummy_ws = DummyWorkspace({"node456": DummyNode()})
 
     monkeypatch.setattr(
-        nodes_api.workspace_manager,
+        workspace_utils.workspace_manager,
         "get_current_workspace_id",
         lambda user_id: workspace_id,
     )
     monkeypatch.setattr(
-        nodes_api.workspace_manager,
+        workspace_utils.workspace_manager,
         "get_current_workspace",
         lambda user_id: dummy_ws,
     )
@@ -151,10 +155,12 @@ async def test_filter_preview_in_operator_with_null(authenticated_client, monkey
 async def test_filter_preview_in_operator_matches_any_list_string_element(
     authenticated_client, monkeypatch
 ):
-    df = pl.DataFrame({
-        "value": [1, 2, 3, 4, 5],
-        "topic": [["a", "b"], ["c"], None, [], ["d", "a"]],
-    })
+    df = pl.DataFrame(
+        {
+            "value": [1, 2, 3, 4, 5],
+            "topic": [["a", "b"], ["c"], None, [], ["d", "a"]],
+        }
+    )
 
     class DummyNode:
         def __init__(self):
@@ -165,12 +171,12 @@ async def test_filter_preview_in_operator_matches_any_list_string_element(
     dummy_ws = DummyWorkspace({"node456": DummyNode()})
 
     monkeypatch.setattr(
-        nodes_api.workspace_manager,
+        workspace_utils.workspace_manager,
         "get_current_workspace_id",
         lambda user_id: workspace_id,
     )
     monkeypatch.setattr(
-        nodes_api.workspace_manager,
+        workspace_utils.workspace_manager,
         "get_current_workspace",
         lambda user_id: dummy_ws,
     )
@@ -198,10 +204,12 @@ async def test_filter_preview_in_operator_matches_any_list_string_element(
 async def test_filter_preview_list_string_in_does_not_match_null_rows(
     authenticated_client, monkeypatch
 ):
-    df = pl.DataFrame({
-        "value": [1, 2, 3],
-        "topic": [None, ["a"], ["b"]],
-    })
+    df = pl.DataFrame(
+        {
+            "value": [1, 2, 3],
+            "topic": [None, ["a"], ["b"]],
+        }
+    )
 
     class DummyNode:
         def __init__(self):
@@ -212,12 +220,12 @@ async def test_filter_preview_list_string_in_does_not_match_null_rows(
     dummy_ws = DummyWorkspace({"node456": DummyNode()})
 
     monkeypatch.setattr(
-        nodes_api.workspace_manager,
+        workspace_utils.workspace_manager,
         "get_current_workspace_id",
         lambda user_id: workspace_id,
     )
     monkeypatch.setattr(
-        nodes_api.workspace_manager,
+        workspace_utils.workspace_manager,
         "get_current_workspace",
         lambda user_id: dummy_ws,
     )
@@ -241,7 +249,9 @@ async def test_filter_preview_list_string_in_does_not_match_null_rows(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_filter_preview_tmdist_topic_proportion(authenticated_client, monkeypatch):
+async def test_filter_preview_tmdist_topic_proportion(
+    authenticated_client, monkeypatch
+):
     """A TMDist column filters by one topic's proportion vs a threshold."""
     from ldaca_wordflow.core.docworkspace_data_types import TM_DISTRIBUTION_POLARS_DTYPE
 
@@ -249,8 +259,14 @@ async def test_filter_preview_tmdist_topic_proportion(authenticated_client, monk
         {
             "value": [0, 1, 2, 3],
             "TOPIC_distribution": [
-                [{"topic_id": 0, "proportion": 0.9}, {"topic_id": 1, "proportion": 0.1}],
-                [{"topic_id": 1, "proportion": 0.6}, {"topic_id": 0, "proportion": 0.4}],
+                [
+                    {"topic_id": 0, "proportion": 0.9},
+                    {"topic_id": 1, "proportion": 0.1},
+                ],
+                [
+                    {"topic_id": 1, "proportion": 0.6},
+                    {"topic_id": 0, "proportion": 0.4},
+                ],
                 [{"topic_id": 1, "proportion": 0.04}],
                 [],
             ],
@@ -265,10 +281,14 @@ async def test_filter_preview_tmdist_topic_proportion(authenticated_client, monk
 
     dummy_ws = DummyWorkspace({"node456": DummyNode()})
     monkeypatch.setattr(
-        nodes_api.workspace_manager, "get_current_workspace_id", lambda user_id: "ws-tmdist"
+        workspace_utils.workspace_manager,
+        "get_current_workspace_id",
+        lambda user_id: "ws-tmdist",
     )
     monkeypatch.setattr(
-        nodes_api.workspace_manager, "get_current_workspace", lambda user_id: dummy_ws
+        workspace_utils.workspace_manager,
+        "get_current_workspace",
+        lambda user_id: dummy_ws,
     )
 
     response = await authenticated_client.post(

@@ -5,7 +5,7 @@ from __future__ import annotations
 import polars as pl
 import pytest
 from fastapi import HTTPException
-from ldaca_wordflow.api.workspaces import nodes as nodes_api
+from ldaca_wordflow.api.workspaces import nodes_concat as nodes_api
 from ldaca_wordflow.api.workspaces import utils as workspace_utils
 from ldaca_wordflow.models import ConcatPreviewRequest, ConcatRequest
 
@@ -130,7 +130,6 @@ def fake_workspace_manager(monkeypatch: pytest.MonkeyPatch, sample_nodes):
             return True
 
     manager = FakeWorkspaceManager(sample_nodes)
-    monkeypatch.setattr(nodes_api, "workspace_manager", manager)
     monkeypatch.setattr(workspace_utils, "Node", DummyNode)
     monkeypatch.setattr(workspace_utils, "workspace_manager", manager)
     return manager

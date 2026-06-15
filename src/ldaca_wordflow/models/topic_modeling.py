@@ -152,11 +152,6 @@ class TopicModelingDetachRequest(BaseModel):
     topic_meanings_override: Optional[List[TopicMeaningOverrideItem]] = None
 
 
-TopicModelingDetachNodeOption = (
-    DetachNodeOption  # shared base, kept for backwards compat
-)
-
-
 class TopicModelingDetachOptionsResponse(BaseModel):
     """Response schema returned by API routes and consumed by generated clients for topic modeling detach options
     response.
@@ -171,7 +166,7 @@ class TopicModelingDetachOptionsResponse(BaseModel):
 
     state: AnalysisTaskState
     message: str
-    data: Dict[str, List[TopicModelingDetachNodeOption]] | None = None
+    data: Dict[str, List[DetachNodeOption]] | None = None
     metadata: AnalysisTaskMetadata | None = None
 
 

@@ -44,8 +44,8 @@ from ....core.workspace import workspace_manager
 from ....models import (
     AnalysisTaskActionResponse,
     CurrentAnalysisTasksResponse,
+    DetachNodeOption,
     QuotationAnalysisResponse,
-    QuotationDetachNodeOption,
     QuotationDetachOptionsResponse,
     QuotationDetachRequest,
     QuotationEngineConfig,
@@ -470,7 +470,7 @@ async def quotation_detach_options(
         column=column,
         mandatory_columns=list(CORE_QUOTATION_COLUMNS),
         extraction_column=QUOTE_EXTRACTION_COLUMN,
-        node_option_class=QuotationDetachNodeOption,
+        node_option_class=DetachNodeOption,
         detach_options_response_class=QuotationDetachOptionsResponse,
         message="Quotation detach options loaded",
         schema_filter=lambda c: not is_tokenization_column_name(c),

@@ -4,9 +4,18 @@ Split from models/__init__.py.
 """
 
 from __future__ import annotations
+
 from typing import Any, Dict, List, Literal, Optional
+
 from pydantic import BaseModel, Field, model_validator
-from .analysis_common import AnalysisTaskState, NodeDataFiltering, NodeDataSorting, PaginationInfo
+
+from .analysis_common import (
+    AnalysisSorting,
+    AnalysisTaskState,
+    NodeDataFiltering,
+    PaginationInfo,
+)
+
 
 class FilterCondition(BaseModel):
     """API schema used by routes and generated clients for filter condition.
@@ -30,7 +39,6 @@ class FilterCondition(BaseModel):
     case_sensitive: Optional[bool] = False
 
 
-
 class FilterRequest(BaseModel):
     """Request schema used by API routes and generated clients for filter request.
 
@@ -45,7 +53,6 @@ class FilterRequest(BaseModel):
     conditions: List[FilterCondition]
     logic: Optional[str] = "and"
     new_node_name: Optional[str] = None
-
 
 
 class SliceRequest(BaseModel):
@@ -89,7 +96,6 @@ class SliceRequest(BaseModel):
         return self
 
 
-
 class FilterPreviewResponse(BaseModel):
     """Response schema returned by API routes and consumed by generated clients for filter preview response.
 
@@ -111,7 +117,6 @@ ColumnScalarValue = str | int | float | bool
 AnalysisTaskState = Literal["pending", "running", "successful", "failed", "cancelled"]
 
 
-
 class NodeDataResponse(BaseModel):
     """Response schema returned by API routes and consumed by generated clients for node data response.
 
@@ -127,9 +132,8 @@ class NodeDataResponse(BaseModel):
     pagination: PaginationInfo
     columns: list[str]
     dtypes: dict[str, str]
-    sorting: NodeDataSorting
+    sorting: AnalysisSorting
     filtering: NodeDataFiltering
-
 
 
 class NodeQueryPlanResponse(BaseModel):
@@ -146,7 +150,6 @@ class NodeQueryPlanResponse(BaseModel):
     plan: str
 
 
-
 class NodeShapeResponse(BaseModel):
     """Response schema returned by API routes and consumed by generated clients for node shape response.
 
@@ -159,7 +162,6 @@ class NodeShapeResponse(BaseModel):
     """
 
     shape: tuple[int | None, int | None]
-
 
 
 class ColumnUniqueValuesResponse(BaseModel):
@@ -179,7 +181,6 @@ class ColumnUniqueValuesResponse(BaseModel):
     has_null: bool
 
 
-
 class ColumnOperationInfo(BaseModel):
     """Metadata schema used by API responses to describe column operation info.
 
@@ -193,7 +194,6 @@ class ColumnOperationInfo(BaseModel):
 
     method: str
     label: str
-
 
 
 class ColumnOperationsResponse(BaseModel):
@@ -213,7 +213,6 @@ class ColumnOperationsResponse(BaseModel):
 # =============================================================================
 # POLARS EXPRESSION MODELS
 # =============================================================================
-
 
 
 class ColumnDescribeResponse(BaseModel):
@@ -237,4 +236,3 @@ class ColumnDescribeResponse(BaseModel):
     median: ColumnScalarValue | None = None
     percentile_75: ColumnScalarValue | None = None
     max: ColumnScalarValue | None = None
-

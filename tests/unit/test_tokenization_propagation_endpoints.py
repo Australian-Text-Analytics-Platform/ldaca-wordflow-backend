@@ -11,8 +11,25 @@ from __future__ import annotations
 import polars as pl
 import pytest
 from docworkspace.workspace.core import Workspace
-from ldaca_wordflow.api.workspaces import nodes as nodes_api
 from ldaca_wordflow.api.workspaces import utils as workspace_utils
+from ldaca_wordflow.api.workspaces.nodes_concat import concat_nodes
+from ldaca_wordflow.api.workspaces.nodes_crud import clone_node
+from ldaca_wordflow.api.workspaces.nodes_expression import polars_expression_apply
+from ldaca_wordflow.api.workspaces.nodes_filter import filter_node
+from ldaca_wordflow.api.workspaces.nodes_join import join_nodes
+from ldaca_wordflow.api.workspaces.nodes_slice import slice_node
+
+
+class NodesApiMock:
+    clone_node = staticmethod(clone_node)
+    filter_node = staticmethod(filter_node)
+    slice_node = staticmethod(slice_node)
+    concat_nodes = staticmethod(concat_nodes)
+    join_nodes = staticmethod(join_nodes)
+    polars_expression_apply = staticmethod(polars_expression_apply)
+
+
+nodes_api = NodesApiMock
 from ldaca_wordflow.models import (
     ConcatRequest,
     FilterCondition,
@@ -83,19 +100,25 @@ def single_parent(monkeypatch: pytest.MonkeyPatch):
     """Workspace with one parent node that already carries tokenization."""
     parent = _make_node_with_tokens("parent")
     manager = _FakeManager(parent)
-    monkeypatch.setattr(nodes_api, "workspace_manager", manager)
     monkeypatch.setattr(workspace_utils, "workspace_manager", manager)
     monkeypatch.setattr(workspace_utils, "update_workspace", lambda *a, **k: None)
-    monkeypatch.setattr(nodes_api, "update_workspace", lambda *a, **k: None)
     from ldaca_wordflow.api.workspaces import (
+        nodes_concat,
+        nodes_crud,
+        nodes_expression,
+        nodes_filter,
+        nodes_join,
+        nodes_slice,
+    )
+
+    for mod in (
         nodes_crud,
         nodes_concat,
         nodes_expression,
         nodes_filter,
         nodes_join,
         nodes_slice,
-    )
-    for mod in (nodes_crud, nodes_concat, nodes_expression, nodes_filter, nodes_join, nodes_slice):
+    ):
         monkeypatch.setattr(mod, "update_workspace", lambda *a, **k: None)
     return manager, parent
 
@@ -106,19 +129,25 @@ def two_parents(monkeypatch: pytest.MonkeyPatch):
     parent_a = _make_node_with_tokens("parent_a")
     parent_b = _make_node_with_tokens("parent_b")
     manager = _FakeManager(parent_a, parent_b)
-    monkeypatch.setattr(nodes_api, "workspace_manager", manager)
     monkeypatch.setattr(workspace_utils, "workspace_manager", manager)
     monkeypatch.setattr(workspace_utils, "update_workspace", lambda *a, **k: None)
-    monkeypatch.setattr(nodes_api, "update_workspace", lambda *a, **k: None)
     from ldaca_wordflow.api.workspaces import (
+        nodes_concat,
+        nodes_crud,
+        nodes_expression,
+        nodes_filter,
+        nodes_join,
+        nodes_slice,
+    )
+
+    for mod in (
         nodes_crud,
         nodes_concat,
         nodes_expression,
         nodes_filter,
         nodes_join,
         nodes_slice,
-    )
-    for mod in (nodes_crud, nodes_concat, nodes_expression, nodes_filter, nodes_join, nodes_slice):
+    ):
         monkeypatch.setattr(mod, "update_workspace", lambda *a, **k: None)
     return manager, parent_a, parent_b
 

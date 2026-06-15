@@ -4,11 +4,21 @@ Split from models/__init__.py.
 """
 
 from __future__ import annotations
-from typing import Any, Dict, List, Literal, Optional
+
 from enum import Enum
-from typing_extensions import TypedDict
+from typing import Any, Dict, List, Literal, Optional
+
 from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, model_validator
-from .analysis_common import AnalysisSorting, AnalysisTaskMetadata, AnalysisTaskState, DetachNodeOption, PaginationInfo, SourceRowPagination
+from typing_extensions import TypedDict
+
+from .analysis_common import (
+    AnalysisSorting,
+    AnalysisTaskMetadata,
+    AnalysisTaskState,
+    DetachNodeOption,
+    PaginationInfo,
+    SourceRowPagination,
+)
 
 
 class QuotationHitEntry(TypedDict, total=False):
@@ -32,6 +42,7 @@ class QuotationHitEntry(TypedDict, total=False):
     QUOTE_is_floating_quote: bool | None
     QUOTE_quote_row_idx: int | None
 
+
 class QuotationEngineType(str, Enum):
     """Enum used by API schema contracts to constrain quotation engine type values.
 
@@ -46,7 +57,6 @@ class QuotationEngineType(str, Enum):
 
     LOCAL = "local"
     REMOTE = "remote"
-
 
 
 class QuotationEngineConfig(BaseModel):
@@ -87,7 +97,6 @@ class QuotationEngineConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-
 class QuotationRequest(BaseModel):
     """Request schema used by API routes and generated clients for quotation request.
 
@@ -112,7 +121,6 @@ class QuotationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-
 class QuotationDetachRequest(BaseModel):
     """Request schema used by API routes and generated clients for quotation detach request.
 
@@ -134,7 +142,6 @@ class QuotationDetachRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-
 class QuotationMaterializeRequest(BaseModel):
     """Request schema used by API routes and generated clients for quotation materialize request.
 
@@ -153,10 +160,6 @@ class QuotationMaterializeRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-
-QuotationDetachNodeOption = DetachNodeOption  # shared base, kept for backwards compat
-
-
 class QuotationDetachOptionsResponse(BaseModel):
     """Response schema returned by API routes and consumed by generated clients for quotation detach options response.
 
@@ -170,9 +173,8 @@ class QuotationDetachOptionsResponse(BaseModel):
 
     state: AnalysisTaskState
     message: str
-    data: Dict[str, List[QuotationDetachNodeOption]] | None = None
+    data: Dict[str, List[DetachNodeOption]] | None = None
     metadata: AnalysisTaskMetadata | None = None
-
 
 
 class QuotationMetadata(BaseModel):
@@ -191,7 +193,6 @@ class QuotationMetadata(BaseModel):
     all_columns: list[str]
 
 
-
 class QuotationAnalysisResponse(BaseModel):
     """Response schema returned by API routes and consumed by generated clients for quotation analysis response.
 
@@ -203,14 +204,15 @@ class QuotationAnalysisResponse(BaseModel):
         responses in the shape expected by frontend clients and tests.
     """
 
-    data: list[list[dict[str, Any]]]  # inner dicts are QuotationHitEntry + dynamic metadata columns
+    data: list[
+        list[dict[str, Any]]
+    ]  # inner dicts are QuotationHitEntry + dynamic metadata columns
     columns: list[str]
     metadata: QuotationMetadata
     pagination: SourceRowPagination
     sorting: AnalysisSorting
     preferences: dict[str, Any] | None = None
     task_id: str | None = None
-
 
 
 class QuotationPreferenceUpdateData(BaseModel):
@@ -225,7 +227,6 @@ class QuotationPreferenceUpdateData(BaseModel):
     """
 
     context_length: int | None = None
-
 
 
 class QuotationPreferenceUpdateResponse(BaseModel):
@@ -243,7 +244,6 @@ class QuotationPreferenceUpdateResponse(BaseModel):
     state: Literal["successful"]
     message: str
     data: QuotationPreferenceUpdateData | None = None
-
 
 
 class QuotationResultQuery(BaseModel):
@@ -265,6 +265,3 @@ class QuotationResultQuery(BaseModel):
     update_only: bool = False
 
     model_config = ConfigDict(extra="forbid")
-
-
-

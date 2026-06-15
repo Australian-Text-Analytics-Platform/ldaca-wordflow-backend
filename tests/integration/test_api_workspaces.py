@@ -1118,7 +1118,7 @@ class TestWorkspaceAPI:
                 self.data = source_df
 
         with patch(
-            "ldaca_wordflow.api.workspaces.nodes.workspace_manager.get_current_workspace"
+            "ldaca_wordflow.api.workspaces.utils.workspace_manager.get_current_workspace"
         ) as mock_active_ws:
             mock_workspace = Mock()
             mock_workspace.nodes = {"test-node": DummyNode()}
@@ -1150,7 +1150,7 @@ class TestWorkspaceAPI:
                 self.data = source_df
 
         with patch(
-            "ldaca_wordflow.api.workspaces.nodes.workspace_manager.get_current_workspace"
+            "ldaca_wordflow.api.workspaces.utils.workspace_manager.get_current_workspace"
         ) as mock_active_ws:
             mock_workspace = Mock()
             mock_workspace.nodes = {"test-node": DummyNode()}
@@ -1199,7 +1199,7 @@ class TestWorkspaceAPI:
                 self.data = source_df
 
         with patch(
-            "ldaca_wordflow.api.workspaces.nodes.workspace_manager.get_current_workspace"
+            "ldaca_wordflow.api.workspaces.utils.workspace_manager.get_current_workspace"
         ) as mock_active_ws:
             mock_workspace = Mock()
             mock_workspace.nodes = {"test-node": DummyNode()}

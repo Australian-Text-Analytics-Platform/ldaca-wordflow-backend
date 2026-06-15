@@ -51,7 +51,6 @@ from .auth import AuthInfoResponse, GoogleIn, GoogleOut, User, UserResponse
 from .concordance import (
     ConcordanceAnalysisRequest,
     ConcordanceAnalysisResponse,
-    ConcordanceDetachNodeOption,
     ConcordanceDetachOptionsResponse,
     ConcordanceDetachRequest,
     ConcordanceDispersionBinsResponse,
@@ -104,7 +103,6 @@ from .polars_expression import (
 from .preferences import QuotationPreferences
 from .quotation import (
     QuotationAnalysisResponse,
-    QuotationDetachNodeOption,
     QuotationDetachOptionsResponse,
     QuotationDetachRequest,
     QuotationEngineConfig,
@@ -131,7 +129,6 @@ from .topic_modeling import (
     TopicModelingData,
     TopicModelingDetachData,
     TopicModelingDetachedNode,
-    TopicModelingDetachNodeOption,
     TopicModelingDetachOptionsResponse,
     TopicModelingDetachRequest,
     TopicModelingDetachResponse,

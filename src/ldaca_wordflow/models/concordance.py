@@ -146,9 +146,6 @@ class ConcordanceMaterializeRequest(BaseModel):
     parent_task_id: str
 
 
-ConcordanceDetachNodeOption = DetachNodeOption  # shared base, kept for backwards compat
-
-
 class ConcordanceDetachOptionsResponse(BaseModel):
     """Response schema returned by API routes and consumed by generated clients for concordance detach options
     response.
@@ -163,7 +160,7 @@ class ConcordanceDetachOptionsResponse(BaseModel):
 
     state: AnalysisTaskState
     message: str
-    data: Dict[str, List[ConcordanceDetachNodeOption]] | None = None
+    data: Dict[str, List[DetachNodeOption]] | None = None
     metadata: AnalysisTaskMetadata | None = None
 
 

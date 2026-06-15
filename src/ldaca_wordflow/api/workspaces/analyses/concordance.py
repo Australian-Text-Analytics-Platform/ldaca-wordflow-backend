@@ -47,12 +47,12 @@ from ....models import (
     AnalysisTaskActionResponse,
     ConcordanceAnalysisRequest,
     ConcordanceAnalysisResponse,
-    ConcordanceDetachNodeOption,
     ConcordanceDetachOptionsResponse,
     ConcordanceDetachRequest,
     ConcordanceDispersionBinsResponse,
     ConcordanceDispersionDetachRequest,
     ConcordanceMaterializeRequest,
+    DetachNodeOption,
 )
 from ..utils import _build_detach_options
 from .concordance_core import (
@@ -850,7 +850,7 @@ async def concordance_detach_options(
         column=column,
         mandatory_columns=list(CORE_CONCORDANCE_COLUMNS),
         extraction_column=CONC_EXTRACTION_COLUMN,
-        node_option_class=ConcordanceDetachNodeOption,
+        node_option_class=DetachNodeOption,
         detach_options_response_class=ConcordanceDetachOptionsResponse,
         message="Concordance detach options loaded",
     )
