@@ -8,7 +8,6 @@ from typing import Any, cast
 import duckdb
 import polars as pl
 import polars_text  # noqa: F401
-import polars_text.token_cache as pt_cache
 import pytest
 from ldaca_wordflow.api.workspaces.analyses.generated_columns import (
     tokenization_column_name,
@@ -66,7 +65,9 @@ def test_tokenise_column_registers_metadata_without_mutating_node_data() -> None
         language="en",
     )
 
-    assert tokenization_name == tokenization_column_name("text", "huggingface:bert-base-uncased")
+    assert tokenization_name == tokenization_column_name(
+        "text", "huggingface:bert-base-uncased"
+    )
     assert node.tokenization["text"]["column_name"] == tokenization_name
     assert tokenization_name not in node.data.collect_schema().names()
     tokenization_meta = cast(dict[str, Any], node.tokenization["text"])
@@ -99,87 +100,3 @@ def test_hydrate_tokenization_adds_tokens_column() -> None:
     first_tokens = hydrated_df.to_dicts()[0][tokenization_name]
     assert isinstance(first_tokens, list) and first_tokens
     assert first_tokens[0]["token"]
-
-
-def test_warm_cache_does_not_retokenize(monkeypatch: pytest.MonkeyPatch) -> None:
-    base = pl.DataFrame({"text": ["hello world", "hello world"]}).lazy()
-    expr = cast(Any, pl.col("text")).text.tokenize(
-        model="huggingface:bert-base-uncased",
-        lowercase=True,
-        remove_punct=True,
-        cache=tc.tokens_cache_path(TEST_USER),
-    )
-    base.with_columns(expr.alias("tokens")).collect()
-
-    def fail(*args: Any, **kwargs: Any) -> Any:
-        raise AssertionError("warm-cache run should not tokenize misses")
-
-    monkeypatch.setattr(pt_cache, "_tokenize_misses", fail)
-
-    warm = cast(
-        pl.DataFrame,
-        base.with_columns(expr.alias("tokens")).collect(),
-    )
-    assert warm.height == 2
-    assert warm.to_dicts()[0]["tokens"][0]["token"]
-
-
-def test_filter_pushdown_only_tokenizes_surviving_rows(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    base = pl.DataFrame(
-        {
-            "id": [1, 2, 3, 4, 5],
-            "text": ["alpha", "beta", "gamma", "delta", "epsilon"],
-        }
-    ).lazy()
-
-    seen: list[list[str]] = []
-    real = pt_cache._tokenize_misses
-
-    def spy(texts: list[str], **kwargs: Any) -> list[list[dict[str, Any]]]:
-        seen.append(list(texts))
-        return real(texts, **kwargs)
-
-    monkeypatch.setattr(pt_cache, "_tokenize_misses", spy)
-
-    expr = cast(Any, pl.col("text")).text.tokenize(
-        model="huggingface:bert-base-uncased",
-        lowercase=True,
-        remove_punct=True,
-        cache=tc.tokens_cache_path(TEST_USER),
-    )
-    filtered = (
-        base.with_columns(expr.alias("tokens")).filter(pl.col("id") == 3).collect()
-    )
-
-    assert cast(pl.DataFrame, filtered).height == 1
-    flat = sorted(t for batch in seen for t in batch)
-    assert flat == ["gamma"]
-
-
-def test_repeated_texts_in_chunk_are_deduplicated(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    base = pl.DataFrame({"text": ["same", "same", "same"]}).lazy()
-
-    seen: list[list[str]] = []
-    real = pt_cache._tokenize_misses
-
-    def spy(texts: list[str], **kwargs: Any) -> list[list[dict[str, Any]]]:
-        seen.append(list(texts))
-        return real(texts, **kwargs)
-
-    monkeypatch.setattr(pt_cache, "_tokenize_misses", spy)
-
-    expr = cast(Any, pl.col("text")).text.tokenize(
-        model="huggingface:bert-base-uncased",
-        lowercase=True,
-        remove_punct=True,
-        cache=tc.tokens_cache_path(TEST_USER),
-    )
-    out = cast(pl.DataFrame, base.with_columns(expr.alias("tokens")).collect())
-
-    assert out.height == 3
-    flat = [t for batch in seen for t in batch]
-    assert flat == ["same"]

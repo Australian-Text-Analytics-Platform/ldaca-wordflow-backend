@@ -15,7 +15,6 @@ from __future__ import annotations
 from typing import Any, cast
 
 import polars as pl
-import polars_text.token_cache as pt_token_cache
 import pytest
 from ldaca_wordflow.api.workspaces.analyses.concordance_core import (
     compute_node_concordance_page,
@@ -155,19 +154,8 @@ def test_compute_tokens_page_groups_hits_per_row() -> None:
 def test_token_mode_hydrates_only_requested_page_slice(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(
-        tc, "tokens_cache_path", lambda _user_id: tmp_path / "tokens.duckdb"
-    )
-    tokenized_texts: list[list[str]] = []
-    real_tokenize_misses = pt_token_cache._tokenize_misses
-
-    def spy_tokenize_misses(
-        texts: list[str], **kwargs: Any
-    ) -> list[list[dict[str, Any]]]:
-        tokenized_texts.append(list(texts))
-        return real_tokenize_misses(texts, **kwargs)
-
-    monkeypatch.setattr(pt_token_cache, "_tokenize_misses", spy_tokenize_misses)
+    cache_file = tmp_path / "tokens.duckdb"
+    monkeypatch.setattr(tc, "tokens_cache_path", lambda _user_id: cache_file)
     node = Node(
         data=pl.DataFrame({"text": [f"hello {index}" for index in range(5)]}).lazy(),
         name="probe",
@@ -204,8 +192,13 @@ def test_token_mode_hydrates_only_requested_page_slice(
         descending=True,
     )
 
-    flat_texts = [t for batch in tokenized_texts for t in batch]
-    assert flat_texts == ["hello 0", "hello 1"]
+    # Validate that only the 2 requested page slice rows were tokenized/cached
+    import duckdb
+
+    with duckdb.connect(str(cache_file), read_only=True) as conn:
+        cached_count = conn.execute("SELECT count(*) FROM token_cache").fetchone()[0]
+    assert cached_count == 2
+
     assert page["pagination"]["page_size"] == 2
     assert page["pagination"]["total_source_rows"] == 5
     assert page["pagination"]["result_count"] == 2
