@@ -21,11 +21,11 @@ import threading
 
 logger = logging.getLogger(__name__)
 
-# Default candle embedder repo the Rust topic-modeling pipeline loads when no
+# Default ONNX embedder repo the Rust topic-modeling pipeline loads when no
 # override is supplied. Mirrors ``_DEFAULT_EMBEDDER_MODEL`` in
 # ``worker_tasks_topic``; kept as a literal here to avoid importing the heavy
 # worker module just to prefetch.
-_TOPIC_EMBEDDER_REPO_ID = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+_TOPIC_EMBEDDER_REPO_ID = "onnx-community/all-MiniLM-L6-v2-ONNX"
 
 
 def _prefetch_spacy_model() -> None:
@@ -57,10 +57,10 @@ def _prefetch_spacy_model() -> None:
 
 
 def _prefetch_topic_embedder() -> None:
-    """Download the candle topic embedder used by the Rust pipeline if not cached.
+    """Download the ONNX topic embedder used by the Rust pipeline if not cached.
 
     Delegates to ``polars_text._internal.prefetch_embedder``, which downloads the
-    safetensors weights + tokenizer for the default multilingual model into the
+    ONNX weights + tokenizer for the default model into the
     shared Hugging Face cache so the first ``run_topic_modeling`` call skips the
     cold-load. Best-effort: failures (e.g. offline with no cache) are logged and
     swallowed because prefetch is an optimization, not a hard dependency.
@@ -72,13 +72,13 @@ def _prefetch_topic_embedder() -> None:
         from polars_text._internal import prefetch_embedder
 
         logger.info(
-            "[prefetch] Downloading candle embedder %s...",
+            "[prefetch] Downloading ORT embedder %s...",
             _TOPIC_EMBEDDER_REPO_ID,
         )
         prefetch_embedder(_TOPIC_EMBEDDER_REPO_ID)
-        logger.info("[prefetch] Candle embedder ready")
+        logger.info("[prefetch] ORT embedder ready")
     except Exception:
-        logger.warning("[prefetch] Candle embedder prefetch failed", exc_info=True)
+        logger.warning("[prefetch] ORT embedder prefetch failed", exc_info=True)
 
 
 def _run_all_prefetches() -> None:

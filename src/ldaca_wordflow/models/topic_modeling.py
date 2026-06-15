@@ -4,81 +4,21 @@ Split from models/__init__.py.
 """
 
 from __future__ import annotations
-from typing import Dict, List, Literal, Optional
+
+from typing import Dict, List, Optional
+
 from pydantic import BaseModel, ConfigDict, Field
-from .analysis_common import AnalysisSorting, AnalysisTaskMetadata, AnalysisTaskState, DetachNodeOption
 
-class TopicModelingEmbeddingCacheMeasurement(BaseModel):
-    """API schema used by routes and generated clients for topic modeling embedding cache measurement.
-
-    Used by:
-    - backend request/response models because they need a stable JSON contract shared by
-      route handlers, generated clients, and tests.
-
-    Flow: validate incoming API fields, apply defaults or validators, and serialize route
-        responses in the shape expected by frontend clients and tests.
-    """
-
-    bytes: int
-    files: int
-
-
-
-class TopicModelingEmbeddingCacheSizeResponse(BaseModel):
-    """Response schema returned by API routes and consumed by generated clients for topic modeling embedding cache size
-    response.
-
-    Used by:
-    - backend API routes, backend request/response models because they need a stable JSON
-      contract shared by route handlers, generated clients, and tests.
-
-    Flow: validate incoming API fields, apply defaults or validators, and serialize route
-        responses in the shape expected by frontend clients and tests.
-    """
-
-    state: Literal["successful"]
-    data: TopicModelingEmbeddingCacheMeasurement
-
-
-
-class TopicModelingEmbeddingCacheClearData(BaseModel):
-    """Data payload schema embedded in API responses for topic modeling embedding cache clear data.
-
-    Used by:
-    - backend request/response models because they need a stable JSON contract shared by
-      route handlers, generated clients, and tests.
-
-    Flow: validate incoming API fields, apply defaults or validators, and serialize route
-        responses in the shape expected by frontend clients and tests.
-    """
-
-    bytes_freed: int
-    files_removed: int
-    measured_before: TopicModelingEmbeddingCacheMeasurement
-
-
-
-class TopicModelingEmbeddingCacheClearResponse(BaseModel):
-    """Response schema returned by API routes and consumed by generated clients for topic modeling embedding cache
-    clear response.
-
-    Used by:
-    - backend API routes, backend request/response models because they need a stable JSON
-      contract shared by route handlers, generated clients, and tests.
-
-    Flow: validate incoming API fields, apply defaults or validators, and serialize route
-        responses in the shape expected by frontend clients and tests.
-    """
-
-    state: Literal["successful"]
-    message: str
-    data: TopicModelingEmbeddingCacheClearData
-
+from .analysis_common import (
+    AnalysisSorting,
+    AnalysisTaskMetadata,
+    AnalysisTaskState,
+    DetachNodeOption,
+)
 
 # =============================================================================
 # RESPONSE MODELS
 # =============================================================================
-
 
 
 class TopicModelingRequest(BaseModel):
@@ -119,7 +59,6 @@ class TopicModelingRequest(BaseModel):
     )
 
 
-
 class TopicModelingTopic(BaseModel):
     """API schema used by routes and generated clients for topic modeling topic.
 
@@ -140,7 +79,6 @@ class TopicModelingTopic(BaseModel):
     y: float
 
 
-
 class TopicModelingData(BaseModel):
     """Data payload schema embedded in API responses for topic modeling data.
 
@@ -158,7 +96,6 @@ class TopicModelingData(BaseModel):
     meta: AnalysisTaskMetadata | None = None
 
 
-
 class TopicModelingResponse(BaseModel):
     """Response schema returned by API routes and consumed by generated clients for topic modeling response.
 
@@ -174,7 +111,6 @@ class TopicModelingResponse(BaseModel):
     message: str
     data: Optional[TopicModelingData] = None
     metadata: AnalysisTaskMetadata | None = None
-
 
 
 class TopicMeaningOverrideItem(BaseModel):
@@ -197,7 +133,6 @@ class TopicMeaningOverrideItem(BaseModel):
     words: List[str]
 
 
-
 class TopicModelingDetachRequest(BaseModel):
     """Request payload for detaching topic assignments from cached topic-modeling output.
 
@@ -217,8 +152,9 @@ class TopicModelingDetachRequest(BaseModel):
     topic_meanings_override: Optional[List[TopicMeaningOverrideItem]] = None
 
 
-
-TopicModelingDetachNodeOption = DetachNodeOption  # shared base, kept for backwards compat
+TopicModelingDetachNodeOption = (
+    DetachNodeOption  # shared base, kept for backwards compat
+)
 
 
 class TopicModelingDetachOptionsResponse(BaseModel):
@@ -239,7 +175,6 @@ class TopicModelingDetachOptionsResponse(BaseModel):
     metadata: AnalysisTaskMetadata | None = None
 
 
-
 class TopicModelingDetachedNode(BaseModel):
     """API schema used by routes and generated clients for topic modeling detached node.
 
@@ -256,7 +191,6 @@ class TopicModelingDetachedNode(BaseModel):
     topic_meanings_node_id: str | None = None
 
 
-
 class TopicModelingDetachData(BaseModel):
     """Data payload schema embedded in API responses for topic modeling detach data.
 
@@ -269,7 +203,6 @@ class TopicModelingDetachData(BaseModel):
     """
 
     detached_nodes: list[TopicModelingDetachedNode] = Field(default_factory=list)
-
 
 
 class TopicModelingDetachResponse(BaseModel):
@@ -290,4 +223,3 @@ class TopicModelingDetachResponse(BaseModel):
 
 
 # Concordance response models
-

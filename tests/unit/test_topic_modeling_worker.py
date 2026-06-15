@@ -1,6 +1,6 @@
 """Deterministic unit tests for the Rust-backed topic-modeling worker.
 
-The heavy lifting (chunking, candle embeddings, PaCMAP, HDBSCAN, c-TF-IDF) lives
+The heavy lifting (chunking, ORT embeddings, PaCMAP, HDBSCAN, c-TF-IDF) lives
 in the ``polars-text`` Rust extension and is exercised by the hand-run
 experiment harness, not here -- its output is non-deterministic. These tests
 cover only the deterministic Python glue:
@@ -30,6 +30,11 @@ from ldaca_wordflow.core.worker_tasks_topic_pipeline import (
     _sample_corpus,
     _stopwords_for_lang,
 )
+
+_STAGE_TIMINGS = [
+    {"stage": "embedding", "elapsed_ms": 12.5},
+    {"stage": "total", "elapsed_ms": 15.0},
+]
 
 
 # ---------------------------------------------------------------------------
@@ -107,7 +112,9 @@ def test_resolve_vectorizer_model_japanese():
 
 
 def test_resolve_vectorizer_model_korean():
-    model, lang = _resolve_vectorizer_model(["이것은 한국어 문서입니다", "주제 모델링 테스트"])
+    model, lang = _resolve_vectorizer_model(
+        ["이것은 한국어 문서입니다", "주제 모델링 테스트"]
+    )
     assert model == "lindera:ko-dic"
     assert lang is None
 
@@ -133,6 +140,7 @@ def _fake_topic_modeling_expr_factory(
     ys: list[float],
     n_chunks: int,
     distribution: list[list[dict[str, Any]]] | None = None,
+    stage_timings: list[dict[str, Any]] | None = None,
 ):
     """Build a fake ``.text.topic_modeling`` method returning a canned struct.
 
@@ -151,6 +159,7 @@ def _fake_topic_modeling_expr_factory(
             ([{"topic_id": int(t), "proportion": 1.0}] if t >= 0 else [])
             for t in dominant
         ]
+    timings = stage_timings if stage_timings is not None else _STAGE_TIMINGS
 
     def _fake(self, **_kwargs):  # noqa: ANN001 - mirrors namespace method shape
         return pl.struct(
@@ -167,6 +176,13 @@ def _fake_topic_modeling_expr_factory(
             pl.Series("y", ys, dtype=pl.Float32),
             pl.Series("n_topics", [0] * n, dtype=pl.UInt32),
             pl.Series("n_chunks", [n_chunks] * n, dtype=pl.UInt32),
+            pl.Series(
+                "stage_timings_ms",
+                [timings] * n,
+                dtype=pl.List(
+                    pl.Struct({"stage": pl.String, "elapsed_ms": pl.Float64})
+                ),
+            ),
         )
 
     return _fake
@@ -185,7 +201,10 @@ def test_run_rust_topic_modeling_reconstructs_result_dict(monkeypatch):
             ys=[3.0, 3.0, 4.0, 0.0],
             n_chunks=5,
             distribution=[
-                [{"topic_id": 0, "proportion": 0.9}, {"topic_id": 1, "proportion": 0.1}],
+                [
+                    {"topic_id": 0, "proportion": 0.9},
+                    {"topic_id": 1, "proportion": 0.1},
+                ],
                 [{"topic_id": 0, "proportion": 1.0}],
                 [{"topic_id": 1, "proportion": 1.0}],
                 [],
@@ -254,6 +273,7 @@ def test_run_rust_topic_modeling_reconstructs_result_dict(monkeypatch):
     # the (zeroed) replicated field.
     assert result["n_topics"] == 2
     assert result["n_chunks"] == 5
+    assert result["stage_timings_ms"] == _STAGE_TIMINGS
 
 
 # ---------------------------------------------------------------------------
@@ -266,12 +286,14 @@ def _canned_rust_result(
     documents: list[dict[str, Any]],
     topics: list[dict[str, Any]],
     n_chunks: int = 7,
+    stage_timings_ms: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     return {
         "documents": documents,
         "topics": topics,
         "n_topics": len(topics),
         "n_chunks": n_chunks,
+        "stage_timings_ms": stage_timings_ms or _STAGE_TIMINGS,
     }
 
 
@@ -289,7 +311,10 @@ def test_run_topic_modeling_task_writes_parquet_and_meaning_lists(
 ):
     progress: list[tuple[float, str]] = []
 
-    def fake_run(**_kwargs):
+    seen_run_kwargs: dict[str, Any] = {}
+
+    def fake_run(**kwargs):
+        seen_run_kwargs.update(kwargs)
         return _canned_rust_result(
             documents=[
                 {
@@ -317,6 +342,12 @@ def test_run_topic_modeling_task_writes_parquet_and_meaning_lists(
         )
 
     monkeypatch.setattr(worker_tasks_topic, "_run_rust_topic_modeling", fake_run)
+    embedding_cache_path = tmp_path / "embeddings.duckdb"
+    monkeypatch.setattr(
+        worker_tasks_topic,
+        "embeddings_cache_path",
+        lambda _user_id: embedding_cache_path,
+    )
 
     result = worker_tasks_topic.run_topic_modeling_task(
         configure_worker_environment=lambda: None,
@@ -335,7 +366,11 @@ def test_run_topic_modeling_task_writes_parquet_and_meaning_lists(
 
     # The assignment parquet now carries the per-row soft distribution column
     # used by the detach-time distribution filter.
-    assert assignments.columns == ["__row_nr__", "TOPIC_topic", "TOPIC_topic_distribution"]
+    assert assignments.columns == [
+        "__row_nr__",
+        "TOPIC_topic",
+        "TOPIC_topic_distribution",
+    ]
     assert assignments.schema["TOPIC_topic"] == pl.Int64
     assert assignments["TOPIC_topic"].to_list() == [0, 0]
     assert assignments.schema["TOPIC_topic_distribution"] == pl.List(
@@ -358,8 +393,10 @@ def test_run_topic_modeling_task_writes_parquet_and_meaning_lists(
     assert topic["size"] == [2]
 
     assert result["meta"]["engine"] == "rust"
-    assert result["meta"]["embedding_backend"] == "candle"
+    assert result["meta"]["embedding_backend"] == "ort"
+    assert seen_run_kwargs["embedding_cache"] == embedding_cache_path
     assert result["meta"]["n_chunks"] == 7
+    assert result["meta"]["stage_timings_ms"] == _STAGE_TIMINGS
     assert progress[0][1].startswith("Loading topic modeling")
     assert progress[-1] == (1.0, "Topic modeling completed")
 
@@ -491,9 +528,7 @@ def test_run_topic_modeling_task_loads_corpora_from_workspace(tmp_path, monkeypa
         return [["loaded one", "loaded two", "loaded three"]]
 
     monkeypatch.setattr(worker_tasks_topic, "_run_rust_topic_modeling", fake_run)
-    monkeypatch.setattr(
-        worker_tasks_topic, "_load_corpora_from_workspace", fake_load
-    )
+    monkeypatch.setattr(worker_tasks_topic, "_load_corpora_from_workspace", fake_load)
 
     worker_tasks_topic.run_topic_modeling_task(
         configure_worker_environment=lambda: None,

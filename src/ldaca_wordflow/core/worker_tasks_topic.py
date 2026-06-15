@@ -5,9 +5,8 @@ Used by:
   need a backend boundary that validates inputs before delegating to workspace or worker
   state.
 
-Flow: load workspace corpora, choose sampling and embedding settings, reuse embedding
-    caches when possible, build topic payloads, and report artifacts back to the task
-    manager.
+Flow: load workspace corpora, choose sampling and embedding settings, build topic
+    payloads, and report artifacts back to the task manager.
 
 The implementation is split across several sub-modules:
 - ``worker_tasks_topic_types`` — internal frozen dataclasses
@@ -27,9 +26,7 @@ import os
 from pathlib import Path
 from typing import Any, Callable, cast
 
-from .worker_utils import worker_task
-
-from .worker_tasks_topic_types import _PreparedTopicPayload
+from .embedding_cache import embeddings_cache_path
 from .worker_tasks_topic_pipeline import (
     _resolve_top_n_words,
     _resolve_vectorizer_model,
@@ -41,11 +38,13 @@ from .worker_tasks_topic_result import (
     _build_empty_topic_payload,
     _build_topic_result_payload,
 )
+from .worker_tasks_topic_types import _PreparedTopicPayload
+from .worker_utils import worker_task
 
-# Default candle embedder used by the Rust pipeline when no override is given.
+# Default ONNX embedder used by the Rust ORT pipeline when no override is given.
 # Recorded in result metadata so the API/frontend can report which model was
-# used; the actual download/caching is handled inside ``polars_text``.
-_DEFAULT_EMBEDDER_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+# used; the actual download/loading is handled inside ``polars_text``.
+_DEFAULT_EMBEDDER_MODEL = "onnx-community/all-MiniLM-L6-v2-ONNX"
 
 logger = logging.getLogger(__name__)
 
@@ -122,9 +121,8 @@ def _prepare_payload(
     Called by:
     - ``run_topic_modeling_task`` (this module).
 
-    Flow: load workspace corpora, choose sampling and embedding settings, reuse embedding
-        caches when possible, build topic payloads, and report artifacts back to the task
-        manager.
+    Flow: load workspace corpora, choose sampling and embedding settings, build
+        topic payloads, and report artifacts back to the task manager.
     """
     artifact_root = Path(artifact_dir)
     artifact_root.mkdir(parents=True, exist_ok=True)
@@ -159,6 +157,7 @@ def _prepare_payload(
 
 def _compute_topic_payload(
     *,
+    user_id: str,
     node_infos: list[dict[str, Any]],
     corpora: list[list[str]],
     artifact_root: Path,
@@ -175,7 +174,7 @@ def _compute_topic_payload(
     - ``run_topic_modeling_task`` (this module).
 
     Flow: sample each corpus, pick the c-TF-IDF vectorizer/stopwords from the
-    document script mix, call the Rust pipeline (chunk -> candle embed -> PaCMAP
+    document script mix, call the Rust pipeline (chunk -> ORT embed -> PaCMAP
     -> HDBSCAN -> c-TF-IDF, plus optional merge for target/exact modes), and turn
     its JSON result into the wire payload. For ``exact`` mode it also persists a
     JSON re-aggregation context so the slider can request a different count later.
@@ -225,6 +224,7 @@ def _compute_topic_payload(
         vectorizer_model=vectorizer_model,
         stopwords=_stopwords_for_lang(stopwords_lang),
         embedder_model=_DEFAULT_EMBEDDER_MODEL,
+        embedding_cache=embeddings_cache_path(user_id),
     )
 
     if progress_callback:
@@ -247,7 +247,7 @@ def _compute_topic_payload(
             "native": True,
             "engine": "rust",
             "embedding_model": _DEFAULT_EMBEDDER_MODEL,
-            "embedding_backend": "candle",
+            "embedding_backend": "ort",
             "min_topic_size": min_cluster_size,
             "representative_words_count": max_representative_words,
             "random_state": random_state,
@@ -263,6 +263,9 @@ def _compute_topic_payload(
             ),
         }
     )
+    stage_timings = rust_result.get("stage_timings_ms")
+    if isinstance(stage_timings, list):
+        payload_meta["stage_timings_ms"] = stage_timings
     payload["meta"] = payload_meta
     return payload
 
@@ -281,7 +284,6 @@ def run_topic_modeling_task(
     random_seed: int = 42,
     representative_words_count: int = 5,
     progress_callback: Callable[[float, str], None] | None = None,
-    embedding_cache_dir: str | None = None,
     sample_fractions: list[float | None] | None = None,
 ) -> dict[str, Any]:
     """Execute topic modeling in a worker process.
@@ -292,14 +294,13 @@ def run_topic_modeling_task(
     - ``TASK_REGISTRY["topic_modeling"]`` because background jobs need one lifecycle owner for
       submission, progress, cancellation, and artifact cleanup.
         Why:
-        - Runs the Rust ``polars_text`` topic-modeling pipeline (candle embeddings
+        - Runs the Rust ``polars_text`` topic-modeling pipeline (ORT embeddings
             + PaCMAP + HDBSCAN + c-TF-IDF) out-of-process and returns an artifact
             manifest (Parquet outputs) for main-process lazy retrieval/finalization.
 
     ``min_topic_size`` is the HDBSCAN minimum cluster size (the only native
-    topic-count control); the topic count is whatever emerges. ``embedding_cache_dir``
-    is retained for call-site compatibility but unused: the Rust pipeline manages
-    its own in-process embedder, so there is no Python-side embedding cache.
+    topic-count control); the topic count is whatever emerges. The Rust pipeline
+    manages its own in-process embedder and DuckDB embedding cache.
 
     Flow: load workspace corpora, sample, run the Rust pipeline, build topic
         payloads, and report artifacts back to the task manager.
@@ -332,6 +333,7 @@ def run_topic_modeling_task(
             progress_callback(0.07, "Loading embedding model...")
 
         topic_payload = _compute_topic_payload(
+            user_id=user_id,
             node_infos=node_infos,
             corpora=prepared_payload.corpora,
             artifact_root=prepared_payload.artifact_root,

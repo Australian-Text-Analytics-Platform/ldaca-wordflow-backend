@@ -15,6 +15,7 @@ Used by:
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, cast
 
 import polars as pl
@@ -229,21 +230,22 @@ def _run_rust_topic_modeling(
     vectorizer_model: str | None,
     stopwords: list[str],
     embedder_model: str | None = None,
+    embedding_cache: str | os.PathLike[str] | None = None,
 ) -> dict:
     """Run the Rust topic-modeling pipeline via the Polars expression and
     reconstruct the result dict the payload builder consumes.
 
     Topic modeling is exposed by ``polars-text`` as a first-class Polars
     expression in the ``.text`` namespace (``pl.col(...).text.topic_modeling``),
-    mirroring ``tokenize``/``concordance``. The Rust side owns chunking, candle
+    mirroring ``tokenize``/``concordance``. The Rust side owns chunking, ORT
     embedding, PaCMAP reduction, HDBSCAN clustering, and c-TF-IDF labeling. The
     number of topics is whatever HDBSCAN yields for ``min_cluster_size`` (the
     only native topic-count control). The expression returns one struct **per
     input document** with the document's ``dominant_topic`` and
     ``topic_distribution`` plus the per-topic metadata
     (``representative_words``/``x``/``y``) replicated onto each row under its
-    dominant topic, and the run-level ``n_topics`` / ``n_chunks`` replicated on
-    every row.
+    dominant topic, and the run-level ``n_topics`` / ``n_chunks`` /
+    ``stage_timings_ms`` replicated on every row.
 
     ``corpus_indices`` is accepted for call-site compatibility but no longer
     forwarded: the expression always treats the input as a single corpus, and
@@ -258,7 +260,8 @@ def _run_rust_topic_modeling(
        taking the (replicated) ``representative_words``/``x``/``y`` once per
        topic. ``n_topics`` is the number of topics with at least one dominant
        document, so the displayed count matches the bubble chart; ``n_chunks`` is
-       read from the first row.
+    read from the first row. ``stage_timings_ms`` is also read from the first
+    row because it describes the whole native run.
 
     Called by:
     - ``_compute_topic_payload`` in ``worker_tasks_topic`` for the initial run.
@@ -273,6 +276,7 @@ def _run_rust_topic_modeling(
             cast(Any, pl.col("__doc__"))
             .text.topic_modeling(
                 embedder_model=embedder_model,
+                cache=embedding_cache,
                 seed=int(seed),
                 top_k=int(top_k),
                 min_cluster_size=int(min_cluster_size),
@@ -346,10 +350,25 @@ def _run_rust_topic_modeling(
         )
 
     n_chunks = int(result["n_chunks"][0]) if result.height else 0
+    raw_stage_timings = (
+        result["stage_timings_ms"].to_list()[0]
+        if result.height and "stage_timings_ms" in result.columns
+        else []
+    )
+    stage_timings_ms = []
+    for timing in raw_stage_timings or []:
+        if not isinstance(timing, dict):
+            continue
+        stage = timing.get("stage")
+        elapsed_ms = timing.get("elapsed_ms")
+        if stage is None or elapsed_ms is None:
+            continue
+        stage_timings_ms.append({"stage": str(stage), "elapsed_ms": float(elapsed_ms)})
 
     return {
         "topics": topics,
         "documents": documents,
         "n_topics": len(topics),
         "n_chunks": n_chunks,
+        "stage_timings_ms": stage_timings_ms,
     }

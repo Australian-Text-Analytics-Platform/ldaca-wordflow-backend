@@ -439,7 +439,6 @@ def topic_modeling_task(
     representative_words_count: int = 5,
     progress_callback: Callable[[float, str], None] | None = None,
     progress_queue: Any | None = None,
-    embedding_cache_dir: str | None = None,
     sample_fractions: list[float | None] | None = None,
 ) -> dict[str, Any]:
     """Run the topic modeling task background job submitted by API routes.
@@ -467,7 +466,6 @@ def topic_modeling_task(
         random_seed=random_seed,
         representative_words_count=representative_words_count,
         progress_callback=cb,
-        embedding_cache_dir=embedding_cache_dir,
         sample_fractions=sample_fractions,
     )
 

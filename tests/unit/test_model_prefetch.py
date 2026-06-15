@@ -85,7 +85,7 @@ def test_start_model_prefetch_spawns_daemon_thread(monkeypatch, tmp_path):
     assert isinstance(prefetch_names, list)
 
 
-def test_topic_prefetch_loads_candle_embedder(monkeypatch):
+def test_topic_prefetch_loads_onnx_embedder(monkeypatch):
     calls: list[str | None] = []
 
     def fake_prefetch_embedder(repo_id=None):

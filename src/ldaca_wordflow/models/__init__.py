@@ -135,8 +135,6 @@ from .topic_modeling import (
     TopicModelingDetachOptionsResponse,
     TopicModelingDetachRequest,
     TopicModelingDetachResponse,
-    TopicModelingEmbeddingCacheClearResponse,
-    TopicModelingEmbeddingCacheSizeResponse,
     TopicModelingRequest,
     TopicModelingResponse,
 )

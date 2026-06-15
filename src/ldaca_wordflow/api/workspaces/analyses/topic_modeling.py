@@ -6,8 +6,8 @@ Used by:
 Flow:
 - FastAPI mounts these routes through the workspace package router.
 - Route handlers lock per user/workspace, validate node state, and submit topic tasks.
-- Helpers read artifacts, reaggregate topics, manage embedding cache state, and detach columns.
-- Responses return topic data, task metadata, cache summaries, or saved workspace updates.
+- Helpers read artifacts, reaggregate topics, and detach columns.
+- Responses return topic data, task metadata, or saved workspace updates.
 """
 
 from __future__ import annotations
@@ -38,7 +38,6 @@ from ....core.exceptions import (
     TaskNotFoundError,
     WorkspaceNotFoundError,
 )
-from ....core.utils import get_user_cache_folder
 from ....core.workspace import workspace_manager
 from ....models import (
     AnalysisClearResponse,
@@ -50,8 +49,6 @@ from ....models import (
     TopicModelingDetachOptionsResponse,
     TopicModelingDetachRequest,
     TopicModelingDetachResponse,
-    TopicModelingEmbeddingCacheClearResponse,
-    TopicModelingEmbeddingCacheSizeResponse,
     TopicModelingRequest,
     TopicModelingResponse,
 )
@@ -377,112 +374,6 @@ async def clear_topic_modeling_results(
     }
 
 
-def _embedding_cache_dirs(user_id: str) -> list[Path]:
-    """Return the embedding-cache directory if it currently exists.
-
-    Called by:
-    - Local helpers, route handlers, or service methods in this module because they need this unit's "Return the embedding-cache directory if it currently exists" behavior.
-    """
-    cache_dir = get_user_cache_folder(user_id) / "embeddings"
-    return [cache_dir] if cache_dir.exists() and cache_dir.is_dir() else []
-
-
-def _measure_embedding_cache(user_id: str) -> dict:
-    """Compute total size and file count across embedding-cache files.
-
-    Steps:
-    - Normalize caller input into the representation this module expects.
-    - Delegate stateful, expensive, or validating work to the owning manager/helper when needed.
-    - Return the compact value the caller uses for artifacts, validation, or response shaping.
-
-    Called by:
-    - Local helpers, route handlers, or service methods in this module because they need this unit's "Compute total size and file count across embedding-cache files" behavior.
-    """
-    bytes_total = 0
-    file_count = 0
-    for cache_dir in _embedding_cache_dirs(user_id):
-        for entry in cache_dir.glob("*.duckdb"):
-            try:
-                bytes_total += entry.stat().st_size
-                file_count += 1
-            except OSError:
-                continue
-    return {"bytes": bytes_total, "files": file_count}
-
-
-@router.get(
-    "/topic-modeling/embedding-cache/size",
-    response_model=TopicModelingEmbeddingCacheSizeResponse,
-)
-async def get_topic_modeling_embedding_cache_size(
-    current_user: dict = Depends(get_current_user),
-):
-    """Report current embedding-cache size and file count for the user.
-
-    Used by the frontend Clear-cache confirmation dialog so the user can see
-    "X MB will be freed" before they confirm.
-
-    Flow:
-    - Resolve authentication and request parameters from FastAPI dependencies.
-    - Delegate validation, manager calls, artifacts, or state changes to the owning helper.
-    - Shape the response payload or raise the HTTP error the client should see.
-
-    Used by:
-    - Frontend and API clients through the FastAPI GET /topic-modeling/embedding-cache/size route because they need this unit's "Report current embedding-cache size and file count for the user" behavior.
-    """
-    return {
-        "state": "successful",
-        "data": _measure_embedding_cache(current_user["id"]),
-    }
-
-
-@router.delete(
-    "/topic-modeling/embedding-cache",
-    response_model=TopicModelingEmbeddingCacheClearResponse,
-)
-async def clear_topic_modeling_embedding_cache(
-    current_user: dict = Depends(get_current_user),
-):
-    """Delete every DuckDB entry in the user's embedding cache.
-
-    Sweeps the canonical `user_cache/embeddings/` directory.
-    Returns total bytes and file count freed so the UI can confirm the
-    reclaim. Clearing forces the next topic-modelling run to re-encode all
-    documents from scratch.
-
-    Flow:
-    - Resolve authentication and request parameters from FastAPI dependencies.
-    - Delegate validation, manager calls, artifacts, or state changes to the owning helper.
-    - Shape the response payload or raise the HTTP error the client should see.
-
-    Used by:
-    - Frontend and API clients through the FastAPI DELETE /topic-modeling/embedding-cache route because they need this unit's "Delete every DuckDB entry in the user's embedding cache" behavior.
-    """
-    user_id = current_user["id"]
-    measured = _measure_embedding_cache(user_id)
-    bytes_freed = 0
-    files_removed = 0
-    for cache_dir in _embedding_cache_dirs(user_id):
-        for entry in cache_dir.glob("*.duckdb"):
-            try:
-                size = entry.stat().st_size
-                entry.unlink()
-            except OSError as exc:
-                logger.debug("Failed to remove %s: %s", entry, exc)
-                continue
-            bytes_freed += size
-            files_removed += 1
-    return {
-        "state": "successful",
-        "message": "Embedding cache cleared.",
-        "data": {
-            "bytes_freed": bytes_freed,
-            "files_removed": files_removed,
-            "measured_before": measured,
-        },
-    }
-
-
 @router.post("/topic-modeling", response_model=TopicModelingResponse)
 async def run_topic_modeling(
     request: TopicModelingRequest,
@@ -549,9 +440,6 @@ async def run_topic_modeling(
                 "min_topic_size": request.min_topic_size,
                 "random_seed": request.random_seed,
                 "representative_words_count": request.representative_words_count,
-                "embedding_cache_dir": str(
-                    get_user_cache_folder(user_id) / "embeddings"
-                ),
                 "sample_fractions": request.sample_fractions,
             },
             task_name="Topic Modeling",
