@@ -1,10 +1,11 @@
-"""Tests for user preferences load / save / merge logic."""
+"""Tests for user preferences TOML load / save / merge logic."""
 
-import json
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+import tomli_w
+from pydantic import ValidationError
 from ldaca_wordflow.core.preferences import (
     load_preferences,
     merge_preferences,
@@ -13,7 +14,6 @@ from ldaca_wordflow.core.preferences import (
 from ldaca_wordflow.models.preferences import (
     ALWAYS_VISIBLE_VIEWS,
     DEFAULT_HIDDEN_VIEWS,
-    QuotationPreferences,
     UserPreferences,
     UserPreferencesUpdate,
 )
@@ -23,7 +23,7 @@ from ldaca_wordflow.models.preferences import (
 def user_data_dir(tmp_path: Path):
     """Patch get_user_data_folder to return tmp_path/user_data.
 
-    _preferences_path uses .parent on that, so preferences.json lands in tmp_path.
+    _preferences_path uses .parent on that, so preferences.toml lands in tmp_path.
     The fixture yields tmp_path (the user root) so tests write files there.
     """
     data_dir = tmp_path / "user_data"
@@ -39,30 +39,29 @@ class TestLoadPreferences:
         prefs = load_preferences("test-user")
         assert prefs.hidden_views == DEFAULT_HIDDEN_VIEWS
         assert prefs.favorite_workspaces == []
-        assert prefs.quotation.engine.type.value == "local"
 
     def test_loads_from_disk(self, user_data_dir: Path):
         payload = {"hidden_views": ["export"], "favorite_workspaces": ["ws-1"]}
-        (user_data_dir / "preferences.json").write_text(json.dumps(payload))
+        (user_data_dir / "preferences.toml").write_text(tomli_w.dumps(payload))
         prefs = load_preferences("test-user")
         assert prefs.hidden_views == ["export"]
         assert prefs.favorite_workspaces == ["ws-1"]
 
-    def test_returns_defaults_on_corrupt_json(self, user_data_dir: Path):
-        (user_data_dir / "preferences.json").write_text("{bad json!!!")
+    def test_returns_defaults_on_corrupt_toml(self, user_data_dir: Path):
+        (user_data_dir / "preferences.toml").write_text("bad = [toml")
         prefs = load_preferences("test-user")
         assert prefs == UserPreferences().validated()
 
     def test_strips_invalid_view_names(self, user_data_dir: Path):
         payload = {"hidden_views": ["export", "nonexistent-view"]}
-        (user_data_dir / "preferences.json").write_text(json.dumps(payload))
+        (user_data_dir / "preferences.toml").write_text(tomli_w.dumps(payload))
         prefs = load_preferences("test-user")
         assert "nonexistent-view" not in prefs.hidden_views
         assert "export" in prefs.hidden_views
 
     def test_cannot_hide_data_loader(self, user_data_dir: Path):
         payload = {"hidden_views": ["data-loader", "export"]}
-        (user_data_dir / "preferences.json").write_text(json.dumps(payload))
+        (user_data_dir / "preferences.toml").write_text(tomli_w.dumps(payload))
         prefs = load_preferences("test-user")
         assert "data-loader" not in prefs.hidden_views
         assert "export" in prefs.hidden_views
@@ -85,6 +84,11 @@ class TestSavePreferences:
         saved = save_preferences("test-user", prefs)
         assert "data-loader" not in saved.hidden_views
 
+    def test_save_omits_quotation_task_parameters(self, user_data_dir: Path):
+        save_preferences("test-user", UserPreferences())
+        saved_text = (user_data_dir / "preferences.toml").read_text()
+        assert "quotation" not in saved_text
+
 
 class TestMergePreferences:
     def test_partial_update_preserves_other_fields(self):
@@ -103,13 +107,11 @@ class TestMergePreferences:
         merged = merge_preferences(current, update)
         assert merged == current.validated()
 
-    def test_quotation_merge(self):
-        current = UserPreferences()
-        update = UserPreferencesUpdate(
-            quotation=QuotationPreferences(last_remote_url="http://example.com")
-        )
-        merged = merge_preferences(current, update)
-        assert merged.quotation.last_remote_url == "http://example.com"
+    def test_rejects_quotation_task_parameters(self):
+        with pytest.raises(ValidationError):
+            UserPreferencesUpdate.model_validate(
+                {"quotation": {"last_remote_url": "http://example.com"}}
+            )
 
 
 class TestAlwaysVisibleViews:

@@ -1,4 +1,4 @@
-"""Load and save user preferences as a JSON file on disk.
+"""Load and save user preferences as a TOML file on disk.
 
 Used by:
 - Backend API routes, worker tasks, workspace services, and backend tests because they
@@ -11,16 +11,18 @@ Flow: normalize inputs, delegate to the owning backend state or service boundary
 
 from __future__ import annotations
 
-import json
 import logging
+import tomllib
 from pathlib import Path
+
+import tomli_w
 
 from ..core.utils import get_user_data_folder
 from ..models.preferences import UserPreferences, UserPreferencesUpdate
 
 logger = logging.getLogger(__name__)
 
-PREFERENCES_FILENAME = "preferences.json"
+PREFERENCES_FILENAME = "preferences.toml"
 
 
 def _preferences_path(user_id: str) -> Path:
@@ -54,10 +56,10 @@ def load_preferences(user_id: str) -> UserPreferences:
         return UserPreferences().validated()
 
     try:
-        raw = path.read_text(encoding="utf-8")
-        prefs = UserPreferences.model_validate_json(raw)
+        raw = tomllib.loads(path.read_text(encoding="utf-8"))
+        prefs = UserPreferences.model_validate(raw)
         return prefs.validated()
-    except json.JSONDecodeError, ValueError:
+    except (tomllib.TOMLDecodeError, ValueError):
         logger.warning("Corrupt preferences at %s – returning defaults", path)
         return UserPreferences().validated()
 
@@ -75,7 +77,8 @@ def save_preferences(user_id: str, prefs: UserPreferences) -> UserPreferences:
     clean = prefs.validated()
     path = _preferences_path(user_id)
     tmp = path.with_suffix(".tmp")
-    tmp.write_text(clean.model_dump_json(indent=2), encoding="utf-8")
+    payload = clean.model_dump(mode="json", exclude_none=True)
+    tmp.write_text(tomli_w.dumps(payload), encoding="utf-8")
     tmp.replace(path)
     return clean
 
@@ -97,8 +100,6 @@ def merge_preferences(
         overrides["hidden_views"] = update.hidden_views
     if update.favorite_workspaces is not None:
         overrides["favorite_workspaces"] = update.favorite_workspaces
-    if update.quotation is not None:
-        overrides["quotation"] = update.quotation
     if update.default_tokenizer_model is not None:
         overrides["default_tokenizer_model"] = update.default_tokenizer_model
     if "ldaca_oni_api_token" in update.model_fields_set:

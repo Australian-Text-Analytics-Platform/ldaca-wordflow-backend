@@ -46,3 +46,25 @@ async def test_delete_file_keeps_parent_folder_when_other_files_remain(
     assert readme_file.exists()
     assert sibling_file.exists()
     assert corpus_folder.exists()
+
+
+async def test_delete_directory_recursively(
+    authenticated_client,
+):
+    user_data_folder = get_user_data_folder("test")
+    corpus_folder = user_data_folder / "LDaCA" / "Corpus_Name"
+    corpus_folder.mkdir(parents=True, exist_ok=True)
+
+    data_file = corpus_folder / "Corpus_Name.parquet"
+    data_file.write_text("parquet-bytes-placeholder", encoding="utf-8")
+    readme_file = corpus_folder / "README.md"
+    readme_file.write_text("# Corpus info", encoding="utf-8")
+
+    response = await authenticated_client.delete(
+        "/api/files/LDaCA/Corpus_Name"
+    )
+
+    assert response.status_code == 200
+    assert not data_file.exists()
+    assert not readme_file.exists()
+    assert not corpus_folder.exists()

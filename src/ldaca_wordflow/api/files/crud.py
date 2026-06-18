@@ -341,6 +341,10 @@ async def delete_file(filename: str, current_user: dict = Depends(get_current_us
         raise AccessDeniedError("Access denied: file outside allowed directory")
     if not file_path.exists():
         raise FileNotFoundError(f"File {filename} not found")
-    file_path.unlink()
+    if file_path.is_dir():
+        import shutil
+        shutil.rmtree(file_path)
+    else:
+        file_path.unlink()
     _delete_parent_folder_if_redundant(file_path, data_folder)
     return {"message": f"File {filename} deleted successfully"}

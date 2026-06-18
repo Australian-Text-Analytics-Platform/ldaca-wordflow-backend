@@ -1,4 +1,4 @@
-"""User preference models persisted as JSON on disk.
+"""User preference models shared by JSON API routes and TOML disk persistence.
 
 Used by:
 - FastAPI request/response validation, generated OpenAPI clients, and backend tests
@@ -12,8 +12,6 @@ Flow: validate incoming API fields, apply defaults or validators, and serialize 
 from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field
-
-from .quotation import QuotationEngineConfig, QuotationEngineType
 
 DEFAULT_HIDDEN_VIEWS: list[str] = ["ai-annotator"]
 
@@ -32,25 +30,6 @@ VALID_VIEWS: set[str] = {
 ALWAYS_VISIBLE_VIEWS: set[str] = {"data-loader"}
 
 
-class QuotationPreferences(BaseModel):
-    """Preference schema persisted by preference routes for quotation preferences.
-
-    Used by:
-    - backend request/response models, backend tests because they need a stable JSON
-      contract shared by route handlers, generated clients, and tests.
-
-    Flow: validate incoming API fields, apply defaults or validators, and serialize route
-        responses in the shape expected by frontend clients and tests.
-    """
-
-    engine: QuotationEngineConfig = Field(
-        default_factory=lambda: QuotationEngineConfig(type=QuotationEngineType.LOCAL)
-    )
-    last_remote_url: str = ""
-
-    model_config = ConfigDict(extra="forbid")
-
-
 class UserPreferences(BaseModel):
     """Preference schema persisted by preference routes for user preferences.
 
@@ -65,7 +44,6 @@ class UserPreferences(BaseModel):
 
     hidden_views: list[str] = Field(default_factory=lambda: list(DEFAULT_HIDDEN_VIEWS))
     favorite_workspaces: list[str] = Field(default_factory=list)
-    quotation: QuotationPreferences = Field(default_factory=QuotationPreferences)
     default_tokenizer_model: str | None = None
     ldaca_oni_api_token: str | None = None
 
@@ -104,7 +82,6 @@ class UserPreferencesUpdate(BaseModel):
 
     hidden_views: list[str] | None = None
     favorite_workspaces: list[str] | None = None
-    quotation: QuotationPreferences | None = None
     default_tokenizer_model: str | None = None
     ldaca_oni_api_token: str | None = None
 

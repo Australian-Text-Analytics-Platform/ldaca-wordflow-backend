@@ -100,7 +100,6 @@ from .polars_expression import (
     PolarsExpressionItem,
     PolarsExpressionRequest,
 )
-from .preferences import QuotationPreferences
 from .quotation import (
     QuotationAnalysisResponse,
     QuotationDetachOptionsResponse,
