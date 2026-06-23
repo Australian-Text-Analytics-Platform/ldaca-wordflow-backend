@@ -104,5 +104,7 @@ def merge_preferences(
         overrides["default_tokenizer_model"] = update.default_tokenizer_model
     if "ldaca_oni_api_token" in update.model_fields_set:
         overrides["ldaca_oni_api_token"] = update.ldaca_oni_api_token
+    if update.analysis_multi_tab_enabled is not None:
+        overrides["analysis_multi_tab_enabled"] = update.analysis_multi_tab_enabled
     merged = current.model_copy(update=overrides)
     return merged.validated()

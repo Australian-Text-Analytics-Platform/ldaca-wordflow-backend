@@ -39,13 +39,19 @@ class TestLoadPreferences:
         prefs = load_preferences("test-user")
         assert prefs.hidden_views == DEFAULT_HIDDEN_VIEWS
         assert prefs.favorite_workspaces == []
+        assert prefs.analysis_multi_tab_enabled is False
 
     def test_loads_from_disk(self, user_data_dir: Path):
-        payload = {"hidden_views": ["export"], "favorite_workspaces": ["ws-1"]}
+        payload = {
+            "hidden_views": ["export"],
+            "favorite_workspaces": ["ws-1"],
+            "analysis_multi_tab_enabled": True,
+        }
         (user_data_dir / "preferences.toml").write_text(tomli_w.dumps(payload))
         prefs = load_preferences("test-user")
         assert prefs.hidden_views == ["export"]
         assert prefs.favorite_workspaces == ["ws-1"]
+        assert prefs.analysis_multi_tab_enabled is True
 
     def test_returns_defaults_on_corrupt_toml(self, user_data_dir: Path):
         (user_data_dir / "preferences.toml").write_text("bad = [toml")
@@ -95,11 +101,28 @@ class TestMergePreferences:
         current = UserPreferences(
             hidden_views=["ai-annotator"],
             favorite_workspaces=["ws-1"],
+            analysis_multi_tab_enabled=False,
         )
-        update = UserPreferencesUpdate(hidden_views=["export"])
+        update = UserPreferencesUpdate(
+            hidden_views=["export"],
+            analysis_multi_tab_enabled=True,
+        )
         merged = merge_preferences(current, update)
         assert merged.hidden_views == ["export"]
         assert merged.favorite_workspaces == ["ws-1"]
+        assert merged.analysis_multi_tab_enabled is True
+
+    def test_partial_update_can_disable_multi_tab_ui(self):
+        current = UserPreferences(analysis_multi_tab_enabled=True)
+        update = UserPreferencesUpdate(analysis_multi_tab_enabled=False)
+        merged = merge_preferences(current, update)
+        assert merged.analysis_multi_tab_enabled is False
+
+    def test_null_multi_tab_update_is_noop(self):
+        current = UserPreferences(analysis_multi_tab_enabled=True)
+        update = UserPreferencesUpdate(analysis_multi_tab_enabled=None)
+        merged = merge_preferences(current, update)
+        assert merged.analysis_multi_tab_enabled is True
 
     def test_empty_update_is_noop(self):
         current = UserPreferences(hidden_views=["ai-annotator"])

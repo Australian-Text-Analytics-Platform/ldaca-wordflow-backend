@@ -46,6 +46,7 @@ class UserPreferences(BaseModel):
     favorite_workspaces: list[str] = Field(default_factory=list)
     default_tokenizer_model: str | None = None
     ldaca_oni_api_token: str | None = None
+    analysis_multi_tab_enabled: bool = False
 
     model_config = ConfigDict(extra="forbid")
 
@@ -84,5 +85,6 @@ class UserPreferencesUpdate(BaseModel):
     favorite_workspaces: list[str] | None = None
     default_tokenizer_model: str | None = None
     ldaca_oni_api_token: str | None = None
+    analysis_multi_tab_enabled: bool | None = None
 
     model_config = ConfigDict(extra="forbid")
