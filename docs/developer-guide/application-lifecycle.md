@@ -32,9 +32,10 @@ that imported `settings` sees the new values.
 
 ## Database And Sessions
 
-`db.py` creates the async SQLAlchemy engine and session dependency. It stores:
+`db.py` initializes async SQLite tables and exposes `aiosqlite` connections.
+It stores:
 
-- `User` rows, extending `fastapi-users` UUID user fields with display name,
+- `users` rows with OAuth fields plus display name,
   picture, Google id, folder path, creation time, and last login;
 - `UserSession` rows for issued access tokens and expiry.
 

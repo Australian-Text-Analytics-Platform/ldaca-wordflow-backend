@@ -1,65 +1,46 @@
-"""ORM model definitions for SQLAlchemy declarative base.
+"""Data structures for auth persistence rows.
 
 Used by:
-- backend package imports, analysis task helpers, and tests because they need the
-  same model definitions that production routes and workers rely on.
+- backend migration paths while the project transitions from SQLAlchemy to
+  direct SQLite access, and by tests that import row-shaped objects for
+  lightweight typing.
 
-Flow: define models with SQLAlchemy declarative mappings so they can be imported
-    wherever schema-aware access (queries, migrations, tests) is needed.
+Flow:
+- Keep a stable `User`/`UserSession` shape so call sites that previously
+  expected ORM-style attributes can keep the same semantic contract.
 """
 
-import uuid
+from dataclasses import dataclass
 from datetime import datetime
 
-from fastapi_users.db import SQLAlchemyBaseUserTableUUID
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy.sql import func
 
+@dataclass(slots=True)
+class User:
+    """User record shape persisted in `users`.
 
-class Base(DeclarativeBase):
-    """Declarative base used by SQLAlchemy models to share metadata.
-
-    Used by:
-    - analysis task helpers, backend package imports because analysis flows need per-user
-      task state to survive across route calls and worker result persistence.
+    Attributes mirror the fields returned by `auth_service` dictionaries.
     """
 
-    pass
+    id: str
+    email: str
+    name: str
+    picture: str | None = None
+    google_id: str | None = None
+    user_folder_path: str | None = None
+    created_at: datetime | None = None
+    last_login: datetime | None = None
+    is_active: bool = True
+    is_superuser: bool = False
+    is_verified: bool = False
 
 
-class User(SQLAlchemyBaseUserTableUUID, Base):
-    """User model with additional fields
+@dataclass(slots=True)
+class UserSession:
+    """User session record shape persisted in `user_sessions`."""
 
-    Used by:
-    - backend API routes, backend package imports, backend request/response models, backend
-      tests because they need a stable JSON contract shared by route handlers, generated
-      clients, and tests.
-    """
-
-    name: Mapped[str] = mapped_column(String(255), nullable=False)
-    picture: Mapped[str | None] = mapped_column(Text, nullable=True)
-    google_id: Mapped[str | None] = mapped_column(
-        String(255), nullable=True, unique=True
-    )
-    user_folder_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=func.now())
-    last_login: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-
-
-class UserSession(Base):
-    """User session model for token management
-
-    Used by:
-    - backend API routes, backend package imports, backend tests because they need a backend
-      boundary that validates inputs before delegating to workspace or worker state.
-    """
-
-    __tablename__ = "user_sessions"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("user.id"), nullable=False)
-    access_token: Mapped[str] = mapped_column(String(255), nullable=False)
-    refresh_token: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=func.now())
+    user_id: str
+    access_token: str
+    refresh_token: str | None = None
+    expires_at: datetime | None = None
+    created_at: datetime | None = None
+    id: int | None = None

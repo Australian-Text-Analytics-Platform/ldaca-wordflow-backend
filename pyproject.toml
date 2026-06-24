@@ -25,7 +25,6 @@ classifiers = [
 dependencies = [
     "aiosqlite>=0.21.0",
     "duckdb>=1.4.0",
-    "fastapi-users[sqlalchemy]>=14.0.1",        # Includes fastapi, python-multipart, sqlalchemy
     "fastapi[standard]>=0.138.0",               # Includes uvicorn, pydantic, starlette
     "fastexcel>=0.18.0",
     "xlsxwriter>=3.2.0",                        # Required by polars DataFrame.write_excel for xlsx export

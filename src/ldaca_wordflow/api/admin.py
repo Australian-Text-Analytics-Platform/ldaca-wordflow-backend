@@ -10,20 +10,27 @@ Flow:
 """
 
 import logging
+from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from fastapi import APIRouter, Depends
 
 from ..core.auth import get_current_user
 from ..core.auth_service import _utc_now_naive, cleanup_expired_sessions
-from ..db import async_session_maker
-from ..models.db import User, UserSession
 from ..settings import settings
 from ..core.exceptions import AccessDeniedError
+from .. import db as _db
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin", tags=["admin"])
+
+
+def _parse_datetime(value: str | None) -> datetime | None:
+    """Parse nullable ISO-8601 timestamp values from SQLite."""
+
+    if value is None:
+        return None
+    return datetime.fromisoformat(value)
 
 
 def _require_admin(current_user: dict) -> None:
@@ -50,6 +57,8 @@ def _require_admin(current_user: dict) -> None:
         return
 
     raise AccessDeniedError("Admin access required")
+
+
 @router.get("/users")
 async def list_users(current_user: dict = Depends(get_current_user)):
     """List users with active-session counts.
@@ -71,28 +80,40 @@ async def list_users(current_user: dict = Depends(get_current_user)):
     _require_admin(current_user)
     logger.info("Admin user list requested by %s", current_user["email"])
 
-    async with async_session_maker() as session:
-        # Get all users
-        result = await session.execute(select(User))
-        users = result.scalars().all()
+    async with _db.get_connection() as conn:
+        users = (
+            await (
+                await conn.execute(
+                """
+                SELECT id, email, name, created_at, last_login
+                FROM users
+                ORDER BY created_at ASC
+                """
+                )
+            ).fetchall()
+        )
 
         user_list = []
         for user in users:
             # Count active sessions for each user
-            session_result = await session.execute(
-                select(UserSession)
-                .where(UserSession.user_id == user.id)
-                .where(UserSession.expires_at > _utc_now_naive())
+            count_result = await conn.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM user_sessions
+                WHERE user_id = ? AND expires_at > ?
+                """,
+                (user["id"], _utc_now_naive().isoformat()),
             )
-            active_sessions = len(session_result.scalars().all())
+            count_row = await count_result.fetchone()
+            active_sessions = int(count_row["count"]) if count_row else 0
 
             user_list.append(
                 {
-                    "id": str(user.id),
-                    "email": user.email,
-                    "name": user.name,
-                    "created_at": user.created_at,
-                    "last_login": user.last_login,
+                    "id": str(user["id"]),
+                    "email": user["email"],
+                    "name": user["name"],
+                    "created_at": _parse_datetime(user["created_at"]),
+                    "last_login": _parse_datetime(user["last_login"]),
                     "active_sessions": active_sessions,
                 }
             )

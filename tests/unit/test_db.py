@@ -4,8 +4,6 @@ from uuid import uuid4
 import pytest
 from ldaca_wordflow import db
 from ldaca_wordflow.core import auth_service
-from ldaca_wordflow.models import db as model_db
-from sqlalchemy import select
 
 
 def _unique_email(prefix: str) -> str:
@@ -78,33 +76,23 @@ async def test_cleanup_expired_sessions_removes_only_expired_rows():
 
     expired_token = f"expired-{uuid4().hex}"
     active_token = f"active-{uuid4().hex}"
-    async with db.async_session_maker() as session:
-        session.add_all(
-            [
-                model_db.UserSession(
-                    user_id=user_id,
-                    access_token=expired_token,
-                    refresh_token=None,
-                    expires_at=auth_service._utc_now_naive()
-                    - timedelta(hours=1),
-                ),
-                model_db.UserSession(
-                    user_id=user_id,
-                    access_token=active_token,
-                    refresh_token=None,
-                    expires_at=auth_service._utc_now_naive()
-                    + timedelta(hours=1),
-                ),
-            ]
+    async with db.get_connection() as conn:
+        now = auth_service._utc_now_naive()
+        await conn.execute(
+            "INSERT INTO user_sessions (user_id, access_token, refresh_token, expires_at, created_at) VALUES (?, ?, ?, ?, ?)",
+            (user_id, expired_token, None, (now - timedelta(hours=1)).isoformat(), now.isoformat()),
         )
-        await session.commit()
+        await conn.execute(
+            "INSERT INTO user_sessions (user_id, access_token, refresh_token, expires_at, created_at) VALUES (?, ?, ?, ?, ?)",
+            (user_id, active_token, None, (now + timedelta(hours=1)).isoformat(), now.isoformat()),
+        )
+        await conn.commit()
 
     await auth_service.cleanup_expired_sessions()
 
-    async with db.async_session_maker() as session:
-        remaining_tokens = (
-            (await session.execute(select(model_db.UserSession.access_token))).scalars().all()
-        )
+    async with db.get_connection() as conn:
+        result = await conn.execute("SELECT access_token FROM user_sessions")
+        remaining_tokens = [row["access_token"] for row in await result.fetchall()]
 
     assert expired_token not in remaining_tokens
     assert active_token in remaining_tokens

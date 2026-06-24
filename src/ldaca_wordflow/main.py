@@ -287,8 +287,8 @@ async def status():
                 "description": "Advanced text analysis with polars-text integration",
             },
             "database": {
-                "status": "[OK] SQLAlchemy async",
-                "description": "Async SQLAlchemy with session management",
+                "status": "[OK] aiosqlite",
+                "description": "Async SQLite persistence with direct aiosqlite access",
             },
         },
         "modules": {

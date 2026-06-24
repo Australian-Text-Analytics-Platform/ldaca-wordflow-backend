@@ -14,27 +14,35 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
-from sqlalchemy import select
-from sqlalchemy.sql.elements import ColumnElement
+from collections.abc import Mapping
 
 from .. import db as _db
-from ..models.db import User, UserSession
 from ..settings import settings
 
 logger = logging.getLogger(__name__)
 
-_USER_FIELDS = (
-    "email",
-    "name",
-    "picture",
-    "google_id",
-    "user_folder_path",
-    "created_at",
-    "last_login",
-    "is_active",
-    "is_superuser",
-    "is_verified",
-)
+def _parse_datetime(value: str | datetime | None) -> datetime | None:
+    """Parse optional ISO timestamps stored by SQLite.
+
+    Used by:
+    - auth row serialization so DB payloads match route expectations.
+
+    Why:
+    - SQLite stores timestamps as ISO strings; API contracts use ``datetime``
+      objects in-memory.
+    """
+
+    if isinstance(value, datetime) or value is None:
+        return value
+    return datetime.fromisoformat(value)
+
+
+def _coerce_bool(value: Any) -> bool:
+    """Normalize SQLite integer flags into booleans."""
+
+    if isinstance(value, bool):
+        return value
+    return bool(value)
 
 
 def _utc_now_naive() -> datetime:
@@ -58,16 +66,26 @@ def _generate_session_tokens() -> tuple[str, str]:
     return secrets.token_urlsafe(32), secrets.token_urlsafe(32)
 
 
-def _user_to_dict(user: User) -> dict[str, Any]:
+def _user_to_dict(user: Mapping[str, Any]) -> dict[str, Any]:
     """Serialize a ``User`` row into the dict shape expected by API callers.
 
     Called by:
     - Local helpers, route handlers, or service methods in this module because they need a
       backend boundary that validates inputs before delegating to workspace or worker state.
     """
-    payload: dict[str, Any] = {"id": str(user.id)}
-    for field in _USER_FIELDS:
-        payload[field] = getattr(user, field)
+    payload: dict[str, Any] = {
+        "id": str(user["id"]),
+        "email": user["email"],
+        "name": user["name"],
+        "picture": user["picture"],
+        "google_id": user["google_id"],
+        "user_folder_path": user["user_folder_path"],
+        "created_at": _parse_datetime(user["created_at"]),
+        "last_login": _parse_datetime(user["last_login"]),
+        "is_active": _coerce_bool(user["is_active"]),
+        "is_superuser": _coerce_bool(user["is_superuser"]),
+        "is_verified": _coerce_bool(user["is_verified"]),
+    }
     return payload
 
 
@@ -83,39 +101,72 @@ async def get_or_create_user(
     Why:
     - Maintains idempotent user provisioning from Google identity payloads.
     """
-    async with _db.async_session_maker() as session:
-        result = await session.execute(
-            select(User).where(
-                cast(ColumnElement[bool], User.email == email)
+    now = _utc_now_naive()
+    async with _db.get_connection() as conn:
+        row = await (
+            await conn.execute(
+                "SELECT * FROM users WHERE email = ?",
+                (email,),
             )
+        ).fetchone()
+
+        if row:
+            user_id = str(row["id"])
+            await conn.execute(
+                """
+                UPDATE users
+                SET name = ?,
+                    picture = ?,
+                    google_id = ?,
+                    last_login = ?
+                WHERE id = ?
+                """,
+                (name, picture, google_id, now.isoformat(), user_id),
+            )
+            await conn.commit()
+            row = (
+                await (
+                    await conn.execute(
+                        "SELECT * FROM users WHERE id = ?",
+                        (user_id,),
+                    )
+                ).fetchone()
+            )
+            return _user_to_dict(cast(Mapping[str, Any], row))
+
+        user_id = str(uuid.uuid4())
+        await conn.execute(
+            """
+            INSERT INTO users (
+                id, email, hashed_password, name, picture, google_id,
+                user_folder_path, is_active, is_superuser, is_verified,
+                created_at, last_login
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                user_id,
+                email,
+                "oauth_user",
+                name,
+                picture,
+                google_id,
+                None,
+                1,
+                0,
+                1,
+                now.isoformat(),
+                now.isoformat(),
+            ),
         )
-        user = result.scalar_one_or_none()
+        await conn.commit()
 
-        if user:
-            user.name = name
-            user.picture = picture
-            user.google_id = google_id
-            user.last_login = _utc_now_naive()
-            await session.commit()
-            await session.refresh(user)
-        else:
-            user = User(
-                email=email,
-                name=name,
-                picture=picture,
-                google_id=google_id,
-                user_folder_path=None,
-                last_login=_utc_now_naive(),
-                is_active=True,
-                is_superuser=False,
-                is_verified=True,
-                hashed_password="oauth_user",
-            )
-            session.add(user)
-            await session.commit()
-            await session.refresh(user)
+        row = (
+            await (
+                await conn.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+            ).fetchone()
+        )
 
-        return _user_to_dict(user)
+        return _user_to_dict(cast(Mapping[str, Any], row))
 
 
 async def create_user_session(user_id: str) -> dict[str, Any]:
@@ -128,25 +179,22 @@ async def create_user_session(user_id: str) -> dict[str, Any]:
     Why:
     - Enforces single active session row per user in current design.
     """
-    async with _db.async_session_maker() as session:
+    now = _utc_now_naive()
+    expires_at = now + timedelta(hours=settings.token_expire_hours)
+    async with _db.get_connection() as conn:
         access_token, refresh_token = _generate_session_tokens()
-        expires_at = _utc_now_naive() + timedelta(hours=settings.token_expire_hours)
-
-        result = await session.execute(
-            select(UserSession).where(UserSession.user_id == uuid.UUID(user_id))
+        await conn.execute(
+            "DELETE FROM user_sessions WHERE user_id = ?",
+            (user_id,),
         )
-        old_sessions = result.scalars().all()
-        for old_session in old_sessions:
-            await session.delete(old_session)
-
-        new_session = UserSession(
-            user_id=uuid.UUID(user_id),
-            access_token=access_token,
-            refresh_token=refresh_token,
-            expires_at=expires_at,
+        await conn.execute(
+            """
+            INSERT INTO user_sessions (user_id, access_token, refresh_token, expires_at, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (user_id, access_token, refresh_token, expires_at.isoformat(), now.isoformat()),
         )
-        session.add(new_session)
-        await session.commit()
+        await conn.commit()
 
         return {
             "access_token": access_token,
@@ -166,23 +214,38 @@ async def validate_access_token(access_token: str) -> dict[str, Any] | None:
     Why:
     - Centralizes token expiry and join logic for user identity resolution.
     """
-    async with _db.async_session_maker() as session:
-        result = await session.execute(
-            select(User, UserSession)
-            .join(
-                UserSession,
-                cast(ColumnElement[bool], User.id == UserSession.user_id),
+    now = _utc_now_naive().isoformat()
+    async with _db.get_connection() as conn:
+        row = await (
+            await conn.execute(
+                """
+                SELECT
+                    users.id,
+                    users.email,
+                    users.name,
+                    users.picture,
+                    users.google_id,
+                    users.user_folder_path,
+                    users.created_at,
+                    users.last_login,
+                    users.is_active,
+                    users.is_superuser,
+                    users.is_verified,
+                    user_sessions.access_token,
+                    user_sessions.expires_at
+                FROM users
+                JOIN user_sessions ON users.id = user_sessions.user_id
+                WHERE user_sessions.access_token = ?
+                AND user_sessions.expires_at > ?
+                """,
+                (access_token, now),
             )
-            .where(UserSession.access_token == access_token)
-            .where(UserSession.expires_at > _utc_now_naive())
-        )
-        row = result.first()
+        ).fetchone()
 
         if row:
-            user, session_data = row
-            payload = _user_to_dict(user)
-            payload["access_token"] = session_data.access_token
-            payload["expires_at"] = session_data.expires_at
+            payload = _user_to_dict(cast(Mapping[str, Any], row))
+            payload["access_token"] = row["access_token"]
+            payload["expires_at"] = _parse_datetime(row["expires_at"])
             return payload
         return None
 
@@ -197,16 +260,12 @@ async def get_user_by_email(email: str) -> dict[str, Any] | None:
     Why:
     - Provides a consistent dict payload shape for caller code.
     """
-    async with _db.async_session_maker() as session:
-        result = await session.execute(
-            select(User).where(
-                cast(ColumnElement[bool], User.email == email)
-            )
-        )
-        user = result.scalar_one_or_none()
-
-        if user:
-            return _user_to_dict(user)
+    async with _db.get_connection() as conn:
+        row = await (
+            await conn.execute("SELECT * FROM users WHERE email = ?", (email,))
+        ).fetchone()
+        if row:
+            return _user_to_dict(cast(Mapping[str, Any], row))
         return None
 
 
@@ -220,16 +279,13 @@ async def cleanup_expired_sessions():
     Why:
     - Prevents stale sessions from accumulating indefinitely.
     """
-    async with _db.async_session_maker() as session:
-        result = await session.execute(
-            select(UserSession).where(
-                UserSession.expires_at <= _utc_now_naive()
-            )
+    now = _utc_now_naive().isoformat()
+    async with _db.get_connection() as conn:
+        await conn.execute(
+            "DELETE FROM user_sessions WHERE expires_at <= ?",
+            (now,),
         )
-        expired_sessions = result.scalars().all()
-        for expired_session in expired_sessions:
-            await session.delete(expired_session)
-        await session.commit()
+        await conn.commit()
 
 
 async def update_user_folder_path(user_id: str, folder_path: str) -> None:
@@ -242,17 +298,10 @@ async def update_user_folder_path(user_id: str, folder_path: str) -> None:
     Why:
     - Keeps DB user metadata aligned with filesystem initialization.
     """
-    async with _db.async_session_maker() as session:
-        result = await session.execute(
-            select(User).where(
-                cast(ColumnElement[bool], User.id == uuid.UUID(user_id))
-            )
-        )
-        user = result.scalar_one_or_none()
-
-        if user:
-            user.user_folder_path = folder_path
-            await session.commit()
+    async with _db.get_connection() as conn:
+        cursor = await conn.execute("UPDATE users SET user_folder_path = ? WHERE id = ?", (folder_path, user_id))
+        if cursor.rowcount:
+            await conn.commit()
             logger.info("Updated user %s folder path to: %s", user_id, folder_path)
         else:
             logger.warning("User %s not found for folder path update", user_id)

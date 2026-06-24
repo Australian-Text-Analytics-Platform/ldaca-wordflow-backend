@@ -3,6 +3,7 @@ Configuration for pytest tests
 Provides shared fixtures and setup for all tests
 """
 
+import os
 import shutil
 import tempfile
 from pathlib import Path
@@ -85,24 +86,13 @@ def _tokens_cache_in_tmpdir(tmp_path_factory):
 
 @pytest.fixture(scope="session", autouse=True)
 async def init_test_db():
-    """Initialize test database with tables for all tests"""
-    # Import after setting up the path
+    """Initialize test database with tables for all tests."""
+    fd, db_path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    test_db_url = f"sqlite+aiosqlite:///{db_path}"
 
-    # Use in-memory database for tests without modifying the global config
-    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-
-    # Create a test-specific database engine
-    test_db_url = "sqlite+aiosqlite:///:memory:"
-    test_engine = create_async_engine(test_db_url)
-    test_session_maker = async_sessionmaker(test_engine, expire_on_commit=False)
-
-    # Store the original for restoration
-    original_engine = getattr(db, "engine", None)
-    original_session_maker = getattr(db, "async_session_maker", None)
-
-    # Replace with test versions
-    db.engine = test_engine
-    db.async_session_maker = test_session_maker
+    original_database_url = getattr(db, "_DATABASE_URL_OVERRIDE", None)
+    db.set_database_url_override(test_db_url)
 
     # Create tables in the test database
     await db.create_db_and_tables()
@@ -110,13 +100,9 @@ async def init_test_db():
     yield
 
     # Cleanup
-    await test_engine.dispose()
-
-    # Restore original if they existed
-    if original_engine:
-        db.engine = original_engine
-    if original_session_maker:
-        db.async_session_maker = original_session_maker
+    # Restore original URL resolution and remove temp test DB.
+    db.set_database_url_override(original_database_url)
+    Path(db_path).unlink(missing_ok=True)
 
 
 _SETTINGS_PATCH_TARGETS: list[str] = [
@@ -176,7 +162,7 @@ async def test_db_session():
     """Provide a test database session"""
     from ldaca_wordflow import db
 
-    async with db.async_session_maker() as session:
+    async with db.get_connection() as session:
         yield session
 
 

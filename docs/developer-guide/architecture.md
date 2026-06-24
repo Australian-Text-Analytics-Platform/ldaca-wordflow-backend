@@ -31,7 +31,7 @@ mounts the built frontend from package resources.
 `settings.py` is the runtime configuration source. It derives paths from
 `DATA_ROOT` and supports `reload_settings()` for in-process updates.
 
-`db.py` manages async SQLAlchemy state for users and sessions. Multi-user mode
+`db.py` manages async SQLite state for users and sessions via `aiosqlite`. Multi-user mode
 uses access tokens stored in the database; single-user mode synthesizes a root
 user.
 
