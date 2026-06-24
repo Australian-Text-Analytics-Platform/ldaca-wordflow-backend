@@ -166,7 +166,7 @@ app.include_router(admin_router, prefix="/api", tags=["administration"])
 # =============================================================================
 
 
-@app.get("/")
+@app.get("/api")
 async def root():
     """Return API feature/index metadata.
 
@@ -189,6 +189,7 @@ async def root():
             "user_isolation": "Per-user data folders and workspace separation",
         },
         "endpoints": {
+            "root": "/api",
             "docs": "/api/docs",
             "redoc": "/api/redoc",
             "openapi": "/api/openapi.json",

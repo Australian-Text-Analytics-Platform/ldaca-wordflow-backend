@@ -58,16 +58,16 @@ routers do not duplicate auth checks.
 
 ## Frontend Mounting
 
-The backend can serve the production frontend from packaged resources under
-`ldaca_wordflow.resources.frontend/build`. `_mount_frontend()`:
+The backend serves the production frontend from packaged resources under
+`ldaca_wordflow.resources.frontend/build`. `_mount_frontend()` now:
 
-- locates the build directory or extracts `build.tar.gz`,
-- injects runtime globals such as `window.__BASE_PATH__`,
-  `window.__GOOGLE_CLIENT_ID__`, `window.__MULTI_USER__`, and CILogon config,
-- mounts static asset directories,
-- serves an SPA fallback for frontend routes.
+- locates the build directory,
+- serves SPA routes through `app.frontend("/", directory=...)`,
+- registers `/runtime-config.js` with runtime bootstrap settings used by the SPA:
+  `basePath` and `googleClientId`.
 
-This lets the Python package serve the full app from one process.
+Backend routes remain first in FastAPI dispatch so a dedicated API route (for example
+`/api`) is used when explicitly requested.
 
 ## Server Launcher
 
