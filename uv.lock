@@ -515,7 +515,7 @@ wheels = [
 
 [[package]]
 name = "docworkspace"
-version = "0.2.8"
+version = "0.3.0"
 source = { editable = "../docworkspace" }
 dependencies = [
     { name = "polars-source-utils" },
@@ -1223,7 +1223,7 @@ wheels = [
 
 [[package]]
 name = "ldaca-wordflow"
-version = "0.5.0"
+version = "0.6.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
@@ -1690,7 +1690,7 @@ wheels = [
 
 [[package]]
 name = "polars-source-utils"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "../polars-source-utils" }
 dependencies = [
     { name = "polars" },
@@ -1707,7 +1707,7 @@ dev = [
 
 [[package]]
 name = "polars-text"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "../polars-text" }
 dependencies = [
     { name = "duckdb" },
@@ -2328,7 +2328,7 @@ wheels = [
 
 [[package]]
 name = "rocrate-tabular"
-version = "0.1.4"
+version = "0.2.0"
 source = { directory = "src/ldaca_wordflow/_vendor/rocrate-tabular" }
 dependencies = [
     { name = "requests" },
