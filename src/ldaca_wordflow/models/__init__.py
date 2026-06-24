@@ -136,6 +136,7 @@ from .topic_modeling import (
 )
 from .workspace import (
     CurrentWorkspaceResponse,
+    NodeColorUpdateRequest,
     NodeDocumentColumnUpdateRequest,
     NodeTokenizationPreferenceRequest,
     SetCurrentWorkspaceResponse,

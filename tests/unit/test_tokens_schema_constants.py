@@ -84,7 +84,7 @@ def test_is_tokenization_column_reads_from_node_metadata() -> None:
     node = Node(data=with_tokens, name="tokens_root")
     node.register_tokenization(
         _TEXT_COLUMN,
-        {  # type: ignore[arg-type]
+        {
             "column_name": _TOKENS_NAME,
             "model": _BERT_MODEL,
             "language": "en",

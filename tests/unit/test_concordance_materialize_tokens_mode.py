@@ -215,7 +215,7 @@ async def test_tokens_materialize_route_selects_tokenization_column_once(
     )
     node.register_tokenization(
         "text",
-        {  # type: ignore[arg-type]
+        {
             "column_name": tokenization_column,
             "model": "huggingface:bert-base-uncased",
             "language": "en",

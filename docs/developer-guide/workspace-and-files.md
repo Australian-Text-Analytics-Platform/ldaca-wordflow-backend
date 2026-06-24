@@ -94,6 +94,9 @@ the source column, selected model, language, and cache metadata for cached
 tokens. Frontend node selectors update `Node.document` via
 `PUT /api/workspaces/nodes/{node_id}/document-column`; tokenizer preferences are
 registered via `PUT /api/workspaces/nodes/{node_id}/tokenization-preference`.
+Source-node visualization colours are durable `Node.color` metadata updated via
+`POST /api/workspaces/nodes/{node_id}/color`, separate from analysis request
+payloads.
 Analysis submit paths should read these fields, not mutate them. Analysis paths
 resolve the per-user DuckDB cache path and call
 `pl.col(...).text.tokenize(..., cache=path)` to hydrate temporary token

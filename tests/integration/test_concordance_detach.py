@@ -188,7 +188,7 @@ async def test_concordance_detach_options_ignore_token_metadata(
     tokenization_name = tokenization_column_name(
         "text", "huggingface:bert-base-uncased"
     )
-    node.register_tokenization(  # type: ignore[arg-type]
+    node.register_tokenization(
         "text",
         {
             "column_name": tokenization_name,

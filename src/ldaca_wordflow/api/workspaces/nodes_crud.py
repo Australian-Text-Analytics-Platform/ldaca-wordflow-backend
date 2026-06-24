@@ -35,6 +35,7 @@ from ...models import (
     ColumnOperationsResponse,
     ColumnUniqueValuesResponse,
     NodeActionResponse,
+    NodeColorUpdateRequest,
     NodeDataResponse,
     NodeDocumentColumnUpdateRequest,
     NodeQueryPlanResponse,
@@ -282,6 +283,22 @@ async def set_node_document_column(
     else:
         node.document = None
 
+    update_workspace(user_id, workspace_id, best_effort=True)
+    return frontend_node_info(node)
+
+
+@router.post("/nodes/{node_id}/color", response_model=WorkspaceNodeInfo)
+async def set_node_color(
+    node_id: str,
+    request: NodeColorUpdateRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """Set the persistent visualization colour on a workspace node."""
+    user_id = current_user["id"]
+    workspace_id = require_current_workspace_id(user_id)
+    ws = require_current_workspace(user_id)
+    node = ws.nodes[node_id]
+    node.color = request.color.lower()
     update_workspace(user_id, workspace_id, best_effort=True)
     return frontend_node_info(node)
 

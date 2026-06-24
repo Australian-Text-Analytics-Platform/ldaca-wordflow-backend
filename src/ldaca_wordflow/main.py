@@ -141,7 +141,7 @@ app = FastAPI(
 # Setup request logging (before CORS so it captures everything)
 from ._middleware import RequestLoggingMiddleware
 
-app.add_middleware(RequestLoggingMiddleware)
+app.add_middleware(cast(Any, RequestLoggingMiddleware))
 
 # Setup CORS (regex + credentials from settings)
 app.add_middleware(

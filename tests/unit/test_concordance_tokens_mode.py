@@ -196,7 +196,9 @@ def test_token_mode_hydrates_only_requested_page_slice(
     import duckdb
 
     with duckdb.connect(str(cache_file), read_only=True) as conn:
-        cached_count = conn.execute("SELECT count(*) FROM token_cache").fetchone()[0]
+        row = conn.execute("SELECT count(*) FROM token_cache").fetchone()
+        assert row is not None
+        cached_count = row[0]
     assert cached_count == 2
 
     assert page["pagination"]["page_size"] == 2

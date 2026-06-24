@@ -122,6 +122,7 @@ class WorkspaceNodeInfo(BaseModel):
     parent_ids: list[str] = Field(default_factory=list)
     child_ids: list[str] = Field(default_factory=list)
     document: str | None = None
+    color: str | None = None
     shape: tuple[int | None, int | None] = (None, None)
     column_schema: dict[str, str] = Field(default_factory=dict, alias="schema")
     columns: list[str] = Field(default_factory=list)
@@ -143,6 +144,20 @@ class NodeDocumentColumnUpdateRequest(BaseModel):
     """
 
     document_column: str | None = None
+
+
+class NodeColorUpdateRequest(BaseModel):
+    """Request schema used by API routes and generated clients for node colour updates.
+
+    Used by:
+    - backend API routes and frontend node selectors because source-node visualisation
+      colours are durable workspace-node metadata.
+
+    Flow: validate one CSS hex colour string before the node route normalizes and
+    persists it on the selected workspace node.
+    """
+
+    color: str = Field(pattern=r"^#[0-9a-fA-F]{6}$")
 
 
 class NodeTokenizationPreferenceRequest(BaseModel):

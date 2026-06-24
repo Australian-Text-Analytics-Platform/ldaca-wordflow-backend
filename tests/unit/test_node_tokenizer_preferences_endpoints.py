@@ -33,6 +33,31 @@ async def test_set_node_document_column_persists_node_metadata(
     assert info_response.json()["document"] == "document"
 
 
+async def test_set_node_color_persists_node_metadata(authenticated_client, tiny_node_id):
+    response = await authenticated_client.post(
+        f"/api/workspaces/nodes/{tiny_node_id}/color",
+        json={"color": "#2563eb"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["color"] == "#2563eb"
+
+    info_response = await authenticated_client.get(
+        f"/api/workspaces/nodes/{tiny_node_id}"
+    )
+    assert info_response.status_code == 200
+    assert info_response.json()["color"] == "#2563eb"
+
+
+async def test_set_node_color_rejects_invalid_hex(authenticated_client, tiny_node_id):
+    response = await authenticated_client.post(
+        f"/api/workspaces/nodes/{tiny_node_id}/color",
+        json={"color": "blue"},
+    )
+
+    assert response.status_code == 422
+
+
 async def test_set_node_tokenization_preference_persists_column_metadata(
     authenticated_client, tiny_node_id
 ):
