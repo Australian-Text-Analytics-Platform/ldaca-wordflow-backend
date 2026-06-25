@@ -474,6 +474,31 @@ class WorkspaceManager:
             self._task_managers[user_id] = tm
         return tm
 
+    def shutdown_task_managers(self) -> None:
+        """Shut down all cached per-user worker-task managers.
+
+        Called by:
+        - FastAPI lifespan shutdown and backend test-session teardown because each cached
+          ``WorkerTaskManager`` may own a multiprocessing manager process after a worker
+          submission.
+        Why:
+        - Keeps workspace task state cleanup explicit so Windows interpreter teardown does
+          not inherit live multiprocessing manager state after pytest has reported results.
+
+        Flow: copy and clear the cache, call each manager's shutdown hook if present, and
+            log cleanup failures without stopping the rest of the shutdown sequence.
+        """
+
+        task_managers = list(self._task_managers.values())
+        self._task_managers.clear()
+        for task_manager in task_managers:
+            try:
+                shutdown = getattr(task_manager, "shutdown", None)
+                if callable(shutdown):
+                    shutdown()
+            except Exception as exc:
+                logger.debug("Failed to shut down worker task manager: %s", exc)
+
     def get_workspace_dir(self, user_id: str, workspace_id: str) -> Path | None:
         """Return workspace dir data used by workspace persistence and selection.
 

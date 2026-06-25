@@ -31,15 +31,44 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/checkout@v7
         with:
-          python-version: "3.14"
+          submodules: recursive
+
+      - name: Check out source dependencies
+        shell: bash
+        env:
+          REF_NAME: ${{ github.head_ref || github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          clone_source_dependency() {
+            local repo_url="$1"
+            local target="$2"
+
+            if git ls-remote --exit-code --heads "$repo_url" "$REF_NAME" >/dev/null 2>&1; then
+              git clone --depth 1 --branch "$REF_NAME" "$repo_url" "$target"
+            else
+              git clone --depth 1 --branch main "$repo_url" "$target"
+            fi
+          }
+
+          clone_source_dependency \
+            https://github.com/Australian-Text-Analytics-Platform/docworkspace.git \
+            "$GITHUB_WORKSPACE/../docworkspace"
+          clone_source_dependency \
+            https://github.com/Australian-Text-Analytics-Platform/polars-text.git \
+            "$GITHUB_WORKSPACE/../polars-text"
+          clone_source_dependency \
+            https://github.com/AlexDrBanana/polars-source-utils.git \
+            "$GITHUB_WORKSPACE/../polars-source-utils"
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@v8.2.0
+        with:
+          python-version: "3.14t"
+          enable-cache: true
+          cache-python: true
 
       - name: Extract frontend build archive
         shell: bash
@@ -54,7 +83,7 @@ jobs:
 
       - name: Install dependencies
         shell: bash
-        run: uv sync --group dev
+        run: uv sync --frozen --group dev
 
       - name: Run tests
         shell: bash

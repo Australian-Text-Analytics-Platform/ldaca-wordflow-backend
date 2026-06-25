@@ -112,8 +112,8 @@ async def lifespan(app: FastAPI):
     if log_file:
         log_file.close()
 
-    # Worker pool shutdown must tolerate failures so the ASGI shutdown
-    # completes even if the pool is in a bad state.
+    # Worker pool and task-manager shutdown must tolerate failures so the ASGI
+    # shutdown completes even if background worker state is in a bad state.
     try:
         from .core.worker import get_worker_pool
 
@@ -122,6 +122,13 @@ async def lifespan(app: FastAPI):
             worker_pool.shutdown(wait=True, timeout=5.0)
     except Exception as e:
         logger.warning("Error during worker pool shutdown: %s", e)
+
+    try:
+        from .core.workspace import workspace_manager
+
+        workspace_manager.shutdown_task_managers()
+    except Exception as e:
+        logger.warning("Error during worker task-manager shutdown: %s", e)
 
     await cleanup_expired_sessions()
 

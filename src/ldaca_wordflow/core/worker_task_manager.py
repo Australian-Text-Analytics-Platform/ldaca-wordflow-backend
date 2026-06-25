@@ -163,10 +163,10 @@ class WorkerTaskManager:
     - ``api.tasks`` for list/clear/cancel/SSE task-center operations because the frontend
       Task Center needs one lifecycle controller for every background task it displays.
 
-    Flow: maintain task records under an async lock, allocate multiprocessing progress
-        queues, submit named worker functions, monitor progress and future completion, fan
-        out task events to bounded subscriber queues, and cancel or clear individual tasks
-        and task trees when routes request cleanup.
+    Flow: maintain task records under an async lock, lazily allocate multiprocessing
+        progress queues for submitted worker jobs, monitor progress and future completion,
+        fan out task events to bounded subscriber queues, and cancel or clear individual
+        tasks and task trees when routes request cleanup.
     """
 
     def __init__(self):
@@ -176,15 +176,15 @@ class WorkerTaskManager:
         - ``WorkspaceManager.get_task_manager`` and backend tests because they need a fresh
           manager with isolated in-memory task state for one user/test scenario.
 
-        Flow: create the task/progress dictionaries, async locks, multiprocessing manager-backed
-            progress queue registry, and per-user SSE subscriber sets that later methods mutate
-            during task lifecycles.
+        Flow: create the task/progress dictionaries, async locks, lazy multiprocessing
+            manager slot, progress queue registry, and per-user SSE subscriber sets that
+            later methods mutate during task lifecycles.
         """
 
         self._tasks: dict[str, TaskInfo] = {}
         self._lock = asyncio.Lock()
         self._progress_store: dict[str, dict[str, Any]] = {}  # task_id -> progress info
-        self._mp_manager = mp.Manager()
+        self._mp_manager: Any | None = None
         self._task_progress_queues: dict[str, Any] = {}
 
         # Event bus for real-time updates (single channel per user)
@@ -192,6 +192,54 @@ class WorkerTaskManager:
             str, set[asyncio.Queue]
         ] = {}  # user_id -> set of queues
         self._subscriber_lock = asyncio.Lock()
+
+    def _get_mp_manager(self) -> Any:
+        """Return the process-safe manager used for submitted task progress queues.
+
+        Called by:
+        - ``submit_task`` because only real worker submissions need a multiprocessing
+          manager-backed queue; metadata-only tests and route reads should not start a
+          manager server process.
+
+        Flow: create the manager on first submission, reuse it for later queues, and leave
+            final cleanup to ``shutdown`` so Windows test teardown can stop the manager
+            before Python interpreter shutdown.
+        """
+
+        if self._mp_manager is None:
+            self._mp_manager = mp.Manager()
+        return self._mp_manager
+
+    def shutdown(self) -> None:
+        """Release progress queues, subscribers, and the multiprocessing manager.
+
+        Called by:
+        - ``WorkspaceManager.shutdown_task_managers`` during FastAPI and test-session
+          shutdown because manager server processes must not survive past interpreter
+          teardown on Windows.
+
+        Flow: close every registered progress queue, clear transient subscriber/progress
+            stores, ask the multiprocessing manager to shut down if it was created, and
+            reset the slot so later tests or app lifecycles can create a fresh manager.
+        """
+
+        for task_id in list(self._task_progress_queues):
+            self._cleanup_progress_queue(task_id)
+        self._task_progress_queues.clear()
+        self._progress_store.clear()
+        self._subscribers.clear()
+
+        mp_manager = self._mp_manager
+        self._mp_manager = None
+        if mp_manager is None:
+            return
+
+        try:
+            shutdown = getattr(mp_manager, "shutdown", None)
+            if callable(shutdown):
+                shutdown()
+        except Exception as exc:
+            logger.debug("Failed to shut down multiprocessing manager: %s", exc)
 
     async def subscribe(
         self, user_id: str, workspace_id: str | None = None
@@ -459,7 +507,7 @@ class WorkerTaskManager:
 
                 try:
                     progress_value = float(raw_progress)
-                except TypeError, ValueError:
+                except (TypeError, ValueError):
                     continue
 
                 message_value = str(message) if message is not None else ""
@@ -500,7 +548,7 @@ class WorkerTaskManager:
                 message = payload.get("message")
                 try:
                     progress_value = float(raw_progress)
-                except TypeError, ValueError:
+                except (TypeError, ValueError):
                     continue
 
                 message_value = str(message) if message is not None else ""
@@ -1049,7 +1097,7 @@ class WorkerTaskManager:
         if not worker_pool.is_running:
             worker_pool.start()
 
-        progress_queue = self._mp_manager.Queue()
+        progress_queue = self._get_mp_manager().Queue()
 
         future = worker_pool.submit_task(
             task_func,

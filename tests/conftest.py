@@ -61,6 +61,25 @@ def anyio_backend():
 
 
 @pytest.fixture(scope="session", autouse=True)
+def _shutdown_worker_task_managers():
+    """Stop cached worker-task managers before pytest lets Python exit.
+
+    Used by:
+    - The full backend test session because route and integration tests can cache
+      per-user worker managers on the global ``workspace_manager``.
+
+    Flow: allow tests to run normally, then ask the workspace manager to close any
+        lazy multiprocessing manager processes so Windows teardown does not see live
+        manager state after pytest has finished reporting.
+    """
+    yield
+
+    from ldaca_wordflow.core.workspace import workspace_manager
+
+    workspace_manager.shutdown_task_managers()
+
+
+@pytest.fixture(scope="session", autouse=True)
 def _tokens_cache_in_tmpdir(tmp_path_factory):
     """Redirect the per-user tokens cache DB into a tmpdir for the test session.
 
