@@ -66,7 +66,11 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@v8.2.0
         with:
-          python-version: "3.14t"
+          # Standard (GIL) CPython 3.14: Polars ships only cp310-abi3 wheels, so a
+          # free-threaded "3.14t" interpreter has no matching wheel and would build
+          # polars-runtime from source on every run. The desktop bundle stays 3.14t on
+          # purpose; CI only needs to validate library logic, not the no-GIL runtime.
+          python-version: "3.14"
           enable-cache: true
           cache-python: true
 
