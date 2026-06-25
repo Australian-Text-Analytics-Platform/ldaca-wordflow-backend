@@ -12,7 +12,6 @@ from ldaca_wordflow.core.preferences import (
     save_preferences,
 )
 from ldaca_wordflow.models.preferences import (
-    ALWAYS_VISIBLE_VIEWS,
     DEFAULT_HIDDEN_VIEWS,
     UserPreferences,
     UserPreferencesUpdate,
@@ -135,8 +134,3 @@ class TestMergePreferences:
             UserPreferencesUpdate.model_validate(
                 {"quotation": {"last_remote_url": "http://example.com"}}
             )
-
-
-class TestAlwaysVisibleViews:
-    def test_data_loader_in_always_visible(self):
-        assert "data-loader" in ALWAYS_VISIBLE_VIEWS

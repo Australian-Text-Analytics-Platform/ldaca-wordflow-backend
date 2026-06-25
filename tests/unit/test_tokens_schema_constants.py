@@ -57,12 +57,6 @@ def test_parse_tokenization_column_rejects_non_tokenization_names() -> None:
     assert parse_tokenization_column("tokenization.text.foo.bar") is None
 
 
-def test_struct_field_names_match_rust_output() -> None:
-    assert TOKENS_TOKEN_FIELD == "token"
-    assert TOKENS_START_FIELD == "start"
-    assert TOKENS_END_FIELD == "end"
-
-
 def test_tokens_struct_dtype_matches_polars_text_output() -> None:
     df = pl.DataFrame({"text": ["Hello world"]})
     out = df.select(

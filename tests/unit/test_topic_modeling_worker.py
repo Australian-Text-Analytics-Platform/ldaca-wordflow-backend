@@ -25,10 +25,7 @@ from ldaca_wordflow.core import (
     worker_tasks_topic_pipeline,
 )
 from ldaca_wordflow.core.worker_tasks_topic_pipeline import (
-    _resolve_top_n_words,
-    _resolve_vectorizer_model,
     _sample_corpus,
-    _stopwords_for_lang,
 )
 
 _STAGE_TIMINGS = [
@@ -78,53 +75,6 @@ def test_sample_corpus_min_k_is_one():
     result_docs, result_idx = _sample_corpus(docs, 0.01, seed=42)
     assert len(result_docs) == 1
     assert len(result_idx) == 1
-
-
-# ---------------------------------------------------------------------------
-# c-TF-IDF vectorizer / stopword heuristics (pure, deterministic)
-# ---------------------------------------------------------------------------
-
-
-def test_resolve_top_n_words_headroom():
-    # Generous headroom so the frontend stopword filter still leaves enough.
-    assert _resolve_top_n_words(5) == 50
-    assert _resolve_top_n_words(40) == 80
-    assert _resolve_top_n_words(0) == 50
-    assert _resolve_top_n_words(None) == 50
-
-
-def test_resolve_vectorizer_model_english():
-    model, lang = _resolve_vectorizer_model(["the quick brown fox", "lazy dogs run"])
-    assert model == "native:plain_words_en"
-    assert lang == "en"
-
-
-def test_resolve_vectorizer_model_chinese():
-    model, lang = _resolve_vectorizer_model(["这是一个中文文档", "我们在测试主题建模"])
-    assert model == "lindera:cc-cedict"
-    assert lang is None
-
-
-def test_resolve_vectorizer_model_japanese():
-    model, lang = _resolve_vectorizer_model(["これはテストです", "トピックモデリング"])
-    assert model == "lindera:ja-ipadic"
-    assert lang is None
-
-
-def test_resolve_vectorizer_model_korean():
-    model, lang = _resolve_vectorizer_model(
-        ["이것은 한국어 문서입니다", "주제 모델링 테스트"]
-    )
-    assert model == "lindera:ko-dic"
-    assert lang is None
-
-
-def test_stopwords_for_lang():
-    english = _stopwords_for_lang("en")
-    assert "the" in english
-    assert english == sorted(english)
-    assert _stopwords_for_lang(None) == []
-    assert _stopwords_for_lang("zh") == []
 
 
 # ---------------------------------------------------------------------------

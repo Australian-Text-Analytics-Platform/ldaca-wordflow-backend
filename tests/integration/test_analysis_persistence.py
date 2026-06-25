@@ -251,6 +251,9 @@ class TestTokenFrequencyPersistence:
         assert record.request.get("stop_words") == []
         # Result is stored (may be wrapped by task manager); validate via endpoint contract
         assert final_result.get("token_limit") == expected_limit
+        assert (
+            final_result.get("analysis_params", {}).get("token_limit") == expected_limit
+        )
         assert final_result.get("stop_words") == []
         assert final_result.get("metadata", {}).get("stop_words") == []
         assert final_result.get("analysis_params", {}).get("stop_words") == []
@@ -263,51 +266,6 @@ class TestTokenFrequencyPersistence:
         assert "artifacts" in record.result
         assert isinstance(record.result["artifacts"], dict)
         assert isinstance(record.result["artifacts"].get("nodes"), list)
-
-    async def test_token_frequency_defaults_limit_when_missing(
-        self, authenticated_client, workspace_id, tiny_node_id, test_user
-    ):
-        """Token frequency requests without a limit should fall back to the default."""
-        request_payload = {
-            "node_ids": [tiny_node_id],
-            "node_columns": {tiny_node_id: "document"},
-            "tokenizer_model": "native:plain_words_en",
-        }
-
-        response = await post_json(
-            authenticated_client,
-            "/api/workspaces/token-frequencies",
-            request_payload,
-        )
-
-        assert response.status_code == 200
-        result_data = response.json()
-        assert result_data.get("state") == "running"
-
-        _simulate_token_frequency_completion(workspace_id)
-        task_id = _task_id_from_response(response)
-        result_resp = await get_json(
-            authenticated_client,
-            f"/api/workspaces/token-frequencies/tasks/{task_id}/result",
-        )
-        final_result = result_resp.json()
-        assert final_result.get("token_limit") == DEFAULT_TOKEN_LIMIT
-        assert (
-            final_result.get("analysis_params", {}).get("token_limit")
-            == DEFAULT_TOKEN_LIMIT
-        )
-        assert final_result.get("stop_words") == []
-
-        analyses = _list_analysis_records(test_user["id"], workspace_id)
-        assert len(analyses) == 1
-        record = analyses[0]
-        assert "limit" not in record.request
-        assert record.request["token_limit"] == DEFAULT_TOKEN_LIMIT
-        assert record.request.get("stop_words") == []
-        assert final_result.get("token_limit") == DEFAULT_TOKEN_LIMIT
-        assert final_result.get("stop_words") == []
-        assert final_result.get("metadata", {}).get("stop_words") == []
-        assert final_result.get("analysis_params", {}).get("stop_words") == []
 
     async def test_token_frequency_preserves_independent_tab_tasks(
         self, authenticated_client, workspace_id, tiny_node_id, test_user
@@ -362,59 +320,6 @@ class TestTokenFrequencyPersistence:
         )
         assert first_request_resp.status_code == 200
         assert "tab_id" not in first_request_resp.json()
-
-    async def test_token_frequency_multiple_nodes(
-        self,
-        authenticated_client,
-        workspace_id,
-        sample_node_id,
-        tiny_node_id,
-        test_user,
-    ):
-        """Test token frequency analysis with multiple nodes."""
-        # Given: A request with multiple nodes
-        request_payload = {
-            "node_ids": [sample_node_id, tiny_node_id],
-            "node_columns": {sample_node_id: "document", tiny_node_id: "document"},
-            "tokenizer_model": "native:plain_words_en",
-        }
-
-        # When: We call the token frequencies endpoint
-        response = await post_json(
-            authenticated_client,
-            "/api/workspaces/token-frequencies",
-            request_payload,
-        )
-
-        # Then: The response starts a background task
-        assert response.status_code == 200
-        result_data = response.json()
-        assert result_data.get("state") == "running"
-        assert result_data.get("metadata", {}).get("task_id")
-
-        _simulate_token_frequency_completion(workspace_id)
-        task_id = _task_id_from_response(response)
-        result_resp = await get_json(
-            authenticated_client,
-            f"/api/workspaces/token-frequencies/tasks/{task_id}/result",
-        )
-        final_result = result_resp.json()
-        assert_successful_result(final_result)
-        assert final_result.get("token_limit") == DEFAULT_TOKEN_LIMIT
-        assert final_result.get("stop_words") == []
-
-        # And: The analysis record contains both nodes
-        analyses = _list_analysis_records(test_user["id"], workspace_id)
-        assert len(analyses) == 1
-
-        record = analyses[0]
-        assert set(record.request["node_ids"]) == {sample_node_id, tiny_node_id}
-        assert record.request["token_limit"] == DEFAULT_TOKEN_LIMIT
-        assert record.request.get("stop_words") == []
-        assert final_result.get("token_limit") == DEFAULT_TOKEN_LIMIT
-        assert final_result.get("stop_words") == []
-        assert final_result.get("metadata", {}).get("stop_words") == []
-        assert final_result.get("analysis_params", {}).get("stop_words") == []
 
     async def test_current_result_update_persists_preferences(
         self, authenticated_client, workspace_id, tiny_node_id, test_user

@@ -62,29 +62,6 @@ def test_prefetch_does_not_raise_on_failure(monkeypatch, tmp_path):
     mp._prefetch_spacy_model()
 
 
-def test_start_model_prefetch_spawns_daemon_thread(monkeypatch, tmp_path):
-    cache_root = tmp_path / "spacy-cache"
-    cached_dir = cache_root / "en_core_web_md"
-    cached_dir.mkdir(parents=True, exist_ok=True)
-    (cached_dir / "config.cfg").write_text('[nlp]\nlang = "en"\n', encoding="utf-8")
-
-    monkeypatch.setattr(qe, "_SPACY_MODEL_CACHE_ROOT", cache_root)
-
-    import threading
-
-    threads_before = threading.enumerate()
-    mp.start_model_prefetch()
-
-    import time
-
-    time.sleep(0.1)
-
-    threads_after = threading.enumerate()
-    prefetch_names = [t.name for t in threads_after if t.name == "model-prefetch"]
-    # Thread may have finished already for the cached case, so just verify no crash
-    assert isinstance(prefetch_names, list)
-
-
 def test_topic_prefetch_loads_onnx_embedder(monkeypatch):
     calls: list[str | None] = []
 

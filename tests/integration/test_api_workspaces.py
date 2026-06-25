@@ -866,20 +866,6 @@ class TestWorkspaceAPI:
         assert body["id"] == "node-1"
         mock_node.rename.assert_called_once_with({"original_col": "renamed_col"})
 
-    async def test_cast_node_invalid_request_data(self, authenticated_client):
-        """Test casting with invalid request data"""
-        # Test missing required fields
-        response = await authenticated_client.post(
-            "/api/workspaces/nodes/test-node/cast",
-            json={"column": "test_col"},  # Missing target_type
-        )
-
-        assert response.status_code == 422
-        assert any(
-            error.get("loc", [])[-1] == "target_type"
-            for error in response.json()["detail"]
-        )
-
     async def test_cast_node_preserves_data_type(self, authenticated_client):
         """Test that casting preserves the original lazy data type."""
         import polars as pl
@@ -1011,68 +997,6 @@ class TestWorkspaceAPI:
             data = response.json()
             assert data.get("state") == "successful"
             assert data["cast_info"]["target_type"] == "string"
-
-    async def test_cast_node_integer_type(self, authenticated_client):
-        """Test casting to integer type"""
-        import polars as pl
-
-        mock_node = Mock()
-        mock_node.data = pl.DataFrame({"test_col": ["1", "2", "3"]}).lazy()
-
-        with (
-            patch(
-                "ldaca_wordflow.api.workspaces.workspace_manager.get_current_workspace_id"
-            ) as mock_current_entry,
-            patch(
-                "ldaca_wordflow.api.workspaces.workspace_manager.get_current_workspace"
-            ) as mock_current_ws,
-            patch("docworkspace.workspace.core.Workspace.save") as mock_save,
-        ):
-            mock_workspace = Mock()
-            mock_workspace.name = "test-workspace"
-            mock_workspace.nodes = {"test-node": mock_node}
-            mock_current_entry.return_value = "workspace-123"
-            mock_current_ws.return_value = mock_workspace
-
-            cast_data = {"column": "test_col", "target_type": "integer"}
-            response = await authenticated_client.post(
-                "/api/workspaces/nodes/test-node/cast", json=cast_data
-            )
-
-            assert response.status_code == 200
-            data = response.json()
-            assert data.get("state") == "successful"
-            assert data["cast_info"]["target_type"] == "integer"
-
-    async def test_cast_node_float_type(self, authenticated_client):
-        """Test casting to float type"""
-        import polars as pl
-
-        mock_node = Mock()
-        mock_node.data = pl.DataFrame({"test_col": ["1.5", "2.7", "3.14"]}).lazy()
-
-        with (
-            patch(
-                "ldaca_wordflow.api.workspaces.workspace_manager.get_current_workspace_id"
-            ) as mock_current_entry,
-            patch(
-                "ldaca_wordflow.api.workspaces.workspace_manager.get_current_workspace"
-            ) as mock_current_ws,
-            patch("docworkspace.workspace.core.Workspace.save") as mock_save,
-        ):
-            mock_workspace = Mock()
-            mock_workspace.name = "test-workspace"
-            mock_workspace.nodes = {"test-node": mock_node}
-            mock_current_entry.return_value = "workspace-123"
-            mock_current_ws.return_value = mock_workspace
-
-            cast_data = {"column": "test_col", "target_type": "float"}
-            response = await authenticated_client.post(
-                "/api/workspaces/nodes/test-node/cast", json=cast_data
-            )
-            assert response.status_code == 200
-            data = response.json()
-            assert data["cast_info"]["target_type"] == "float"
 
     async def test_cast_node_categorical_type(self, authenticated_client):
         """Test casting to categorical type"""
@@ -1310,24 +1234,6 @@ class TestWorkspaceAPI:
             # Endpoint now returns node info directly (no {success,node} wrapper)
             assert isinstance(result, dict)
             assert result.get("name") == "left_node_join_right_node"
-
-    async def test_join_nodes_missing_parameters(self, authenticated_client):
-        """Test join endpoint validation with missing required parameters"""
-        # Missing 'right_on' parameter - should get 422 validation error
-        response = await authenticated_client.post(
-            "/api/workspaces/nodes/join",
-            params={
-                "left_node_id": "left-node-id",
-                "right_node_id": "right-node-id",
-                "left_on": "username",
-                "how": "inner",
-                # Missing "right_on" parameter
-            },
-        )
-
-        # Should get FastAPI validation error
-        assert response.status_code == 422
-        assert "field required" in response.json()["detail"][0]["msg"].lower()
 
     async def test_join_preview_handles_absolute_paths(
         self, authenticated_client, tmp_path

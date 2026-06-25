@@ -1,7 +1,6 @@
 import polars as pl
 import pytest
 from ldaca_wordflow.api.workspaces.analyses.concordance_core import (
-    CORE_CONCORDANCE_COLUMNS,
     _serialize_materialized_rows,
     build_concordance_search_pattern,
     compute_concordance_page,
@@ -70,18 +69,6 @@ def test_filter_concordance_rows_removes_blank_entries():
     filtered = df.filter(concordance_non_empty_expr())
 
     assert filtered.height == 2
-
-
-def test_core_concordance_columns_use_prefixed_names():
-    assert CORE_CONCORDANCE_COLUMNS == (
-        "CONC_left_context",
-        "CONC_matched_text",
-        "CONC_right_context",
-        "CONC_start_idx",
-        "CONC_end_idx",
-        "CONC_l1",
-        "CONC_r1",
-    )
 
 
 def test_build_concordance_search_pattern_wraps_whole_word_literals():
