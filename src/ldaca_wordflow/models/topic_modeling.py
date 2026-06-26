@@ -5,8 +5,6 @@ Split from models/__init__.py.
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional
-
 from pydantic import BaseModel, ConfigDict, Field
 
 from .analysis_common import (
@@ -33,16 +31,16 @@ class TopicModelingRequest(BaseModel):
         responses in the shape expected by frontend clients and tests.
     """
 
-    node_ids: List[str]  # 1 or 2 node IDs
-    node_columns: Dict[str, str]  # Maps node_id -> column_name
+    node_ids: list[str]  # 1 or 2 node IDs
+    node_columns: dict[str, str]  # Maps node_id -> column_name
     # HDBSCAN minimum cluster size: the smallest group of chunks that counts as a
     # topic. The number of topics is whatever HDBSCAN yields for it (the only
     # native topic-count control; there is no post-fit merge to a target count).
-    min_topic_size: Optional[int] = 10
-    random_seed: Optional[int] = 42
-    representative_words_count: Optional[int] = 5
+    min_topic_size: int | None = 10
+    random_seed: int | None = 42
+    representative_words_count: int | None = 5
     # Sampling: one entry per corpus in node_ids order. None = no sampling for that corpus.
-    sample_fractions: Optional[List[Optional[float]]] = None
+    sample_fractions: list[float | None] | None = None
 
     # Pydantic v2 model config
     model_config = ConfigDict(
@@ -72,8 +70,8 @@ class TopicModelingTopic(BaseModel):
 
     id: int
     label: str
-    representative_words: List[str] = Field(default_factory=list)
-    size: List[int]  # per-corpus sizes aligned to request.node_ids order
+    representative_words: list[str] = Field(default_factory=list)
+    size: list[int]  # per-corpus sizes aligned to request.node_ids order
     total_size: int
     x: float
     y: float
@@ -90,9 +88,9 @@ class TopicModelingData(BaseModel):
         responses in the shape expected by frontend clients and tests.
     """
 
-    topics: List[TopicModelingTopic]
-    corpus_sizes: List[int]
-    per_corpus_topic_counts: Optional[List[Dict[int, int]]] = None
+    topics: list[TopicModelingTopic]
+    corpus_sizes: list[int]
+    per_corpus_topic_counts: list[dict[int, int]] | None = None
     meta: AnalysisTaskMetadata | None = None
 
 
@@ -109,7 +107,7 @@ class TopicModelingResponse(BaseModel):
 
     state: AnalysisTaskState
     message: str
-    data: Optional[TopicModelingData] = None
+    data: TopicModelingData | None = None
     metadata: AnalysisTaskMetadata | None = None
 
 
@@ -130,7 +128,7 @@ class TopicMeaningOverrideItem(BaseModel):
     """
 
     topic_id: int
-    words: List[str]
+    words: list[str]
 
 
 class TopicModelingDetachRequest(BaseModel):
@@ -144,12 +142,12 @@ class TopicModelingDetachRequest(BaseModel):
         responses in the shape expected by frontend clients and tests.
     """
 
-    node_ids: Optional[List[str]] = None
-    selected_columns: Dict[str, List[str]] = Field(default_factory=dict)
-    new_node_names: Optional[Dict[str, str]] = None
-    topic_column_name: Optional[str] = "TOPIC_topic"
-    topic_ids: Optional[List[int]] = None
-    topic_meanings_override: Optional[List[TopicMeaningOverrideItem]] = None
+    node_ids: list[str] | None = None
+    selected_columns: dict[str, list[str]] = Field(default_factory=dict)
+    new_node_names: dict[str, str] | None = None
+    topic_column_name: str | None = "TOPIC_topic"
+    topic_ids: list[int] | None = None
+    topic_meanings_override: list[TopicMeaningOverrideItem] | None = None
 
 
 class TopicModelingDetachOptionsResponse(BaseModel):
@@ -166,7 +164,7 @@ class TopicModelingDetachOptionsResponse(BaseModel):
 
     state: AnalysisTaskState
     message: str
-    data: Dict[str, List[DetachNodeOption]] | None = None
+    data: dict[str, list[DetachNodeOption]] | None = None
     metadata: AnalysisTaskMetadata | None = None
 
 

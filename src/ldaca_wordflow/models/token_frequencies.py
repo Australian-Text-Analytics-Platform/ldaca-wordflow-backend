@@ -5,7 +5,7 @@ Split from models/__init__.py.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
@@ -23,7 +23,7 @@ class StopWordsPayload(BaseModel):
         responses in the shape expected by frontend clients and tests.
     """
 
-    stop_words: List[str]
+    stop_words: list[str]
 
 
 class TokenFrequencyRequest(BaseModel):
@@ -38,12 +38,12 @@ class TokenFrequencyRequest(BaseModel):
         responses in the shape expected by frontend clients and tests.
     """
 
-    node_ids: List[str]  # 1 or 2 node IDs
-    node_columns: Dict[str, str]  # Maps node_id -> column_name
-    stop_words: Optional[List[str]] = None
-    token_limit: Optional[int] = None
-    tokenizer_model: Optional[str] = None
-    node_tokenizer_models: Optional[Dict[str, str]] = None
+    node_ids: list[str]  # 1 or 2 node IDs
+    node_columns: dict[str, str]  # Maps node_id -> column_name
+    stop_words: list[str] | None = None
+    token_limit: int | None = None
+    tokenizer_model: str | None = None
+    node_tokenizer_models: dict[str, str] | None = None
     # Pydantic v2 model config
     model_config = ConfigDict(
         json_schema_extra={
@@ -138,8 +138,8 @@ class TokenFrequencyNodeResult(BaseModel):
         responses in the shape expected by frontend clients and tests.
     """
 
-    data: List[TokenFrequencyData]
-    columns: List[str] = ["token", "frequency"]
+    data: list[TokenFrequencyData]
+    columns: list[str] = ["token", "frequency"]
     # Optional metadata (e.g., server-side truncation info)
     metadata: AnalysisTaskMetadata | None = None
 
@@ -157,16 +157,12 @@ class TokenFrequencyResponse(BaseModel):
 
     state: AnalysisTaskState | None = None
     message: str | None = None
-    data: Optional[Dict[str, TokenFrequencyNodeResult]] = (
-        None  # Maps node_name -> { data: [...], columns: [...] }
-    )
-    statistics: Optional[List[TokenStatisticsData]] = (
-        None  # Statistical measures (only when comparing 2 nodes)
-    )
-    token_limit: Optional[int] = None
-    analysis_params: Optional[Dict[str, Any]] = None
+    data: dict[str, TokenFrequencyNodeResult] | None = None  # Maps node_name -> { data: [...], columns: [...] }
+    statistics: list[TokenStatisticsData] | None = None  # Statistical measures (only when comparing 2 nodes)
+    token_limit: int | None = None
+    analysis_params: dict[str, Any] | None = None
     metadata: AnalysisTaskMetadata | None = None
-    stop_words: Optional[List[str]] = None
+    stop_words: list[str] | None = None
 
 
 # =============================================================================

@@ -4,7 +4,7 @@ Split from models/__init__.py.
 """
 
 from __future__ import annotations
-from typing import List, Optional
+
 from pydantic import BaseModel
 
 class User(BaseModel):
@@ -22,11 +22,11 @@ class User(BaseModel):
     id: str
     email: str
     name: str
-    picture: Optional[str] = None
-    is_active: Optional[bool] = None
-    is_verified: Optional[bool] = None
-    created_at: Optional[str] = None
-    last_login: Optional[str] = None
+    picture: str | None = None
+    is_active: bool | None = None
+    is_verified: bool | None = None
+    created_at: str | None = None
+    last_login: str | None = None
 
 
 
@@ -59,10 +59,10 @@ class AuthInfoResponse(BaseModel):
     """
 
     authenticated: bool
-    user: Optional[User] = None
-    available_auth_methods: List[AuthMethod] = []
+    user: User | None = None
+    available_auth_methods: list[AuthMethod] = []
     requires_authentication: bool
-    data_folder: Optional[str] = None
+    data_folder: str | None = None
 
 
 
@@ -115,7 +115,7 @@ class UserResponse(BaseModel):
     id: str  # UUID string, not integer
     email: str
     name: str
-    picture: Optional[str] = None  # Made optional
+    picture: str | None = None  # Made optional
     is_active: bool
     is_verified: bool
     created_at: str  # Will be converted from datetime

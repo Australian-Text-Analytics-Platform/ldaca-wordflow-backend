@@ -5,7 +5,7 @@ Split from models/__init__.py.
 
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -22,7 +22,7 @@ class TextSetupRequest(BaseModel):
     """
 
     document_column: str
-    content_column: Optional[str] = None
+    content_column: str | None = None
     auto_detect: bool = True
 
 
@@ -37,7 +37,7 @@ class DTMRequest(BaseModel):
         responses in the shape expected by frontend clients and tests.
     """
 
-    max_features: Optional[int] = 1000
+    max_features: int | None = 1000
     min_df: float = 0.01
     max_df: float = 0.95
     ngram_range: tuple = (1, 2)
@@ -117,10 +117,10 @@ class TextAnalysisInfo(BaseModel):
         responses in the shape expected by frontend clients and tests.
     """
 
-    document: Optional[str]
-    avg_document_length: Optional[float]
+    document: str | None = None
+    avg_document_length: float | None = None
     total_documents: int
-    vocabulary_size: Optional[int]
+    vocabulary_size: int | None = None
     is_text_ready: bool
 
 
@@ -207,14 +207,14 @@ class DetachNodeOption(BaseModel):
 
     node_id: str
     node_name: str
-    text_column: Optional[str] = None
+    text_column: str | None = None
     available_columns: list[str]
     disabled_columns: list[str] = Field(default_factory=list)
     # Columns to tick by default when the detach dialog opens. When None the
     # client falls back to its per-tool default (e.g. select-all). Topic
     # modeling sets this to its generated columns so source columns start
     # unticked, matching concordance/quotation.
-    default_selected_columns: Optional[list[str]] = None
+    default_selected_columns: list[str] | None = None
 
 
 class NodeDataFiltering(BaseModel):

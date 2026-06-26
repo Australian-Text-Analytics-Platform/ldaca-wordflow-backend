@@ -6,7 +6,7 @@ Split from models/__init__.py.
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Literal
 
 from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, model_validator
 from typing_extensions import TypedDict
@@ -72,7 +72,7 @@ class QuotationEngineConfig(BaseModel):
     """
 
     type: QuotationEngineType = QuotationEngineType.LOCAL
-    url: Optional[AnyHttpUrl] = None
+    url: AnyHttpUrl | None = None
 
     @model_validator(mode="after")
     def _validate_remote(self) -> "QuotationEngineConfig":
@@ -112,11 +112,11 @@ class QuotationRequest(BaseModel):
     column: str
     # Pagination parameters
     page: int = 1
-    page_size: Optional[int] = None
+    page_size: int | None = None
     # Sorting parameters
-    sort_by: Optional[str] = None  # column name to sort by
+    sort_by: str | None = None  # column name to sort by
     descending: bool = True
-    engine: Optional[QuotationEngineConfig] = None
+    engine: QuotationEngineConfig | None = None
 
     model_config = ConfigDict(extra="forbid")
 
@@ -134,10 +134,10 @@ class QuotationDetachRequest(BaseModel):
 
     node_id: str
     column: str
-    new_node_name: Optional[str] = None  # If not provided, will be auto-generated
-    engine: Optional[QuotationEngineConfig] = None
-    selected_columns: Optional[list[str]] = None
-    materialized_path: Optional[str] = None  # Reuse existing flattened parquet
+    new_node_name: str | None = None  # If not provided, will be auto-generated
+    engine: QuotationEngineConfig | None = None
+    selected_columns: list[str] | None = None
+    materialized_path: str | None = None  # Reuse existing flattened parquet
 
     model_config = ConfigDict(extra="forbid")
 
@@ -154,7 +154,7 @@ class QuotationMaterializeRequest(BaseModel):
     """
 
     column: str
-    engine: Optional[QuotationEngineConfig] = None
+    engine: QuotationEngineConfig | None = None
     parent_task_id: str
 
     model_config = ConfigDict(extra="forbid")
@@ -173,7 +173,7 @@ class QuotationDetachOptionsResponse(BaseModel):
 
     state: AnalysisTaskState
     message: str
-    data: Dict[str, List[DetachNodeOption]] | None = None
+    data: dict[str, list[DetachNodeOption]] | None = None
     metadata: AnalysisTaskMetadata | None = None
 
 
@@ -257,11 +257,11 @@ class QuotationResultQuery(BaseModel):
         responses in the shape expected by frontend clients and tests.
     """
 
-    page: Optional[int] = None
-    page_size: Optional[int] = None
-    sort_by: Optional[str] = None
-    descending: Optional[bool] = None
-    context_length: Optional[int] = None
+    page: int | None = None
+    page_size: int | None = None
+    sort_by: str | None = None
+    descending: bool | None = None
+    context_length: int | None = None
     update_only: bool = False
 
     model_config = ConfigDict(extra="forbid")

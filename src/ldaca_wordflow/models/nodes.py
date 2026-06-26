@@ -5,7 +5,7 @@ Split from models/__init__.py.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -15,6 +15,10 @@ from .analysis_common import (
     NodeDataFiltering,
     PaginationInfo,
 )
+
+
+ColumnScalarValue = str | int | float | bool | None
+FilterConditionValue = ColumnScalarValue | list[ColumnScalarValue] | dict[str, Any]
 
 
 class FilterCondition(BaseModel):
@@ -30,13 +34,13 @@ class FilterCondition(BaseModel):
 
     column: str
     operator: str  # Allow any string to support new operators like 'between'
-    value: Any
-    id: Optional[str] = None  # Frontend includes this for tracking
-    dataType: Optional[str] = None  # Frontend includes this for UI
+    value: FilterConditionValue
+    id: str | None = None  # Frontend includes this for tracking
+    dataType: str | None = None  # Frontend includes this for UI
     # New flags from frontend Filter UI
-    negate: Optional[bool] = False
-    regex: Optional[bool] = False
-    case_sensitive: Optional[bool] = False
+    negate: bool | None = False
+    regex: bool | None = False
+    case_sensitive: bool | None = False
 
 
 class FilterRequest(BaseModel):
@@ -50,9 +54,9 @@ class FilterRequest(BaseModel):
         responses in the shape expected by frontend clients and tests.
     """
 
-    conditions: List[FilterCondition]
-    logic: Optional[str] = "and"
-    new_node_name: Optional[str] = None
+    conditions: list[FilterCondition]
+    logic: str | None = "and"
+    new_node_name: str | None = None
 
 
 class SliceRequest(BaseModel):
@@ -68,10 +72,10 @@ class SliceRequest(BaseModel):
 
     mode: Literal["slice", "random_sample", "shuffle"] = "slice"
     offset: int = Field(default=0, ge=0)
-    length: Optional[int] = Field(default=None, ge=0)
-    sample_size: Optional[float] = Field(default=None, gt=0)
-    random_seed: Optional[int] = Field(default=None, ge=0)
-    new_node_name: Optional[str] = None
+    length: int | None = Field(default=None, ge=0)
+    sample_size: float | None = Field(default=None, gt=0)
+    random_seed: int | None = Field(default=None, ge=0)
+    new_node_name: str | None = None
 
     @model_validator(mode="after")
     def validate_sampling_mode(self) -> "SliceRequest":
@@ -107,9 +111,9 @@ class FilterPreviewResponse(BaseModel):
         responses in the shape expected by frontend clients and tests.
     """
 
-    data: List[Dict[str, Any]]
-    columns: List[str]
-    dtypes: Dict[str, str]
+    data: list[dict[str, Any]]
+    columns: list[str]
+    dtypes: dict[str, str]
     pagination: PaginationInfo
 
 
@@ -227,8 +231,8 @@ class ColumnDescribeResponse(BaseModel):
     """
 
     column_name: str
-    count: Optional[int] = None
-    null_count: Optional[int] = None
+    count: int | None = None
+    null_count: int | None = None
     mean: ColumnScalarValue | None = None
     std: ColumnScalarValue | None = None
     min: ColumnScalarValue | None = None

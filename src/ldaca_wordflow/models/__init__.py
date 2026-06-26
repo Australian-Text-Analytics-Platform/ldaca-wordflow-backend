@@ -15,7 +15,7 @@ Flow: validate incoming API fields, apply defaults or validators, and serialize 
     responses in the shape expected by frontend clients and tests.
 """
 
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -172,11 +172,11 @@ class ReplaceRequest(BaseModel):
     source_column: str = Field(..., min_length=1, max_length=200)
     pattern: str = Field(..., min_length=1)
     replacement: str = Field(default="")
-    output_column_name: Optional[str] = Field(default=None, max_length=200)
-    preview_limit: Optional[int] = Field(default=50, ge=1, le=500)
+    output_column_name: str | None = Field(default=None, max_length=200)
+    preview_limit: int | None = Field(default=50, ge=1, le=500)
     mode: Literal["replace", "extract"] = Field(default="replace")
     count: Literal["all", "first"] = Field(default="all")
-    n: Optional[int] = Field(default=None, ge=1)
+    n: int | None = Field(default=None, ge=1)
     connector: str = Field(default=" ")
 
 
@@ -194,7 +194,7 @@ class ReplaceApplyResponse(BaseModel):
     state: Literal["successful"]
     node_id: str
     column_name: str
-    dtype: Optional[str] = None
+    dtype: str | None = None
     message: str
 
 
@@ -209,7 +209,7 @@ class ConcatPreviewRequest(BaseModel):
         responses in the shape expected by frontend clients and tests.
     """
 
-    node_ids: List[str] = Field(..., min_length=2)
+    node_ids: list[str] = Field(..., min_length=2)
     deduplicate: bool = True
 
 
@@ -224,7 +224,7 @@ class ConcatRequest(ConcatPreviewRequest):
         responses in the shape expected by frontend clients and tests.
     """
 
-    new_node_name: Optional[str] = None
+    new_node_name: str | None = None
 
 
 class NodeOperationResponse(BaseModel):
@@ -324,7 +324,7 @@ class FilePreviewRequest(BaseModel):
     filename: str
     page: int = 0
     page_size: int = 20
-    payload: Optional[Dict[str, Any]] = None  # e.g., {"sheet_name": "Sheet1"}
+    payload: dict[str, Any] | None = None  # e.g., {"sheet_name": "Sheet1"}
 
 
 class FilePreviewResponse(BaseModel):
@@ -340,9 +340,9 @@ class FilePreviewResponse(BaseModel):
 
     filename: str
     file_type: str
-    supported_types: List[str]  # ["LazyFrame", "DataFrame"]
-    columns: List[str]
-    preview: List[Dict[str, Any]]
+    supported_types: list[str]  # ["LazyFrame", "DataFrame"]
+    columns: list[str]
+    preview: list[dict[str, Any]]
     total_rows: int
-    sheet_names: Optional[List[str]] = None
-    selected_sheet: Optional[str] = None
+    sheet_names: list[str] | None = None
+    selected_sheet: str | None = None

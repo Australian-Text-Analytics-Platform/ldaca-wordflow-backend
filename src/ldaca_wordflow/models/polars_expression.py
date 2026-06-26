@@ -4,7 +4,6 @@ Split from models/__init__.py.
 """
 
 from __future__ import annotations
-from typing import List, Optional
 from enum import Enum
 from pydantic import BaseModel
 
@@ -39,7 +38,7 @@ class PolarsExpressionItem(BaseModel):
     """
 
     code: str  # Python expression string evaluated with pl available
-    descending: Optional[bool] = None  # used only in sort context
+    descending: bool | None = None  # used only in sort context
 
 
 
@@ -55,10 +54,10 @@ class PolarsExpressionRequest(BaseModel):
     """
 
     context: PolarsExpressionContext
-    expressions: List[PolarsExpressionItem]
+    expressions: list[PolarsExpressionItem]
     # For group_by_agg: these are the grouping key expressions
-    group_by_keys: Optional[List[PolarsExpressionItem]] = None
-    new_node_name: Optional[str] = None
+    group_by_keys: list[PolarsExpressionItem] | None = None
+    new_node_name: str | None = None
 
 
 

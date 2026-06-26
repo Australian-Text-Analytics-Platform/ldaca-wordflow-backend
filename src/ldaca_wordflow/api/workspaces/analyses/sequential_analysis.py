@@ -79,8 +79,8 @@ class SelectedPeriod(BaseModel):
     - backend API routes because they need this unit's "API schema used by routes and generated clients for selected period" behavior.
     """
 
-    period_start: Any
-    period_end: Any
+    period_start: str | int | float
+    period_end: str | int | float
 
 
 class VisibleGroupSelection(BaseModel):
@@ -90,7 +90,7 @@ class VisibleGroupSelection(BaseModel):
     - backend API routes because they need this unit's "API schema used by routes and generated clients for visible group selection" behavior.
     """
 
-    values: dict[str, Any]
+    values: dict[str, str | int | float | bool]
 
 
 class SequentialAnalysisDetachRequest(BaseModel):

@@ -4,7 +4,7 @@ Split from models/__init__.py.
 """
 
 from __future__ import annotations
-from typing import Any, List, Literal, Optional
+from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, model_validator
 from .analysis_common import AnalysisSorting, AnalysisTaskMetadata, AnalysisTaskState
 
@@ -21,7 +21,7 @@ class SequentialAnalysisRequest(BaseModel):
     """
 
     time_column: str
-    group_by_columns: Optional[List[str]] = None
+    group_by_columns: list[str] | None = None
     # ``second`` and ``minute`` remain valid API frequencies even though
     # the live preset dropdown keeps the common, coarser choices front-and-center.
     frequency: Literal[
@@ -37,12 +37,10 @@ class SequentialAnalysisRequest(BaseModel):
     ] = "monthly"
     sort_by_time: bool = True
     column_type: Literal["datetime", "numeric"] = "datetime"
-    numeric_origin: Optional[float] = None
-    numeric_interval: Optional[float] = None
-    custom_interval_value: Optional[int] = None
-    custom_interval_unit: Optional[
-        Literal["seconds", "minutes", "hours", "days", "weeks"]
-    ] = None
+    numeric_origin: float | None = None
+    numeric_interval: float | None = None
+    custom_interval_value: int | None = None
+    custom_interval_unit: Literal["seconds", "minutes", "hours", "days", "weeks"] | None = None
     case_sensitive: bool = True
 
     @model_validator(mode="after")

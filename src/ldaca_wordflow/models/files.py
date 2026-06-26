@@ -4,7 +4,7 @@ Split from models/__init__.py.
 """
 
 from __future__ import annotations
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Literal
 from typing_extensions import TypedDict
 from pydantic import BaseModel, Field, model_validator
 
@@ -63,7 +63,7 @@ class ImportSampleDataResponse(BaseModel):
     file_count: int
     bytes_copied: int
     message: str
-    sample_dir: Optional[str] = None
+    sample_dir: str | None = None
     remote_download_started: bool = False
 
 
@@ -79,7 +79,7 @@ class ImportSampleDataRequest(BaseModel):
         responses in the shape expected by frontend clients and tests.
     """
 
-    collection_ids: List[str] = Field(default_factory=list)
+    collection_ids: list[str] = Field(default_factory=list)
 
 
 
@@ -117,8 +117,8 @@ class SampleDataCollection(BaseModel):
     language: str
     bundled: bool
     total_size_bytes: int
-    recommended_for: List[str]
-    files: List[SampleDataFileEntry]
+    recommended_for: list[str]
+    files: list[SampleDataFileEntry]
     status: Literal["bundled", "downloaded", "partial", "not_downloaded"]
 
 
@@ -135,7 +135,7 @@ class SampleDataCatalogueResponse(BaseModel):
     """
 
     schema_version: int
-    collections: List[SampleDataCollection]
+    collections: list[SampleDataCollection]
 
 
 class DataFileInfo(BaseModel):
@@ -168,7 +168,7 @@ class LDaCAImportRequest(BaseModel):
     """
 
     url: str
-    filename: Optional[str] = None
+    filename: str | None = None
 
 
 
@@ -254,8 +254,8 @@ class FileTreeNodeResponse(BaseModel):
     name: str
     path: str
     type: Literal["file", "directory"]
-    size: Optional[int] = None
-    children: Optional[List["FileTreeNodeResponse"]] = None
+    size: int | None = None
+    children: list[FileTreeNodeResponse] | None = None
 
     @model_validator(mode="after")
     def normalize_directory_children(self) -> "FileTreeNodeResponse":
@@ -486,7 +486,7 @@ class FilesTasksListResponse(BaseModel):
     """
 
     state: str
-    data: List[Dict[str, Any]]
+    data: list[dict[str, Any]]
     message: str
 
 
@@ -502,9 +502,9 @@ class FilesTaskActionDataResponse(BaseModel):
         responses in the shape expected by frontend clients and tests.
     """
 
-    cancelled: Optional[bool] = None
-    cancelled_count: Optional[int] = None
-    cleared_count: Optional[int] = None
+    cancelled: bool | None = None
+    cancelled_count: int | None = None
+    cleared_count: int | None = None
 
 
 

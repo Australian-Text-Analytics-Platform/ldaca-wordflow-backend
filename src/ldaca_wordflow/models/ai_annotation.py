@@ -4,7 +4,7 @@ Split from models/__init__.py.
 """
 
 from __future__ import annotations
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 from ..analysis.models import BaseAnalysisRequest
 from .analysis_common import AnalysisSorting, AnalysisTaskMetadata, AnalysisTaskState, SourceRowPagination
@@ -118,8 +118,8 @@ class AiAnnotationModelsRequest(BaseModel):
         responses in the shape expected by frontend clients and tests.
     """
 
-    base_url: Optional[str] = None
-    api_key: Optional[str] = None
+    base_url: str | None = None
+    api_key: str | None = None
 
 
 
@@ -134,25 +134,25 @@ class AiAnnotationRequest(BaseAnalysisRequest):
         responses in the shape expected by frontend clients and tests.
     """
 
-    node_ids: List[str]
-    node_columns: Dict[str, str]
-    annotation_column: Optional[str] = None
+    node_ids: list[str]
+    node_columns: dict[str, str]
+    annotation_column: str | None = None
 
-    classes: List[AiAnnotationClassDef] = Field(min_length=1)
-    examples: List[AiAnnotationExample] = Field(default_factory=list)
+    classes: list[AiAnnotationClassDef] = Field(min_length=1)
+    examples: list[AiAnnotationExample] = Field(default_factory=list)
 
     model: str
-    api_key: Optional[str] = None
-    base_url: Optional[str] = None
+    api_key: str | None = None
+    base_url: str | None = None
 
     temperature: float = Field(default=1.0, gt=0)
     top_p: float = Field(default=1.0, gt=0, le=1.0)
-    seed: Optional[int] = 42
+    seed: int | None = 42
     batch_size: int = Field(default=100, ge=1)
 
     page: int = 1
     page_size: int = 20
-    sort_by: Optional[str] = None
+    sort_by: str | None = None
     descending: bool = True
 
     model_config = ConfigDict(
@@ -191,19 +191,19 @@ class AiAnnotationDetachRequest(BaseModel):
     """
 
     column: str
-    new_node_name: Optional[str] = None
-    annotation_column: Optional[str] = None
+    new_node_name: str | None = None
+    annotation_column: str | None = None
 
-    classes: List[AiAnnotationClassDef] = Field(min_length=1)
-    examples: List[AiAnnotationExample] = Field(default_factory=list)
+    classes: list[AiAnnotationClassDef] = Field(min_length=1)
+    examples: list[AiAnnotationExample] = Field(default_factory=list)
 
     model: str
-    api_key: Optional[str] = None
-    base_url: Optional[str] = None
+    api_key: str | None = None
+    base_url: str | None = None
 
     temperature: float = Field(default=1.0, gt=0)
     top_p: float = Field(default=1.0, gt=0, le=1.0)
-    seed: Optional[int] = 42
+    seed: int | None = 42
     batch_size: int = Field(default=100, ge=1)
 
 
@@ -236,8 +236,8 @@ class AiAnnotationSaveRequest(BaseModel):
         responses in the shape expected by frontend clients and tests.
     """
 
-    annotation_column: Optional[str] = None
-    edits: List[AiAnnotationEdit] = Field(default_factory=list)
+    annotation_column: str | None = None
+    edits: list[AiAnnotationEdit] = Field(default_factory=list)
 
 
 
@@ -252,8 +252,8 @@ class AiAnnotationNodeResult(BaseModel):
         responses in the shape expected by frontend clients and tests.
     """
 
-    data: List[Dict[str, Any]]
-    columns: List[str]
+    data: list[dict[str, Any]]
+    columns: list[str]
     metadata: AnalysisTaskMetadata | None = None
     pagination: SourceRowPagination | None = None
     sorting: AnalysisSorting | None = None
@@ -271,10 +271,10 @@ class AiAnnotationResultQuery(BaseModel):
         responses in the shape expected by frontend clients and tests.
     """
 
-    page: Optional[int] = None
-    page_size: Optional[int] = None
-    sort_by: Optional[str] = None
-    descending: Optional[bool] = None
+    page: int | None = None
+    page_size: int | None = None
+    sort_by: str | None = None
+    descending: bool | None = None
 
     model_config = ConfigDict(extra="forbid")
 
@@ -293,9 +293,9 @@ class AiAnnotationResponse(BaseModel):
 
     state: AnalysisTaskState
     message: str
-    data: Optional[Dict[str, AiAnnotationNodeResult]] = None
-    analysis_params: Optional[Dict[str, Any]] = None
-    combinable: Optional[bool] = None
+    data: dict[str, AiAnnotationNodeResult] | None = None
+    analysis_params: dict[str, Any] | None = None
+    combinable: bool | None = None
     metadata: AnalysisTaskMetadata | None = None
 
 

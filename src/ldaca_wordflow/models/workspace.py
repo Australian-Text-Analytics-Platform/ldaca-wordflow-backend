@@ -5,7 +5,7 @@ Split from models/__init__.py.
 
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -26,8 +26,8 @@ class WorkspaceInfo(BaseModel):
     id: str
     name: str
     description: str = ""
-    created_at: Optional[str] = None
-    modified_at: Optional[str] = None
+    created_at: str | None = None
+    modified_at: str | None = None
     total_nodes: int
     root_nodes: int = 0
     leaf_nodes: int = 0
@@ -54,7 +54,7 @@ class WorkspaceSummary(BaseModel):
     root_nodes: int = 0
     leaf_nodes: int = 0
     workspace_size_Byte: int = 0
-    folder_name: Optional[str] = None
+    folder_name: str | None = None
 
 
 class CurrentWorkspaceResponse(BaseModel):
@@ -281,7 +281,7 @@ class WorkspaceCreateRequest(BaseModel):
     """
 
     name: str
-    description: Optional[str] = None
+    description: str | None = None
 
 
 class WorkspaceSaveRequest(BaseModel):
@@ -296,8 +296,8 @@ class WorkspaceSaveRequest(BaseModel):
     """
 
     workspace_id: str
-    name: Optional[str] = None
-    description: Optional[str] = None
+    name: str | None = None
+    description: str | None = None
 
 
 class WorkspaceActionResponse(BaseModel):

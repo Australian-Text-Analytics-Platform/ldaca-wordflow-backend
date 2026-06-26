@@ -5,7 +5,7 @@ Split from models/__init__.py.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -30,8 +30,8 @@ class ConcordanceAnalysisRequest(BaseModel):
         responses in the shape expected by frontend clients and tests.
     """
 
-    node_ids: List[str]  # Support up to 2 nodes (1 = single node mode)
-    node_columns: Dict[str, str]  # node_id -> column_name mapping
+    node_ids: list[str]  # Support up to 2 nodes (1 = single node mode)
+    node_columns: dict[str, str]  # node_id -> column_name mapping
     search_word: str
     num_left_tokens: int = 10
     num_right_tokens: int = 10
@@ -46,7 +46,7 @@ class ConcordanceAnalysisRequest(BaseModel):
     # Falls back to regex behaviour if no tokenization column exists.
     search_mode: Literal["regex", "tokens"] = "regex"
     # Sorting parameters
-    sort_by: Optional[str] = None  # column name to sort by
+    sort_by: str | None = None  # column name to sort by
     descending: bool = True
     model_config = ConfigDict(extra="forbid")
 
@@ -70,9 +70,9 @@ class ConcordanceDetachRequest(BaseModel):
     regex: bool = False
     whole_word: bool = False
     case_sensitive: bool = False
-    new_node_name: Optional[str] = None  # If not provided, will be auto-generated
-    selected_columns: Optional[list[str]] = None
-    materialized_path: Optional[str] = None  # Reuse existing flattened parquet
+    new_node_name: str | None = None  # If not provided, will be auto-generated
+    selected_columns: list[str] | None = None
+    materialized_path: str | None = None  # Reuse existing flattened parquet
 
 
 class ConcordanceDispersionDetachRequest(BaseModel):
@@ -101,23 +101,23 @@ class ConcordanceDispersionDetachRequest(BaseModel):
     regex: bool = False
     whole_word: bool = False
     case_sensitive: bool = False
-    new_node_name: Optional[str] = None
-    selected_columns: Optional[list[str]] = None
-    materialized_path: Optional[str] = None
+    new_node_name: str | None = None
+    selected_columns: list[str] | None = None
+    materialized_path: str | None = None
     # When the slow path runs (no materialized_path), the worker also writes
     # the materialised flat parquet so the user doesn't have to click "Process
     # All" separately before iterating on bin selections. The parent analysis
     # task id + this node's id are needed to publish the standard
     # `analysis_materialized` event back to the frontend.
-    parent_task_id: Optional[str] = None
-    selected_bins: Optional[list[int]] = None
-    total_bins: Optional[int] = None
+    parent_task_id: str | None = None
+    selected_bins: list[int] | None = None
+    total_bins: int | None = None
     # When the chart legend is filtered, the detach should aggregate only over
     # hits whose `CONC_matched_text` lands in this set. `None` means "all".
     # `match_case_insensitive` mirrors the chart's `lowercaseMatches` toggle:
     # when true, both the column and the candidate set are lowercased before
     # comparison so the filter agrees with the legend grouping.
-    selected_matched_texts: Optional[list[str]] = None
+    selected_matched_texts: list[str] | None = None
     match_case_insensitive: bool = False
 
 
@@ -160,7 +160,7 @@ class ConcordanceDetachOptionsResponse(BaseModel):
 
     state: AnalysisTaskState
     message: str
-    data: Dict[str, List[DetachNodeOption]] | None = None
+    data: dict[str, list[DetachNodeOption]] | None = None
     metadata: AnalysisTaskMetadata | None = None
 
 
@@ -178,11 +178,9 @@ class ConcordanceMetadata(BaseModel):
         responses in the shape expected by frontend clients and tests.
     """
 
-    concordance_columns: List[
-        str
-    ]  # Core concordance columns (CONC_left_context, CONC_matched_text, CONC_right_context, etc.)
-    metadata_columns: List[str]  # Original document metadata columns
-    all_columns: List[str]  # All available columns
+    concordance_columns: list[str]  # Core concordance columns (CONC_left_context, CONC_matched_text, CONC_right_context, etc.)
+    metadata_columns: list[str]  # Original document metadata columns
+    all_columns: list[str]  # All available columns
 
 
 class ConcordanceNodeResult(BaseModel):
@@ -196,8 +194,8 @@ class ConcordanceNodeResult(BaseModel):
         responses in the shape expected by frontend clients and tests.
     """
 
-    data: List[List[Dict[str, Any]]]
-    columns: List[str]
+    data: list[list[dict[str, Any]]]
+    columns: list[str]
     metadata: ConcordanceMetadata
     total_matches: int | None = None
     pagination: SourceRowPagination
@@ -218,8 +216,8 @@ class ConcordanceAnalysisResponse(BaseModel):
 
     state: AnalysisTaskState
     message: str
-    data: Dict[str, ConcordanceNodeResult]
-    analysis_params: Optional[Dict[str, Any]] = None
+    data: dict[str, ConcordanceNodeResult]
+    analysis_params: dict[str, Any] | None = None
     combinable: bool | None = None
     preferences: dict[str, Any] | None = None
     metadata: AnalysisTaskMetadata | None = None
