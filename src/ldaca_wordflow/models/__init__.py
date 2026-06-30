@@ -25,19 +25,6 @@ from pydantic import BaseModel, Field
 # These classes and type aliases were split out of __init__.py into dedicated
 # domain files. They are re-exported here for backward compatibility.
 # =============================================================================
-from .ai_annotation import (
-    AiAnnotationCategoriesResponse,
-    AiAnnotationDetachRequest,
-    AiAnnotationDetachResponse,
-    AiAnnotationModelsRequest,
-    AiAnnotationModelsResponse,
-    AiAnnotationProvidersResponse,
-    AiAnnotationRequest,
-    AiAnnotationResponse,
-    AiAnnotationResultQuery,
-    AiAnnotationSaveRequest,
-    AiAnnotationSaveResponse,
-)
 from .analysis_common import (
     AnalysisClearResponse,
     AnalysisSorting,

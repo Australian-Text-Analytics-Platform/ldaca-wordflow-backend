@@ -28,6 +28,8 @@ tab must not delete or replace another tab's task. The frontend persists the
 tab-to-task relationship in `tabs.json` (`tab_id -> task_id`) and should fetch
 request/result payloads by explicit `task_id`. Analysis request/result APIs do
 not accept frontend `tab_id`; tab identity stays in the frontend tab sidecar.
+The same sidecar also stores tab-owned node selectors: legacy `inputs` for the
+default source selector and `input_sets` for additional named selectors.
 
 ## Worker Registry
 
@@ -108,8 +110,14 @@ The analysis routes live under `api/workspaces/analyses/`.
   Embedding runs in-process in Rust with a separate `embeddings.duckdb`
   content-hash cache, so there is no Python-side embedding cache for topic
   modeling.
-- AI annotation calls OpenAI structured-output classification and can detach
-  saved labels into workspace data.
+- Annotation currently exposes workspace helper routes for setup/editing data:
+  `POST /api/workspaces/annotation/class-descriptions` creates an empty
+  `class`/`description` data block, while
+  `GET /api/workspaces/annotation/class-descriptions/{node_id}` and
+  `PUT /api/workspaces/annotation/class-descriptions/{node_id}` round-trip
+  the selected class/description columns for the frontend editor. Runnable
+  annotation processing is being redesigned separately from the removed
+  implementation.
 - Standalone tokenization routes are not exposed. Tokenizer model inventory is
   available from `GET /api/workspaces/tokenizer-models`; it is sourced from
   `polars-text` and carries model IDs, display labels, and supported ISO 639-1

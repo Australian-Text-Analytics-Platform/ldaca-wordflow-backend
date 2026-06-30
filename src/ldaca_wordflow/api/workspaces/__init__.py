@@ -21,6 +21,7 @@ from ...core.workspace import (
     workspace_manager,
 )
 from . import (
+    annotation,
     base,
     lifecycle,
     nodes_concat,
@@ -33,7 +34,6 @@ from . import (
     tabs,
 )
 from .analyses import (
-    ai_annotation,
     concordance,
     quotation,
     sequential_analysis,
@@ -51,12 +51,12 @@ router.include_router(nodes_join.router)
 router.include_router(nodes_expression.router)
 router.include_router(nodes_crud.router)
 router.include_router(base.router)
+router.include_router(annotation.router)
 router.include_router(token_frequencies.router)
 router.include_router(sequential_analysis.router)
 router.include_router(quotation.router)
 router.include_router(concordance.router)
 router.include_router(topic_modeling.router)
-router.include_router(ai_annotation.router)
 router.include_router(tabs.router)
 
 __all__ = ["router", "workspace_manager"]

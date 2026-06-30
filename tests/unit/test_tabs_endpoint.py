@@ -50,12 +50,22 @@ def _sample_group() -> dict:
                             {"node_id": "n1", "column": "text"},
                             {"node_id": "n2", "column": None},
                         ],
+                        "input_sets": {
+                            "source": [
+                                {"node_id": "n1", "column": "text"},
+                                {"node_id": "n2", "column": None},
+                            ],
+                            "classDescriptions": [
+                                {"node_id": "classes", "column": "class"}
+                            ],
+                        },
                     },
                     {
                         "tab_id": "t2",
                         "task_id": None,
                         "title": "Untitled",
                         "inputs": [],
+                        "input_sets": {},
                     },
                 ],
                 "active_tab_id": "t1",
@@ -134,7 +144,13 @@ async def test_put_replaces_existing_contents_not_merges(fake_workspace):
         "groups": {
             "token_frequencies": {
                 "tabs": [
-                    {"tab_id": "x", "task_id": None, "title": "New", "inputs": []}
+                    {
+                        "tab_id": "x",
+                        "task_id": None,
+                        "title": "New",
+                        "inputs": [],
+                        "input_sets": {},
+                    }
                 ],
                 "active_tab_id": "x",
             }
@@ -159,10 +175,11 @@ async def test_put_404s_on_unknown_workspace(fake_workspace):
 
 @pytest.mark.asyncio
 async def test_put_then_get_round_trips_tab_inputs(fake_workspace):
-    """Per-tab ``inputs`` (node_id + optional column) survive a PUT/GET cycle.
+    """Per-tab input selectors (node_id + optional column) survive PUT/GET.
 
-    Guards the add-node-as-needed model: each tab owns its node selection, so
-    the sidecar must persist and restore it verbatim.
+    Guards the add-node-as-needed model: each tab owns its source selection and
+    any extra named selector values, so the sidecar must persist and restore
+    both the legacy ``inputs`` field and the newer ``input_sets`` mapping.
     """
     payload = _sample_group()
     await tabs_api.put_workspace_tabs(
@@ -173,4 +190,12 @@ async def test_put_then_get_round_trips_tab_inputs(fake_workspace):
     )
     tab = result.groups["concordance"].tabs[0]
     assert [(i.node_id, i.column) for i in tab.inputs] == [("n1", "text"), ("n2", None)]
+    assert {
+        key: [(i.node_id, i.column) for i in inputs]
+        for key, inputs in tab.input_sets.items()
+    } == {
+        "source": [("n1", "text"), ("n2", None)],
+        "classDescriptions": [("classes", "class")],
+    }
     assert result.groups["concordance"].tabs[1].inputs == []
+    assert result.groups["concordance"].tabs[1].input_sets == {}

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field
 
-DEFAULT_HIDDEN_VIEWS: list[str] = ["ai-annotator"]
+DEFAULT_HIDDEN_VIEWS: list[str] = []
 
 VALID_VIEWS: set[str] = {
     "data-loader",
@@ -23,7 +23,7 @@ VALID_VIEWS: set[str] = {
     "analysis",
     "topic-modeling",
     "quotation",
-    "ai-annotator",
+    "annotation",
     "export",
 }
 

@@ -148,8 +148,6 @@ def _record_analysis_name(task) -> str | None:
         return "sequential_analysis"
     if request_class == "TopicModelingRequest":
         return "topic_modeling"
-    if request_class == "AIAnnotationRequest":
-        return "ai_annotation"
     return None
 
 

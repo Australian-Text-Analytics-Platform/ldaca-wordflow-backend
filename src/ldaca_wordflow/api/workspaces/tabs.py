@@ -5,11 +5,11 @@ Persists the analysis tab system's structure into
 analysis task system. Each analysis type (e.g. ``concordance``) owns a *tab
 group*: an ordered list of tabs plus the active tab id. A tab carries its own
 id, an optional ``task_id`` (the analysis result it currently shows), a display
-``title``, and its ``inputs`` — the node set the tab analyses under the
-"add-node-as-needed" model. Each tab owns its inputs so switching tabs never
-reconfigures another tab's node selection. Remaining analysis parameters
-(search words, thresholds, ...) still live on the referenced
-``AnalysisTask.request``.
+``title``, and node selector state. ``inputs`` is the legacy/default source
+selector; ``input_sets`` stores any additional named selectors a view needs.
+Each tab owns its selectors so switching tabs never reconfigures another tab's
+node selection. Remaining analysis parameters (search words, thresholds, ...)
+still live on the referenced ``AnalysisTask.request``.
 
 Endpoints:
 
@@ -65,8 +65,8 @@ class AnalysisTabInput(BaseModel):
     model.
 
     Used by:
-    - `AnalysisTab.inputs` and the GET/PUT tab routes because the frontend tab
-      store round-trips this exact shape.
+    - `AnalysisTab.inputs`, `AnalysisTab.input_sets`, and the GET/PUT tab
+      routes because the frontend tab store round-trips this exact shape.
     """
 
     node_id: str
@@ -77,9 +77,11 @@ class AnalysisTab(BaseModel):
     """A single analysis tab.
 
     Carries identity (``tab_id``), a pointer to the analysis result it shows
-    (``task_id``), a display ``title``, and the ``inputs`` node set it analyses.
-    Remaining analysis parameters live on the referenced
-    ``AnalysisTask.request``.
+    (``task_id``), a display ``title``, and selector state. ``inputs`` remains
+    the legacy source selector for existing clients. ``input_sets`` is keyed by
+    selector id (for example, ``source`` or ``classDescriptions``) so newer
+    views can persist multiple node selectors on the same tab. Remaining
+    analysis parameters live on the referenced ``AnalysisTask.request``.
 
     Used by:
     - `AnalysisTabGroup` and the GET/PUT tab routes because the frontend tab
@@ -90,6 +92,7 @@ class AnalysisTab(BaseModel):
     task_id: str | None = None
     title: str = "Untitled"
     inputs: list[AnalysisTabInput] = Field(default_factory=list)
+    input_sets: dict[str, list[AnalysisTabInput]] = Field(default_factory=dict)
 
 
 class AnalysisTabGroup(BaseModel):

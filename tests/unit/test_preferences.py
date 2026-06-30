@@ -75,11 +75,11 @@ class TestLoadPreferences:
 class TestSavePreferences:
     def test_round_trip(self, user_data_dir: Path):
         prefs = UserPreferences(
-            hidden_views=["ai-annotator", "export"],
+            hidden_views=["quotation", "export"],
             favorite_workspaces=["ws-2"],
         )
         saved = save_preferences("test-user", prefs)
-        assert saved.hidden_views == ["ai-annotator", "export"]
+        assert saved.hidden_views == ["quotation", "export"]
 
         loaded = load_preferences("test-user")
         assert loaded == saved
@@ -98,7 +98,7 @@ class TestSavePreferences:
 class TestMergePreferences:
     def test_partial_update_preserves_other_fields(self):
         current = UserPreferences(
-            hidden_views=["ai-annotator"],
+            hidden_views=["quotation"],
             favorite_workspaces=["ws-1"],
             analysis_multi_tab_enabled=False,
         )
@@ -124,7 +124,7 @@ class TestMergePreferences:
         assert merged.analysis_multi_tab_enabled is True
 
     def test_empty_update_is_noop(self):
-        current = UserPreferences(hidden_views=["ai-annotator"])
+        current = UserPreferences(hidden_views=["quotation"])
         update = UserPreferencesUpdate()
         merged = merge_preferences(current, update)
         assert merged == current.validated()
