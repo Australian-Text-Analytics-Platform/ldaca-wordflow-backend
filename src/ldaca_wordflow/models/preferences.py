@@ -30,6 +30,43 @@ VALID_VIEWS: set[str] = {
 ALWAYS_VISIBLE_VIEWS: set[str] = {"data-loader"}
 
 
+class AnnotationAiCustomProvider(BaseModel):
+    """A user-defined OpenAI-compatible AI provider for annotation.
+
+    Used by:
+    - `AnnotationAiPreferences` (and therefore `UserPreferences`) because the Annotation
+      tab lets users register custom providers (name + base URL) that persist to the
+      TOML preferences file and reappear in the provider dropdown.
+
+    Flow: validate the provider id/name/base_url, then serialize alongside the rest of
+        the preferences payload for disk persistence and the JSON API contract.
+    """
+
+    id: str
+    name: str
+    base_url: str
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class AnnotationAiPreferences(BaseModel):
+    """Persisted Annotation-tab AI settings: provider API keys and custom providers.
+
+    Used by:
+    - `UserPreferences` because the Annotation AI panel persists per-provider API keys
+      (keyed by provider id) and any user-defined custom providers so they survive
+      reloads and sync across the frontend preferences store.
+
+    Flow: hold the api_keys map and custom_providers list, defaulting both to empty so
+        older preference files (lacking this section) still validate cleanly.
+    """
+
+    api_keys: dict[str, str] = Field(default_factory=dict)
+    custom_providers: list[AnnotationAiCustomProvider] = Field(default_factory=list)
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class UserPreferences(BaseModel):
     """Preference schema persisted by preference routes for user preferences.
 
@@ -47,6 +84,9 @@ class UserPreferences(BaseModel):
     default_tokenizer_model: str | None = None
     ldaca_oni_api_token: str | None = None
     analysis_multi_tab_enabled: bool = False
+    annotation_ai: AnnotationAiPreferences = Field(
+        default_factory=AnnotationAiPreferences
+    )
 
     model_config = ConfigDict(extra="forbid")
 
@@ -86,5 +126,6 @@ class UserPreferencesUpdate(BaseModel):
     default_tokenizer_model: str | None = None
     ldaca_oni_api_token: str | None = None
     analysis_multi_tab_enabled: bool | None = None
+    annotation_ai: AnnotationAiPreferences | None = None
 
     model_config = ConfigDict(extra="forbid")

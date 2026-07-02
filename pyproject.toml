@@ -37,7 +37,9 @@ dependencies = [
     "pyarrow>=16.0.0",
     "rocrate-tabular>=0.2.0",
     "tbb>=2022.3.1 ; sys_platform != 'darwin'",
-    "openai>=2.26.0",
+    "openai>=2.26.0",                           # AsyncOpenAI: OpenAI/OpenRouter/OpenAI-compatible custom annotation calls
+    "anthropic>=0.40.0",                        # AsyncAnthropic: server-side Claude annotation calls
+    "google-genai>=1.0.0",                      # google-genai aio: server-side Gemini annotation calls
     "spacy>=3.7.0",
     "scikit-learn>=1.5.0",          # ENGLISH_STOP_WORDS for the Rust c-TF-IDF stoplist
     "tomli-w>=1.2.0",

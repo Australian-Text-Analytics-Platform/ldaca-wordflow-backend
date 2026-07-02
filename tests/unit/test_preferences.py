@@ -13,6 +13,8 @@ from ldaca_wordflow.core.preferences import (
 )
 from ldaca_wordflow.models.preferences import (
     DEFAULT_HIDDEN_VIEWS,
+    AnnotationAiCustomProvider,
+    AnnotationAiPreferences,
     UserPreferences,
     UserPreferencesUpdate,
 )
@@ -94,6 +96,34 @@ class TestSavePreferences:
         saved_text = (user_data_dir / "preferences.toml").read_text()
         assert "quotation" not in saved_text
 
+    def test_all_default_preferences_write_empty_file(self, user_data_dir: Path):
+        # VS Code-style sparse persistence: a preferences object equal to the
+        # model defaults records nothing, so the file is effectively empty.
+        save_preferences("test-user", UserPreferences())
+        saved_text = (user_data_dir / "preferences.toml").read_text().strip()
+        assert saved_text == ""
+
+    def test_save_omits_fields_set_to_their_default(self, user_data_dir: Path):
+        # Explicitly setting a field to its default value still omits it from the
+        # file (the value is indistinguishable from never having changed it).
+        prefs = UserPreferences(
+            analysis_multi_tab_enabled=False,  # default
+            favorite_workspaces=["ws-1"],  # non-default
+        )
+        save_preferences("test-user", prefs)
+        saved_text = (user_data_dir / "preferences.toml").read_text()
+        assert "analysis_multi_tab_enabled" not in saved_text
+        assert "ws-1" in saved_text
+
+    def test_save_omits_empty_annotation_ai_section(self, user_data_dir: Path):
+        # An empty annotation_ai section equals its default and must not appear.
+        save_preferences(
+            "test-user",
+            UserPreferences(annotation_ai=AnnotationAiPreferences()),
+        )
+        saved_text = (user_data_dir / "preferences.toml").read_text()
+        assert "annotation_ai" not in saved_text
+
 
 class TestMergePreferences:
     def test_partial_update_preserves_other_fields(self):
@@ -133,4 +163,77 @@ class TestMergePreferences:
         with pytest.raises(ValidationError):
             UserPreferencesUpdate.model_validate(
                 {"quotation": {"last_remote_url": "http://example.com"}}
+            )
+
+
+class TestAnnotationAiPreferences:
+    """Round-trip and merge coverage for the annotation_ai preference section."""
+
+    def test_defaults_to_empty(self):
+        prefs = UserPreferences()
+        assert prefs.annotation_ai is not None
+        assert prefs.annotation_ai.api_keys == {}
+        assert prefs.annotation_ai.custom_providers == []
+
+    def test_round_trip_persists_keys_and_providers(self, user_data_dir: Path):
+        prefs = UserPreferences(
+            annotation_ai=AnnotationAiPreferences(
+                api_keys={"openai": "sk-123", "custom:abc": "k"},
+                custom_providers=[
+                    AnnotationAiCustomProvider(
+                        id="custom:abc",
+                        name="My LLM",
+                        base_url="https://llm.example/v1",
+                    )
+                ],
+            )
+        )
+        saved = save_preferences("test-user", prefs)
+        loaded = load_preferences("test-user")
+        assert loaded == saved
+        assert loaded.annotation_ai is not None
+        assert loaded.annotation_ai.api_keys == {"openai": "sk-123", "custom:abc": "k"}
+        assert loaded.annotation_ai.custom_providers[0].name == "My LLM"
+
+    def test_load_defaults_when_section_absent(self, user_data_dir: Path):
+        (user_data_dir / "preferences.toml").write_text(
+            tomli_w.dumps({"hidden_views": ["export"]})
+        )
+        prefs = load_preferences("test-user")
+        assert prefs.annotation_ai is not None
+        assert prefs.annotation_ai.api_keys == {}
+        assert prefs.annotation_ai.custom_providers == []
+
+    def test_merge_replaces_annotation_ai(self):
+        current = UserPreferences(
+            annotation_ai=AnnotationAiPreferences(api_keys={"openai": "old"})
+        )
+        update = UserPreferencesUpdate(
+            annotation_ai=AnnotationAiPreferences(
+                api_keys={"google": "new"},
+                custom_providers=[
+                    AnnotationAiCustomProvider(
+                        id="custom:x", name="X", base_url="https://x/v1"
+                    )
+                ],
+            )
+        )
+        merged = merge_preferences(current, update)
+        assert merged.annotation_ai is not None
+        assert merged.annotation_ai.api_keys == {"google": "new"}
+        assert merged.annotation_ai.custom_providers[0].id == "custom:x"
+
+    def test_merge_omitting_annotation_ai_keeps_current(self):
+        current = UserPreferences(
+            annotation_ai=AnnotationAiPreferences(api_keys={"openai": "keep"})
+        )
+        update = UserPreferencesUpdate(hidden_views=["filter"])
+        merged = merge_preferences(current, update)
+        assert merged.annotation_ai is not None
+        assert merged.annotation_ai.api_keys == {"openai": "keep"}
+
+    def test_rejects_unknown_custom_provider_field(self):
+        with pytest.raises(ValidationError):
+            AnnotationAiCustomProvider.model_validate(
+                {"id": "custom:x", "name": "X", "base_url": "u", "secret": "no"}
             )

@@ -71,13 +71,17 @@ def save_preferences(user_id: str, prefs: UserPreferences) -> UserPreferences:
     - backend API routes, backend tests because they need a backend boundary that validates
       inputs before delegating to workspace or worker state.
 
-    Flow: normalize inputs, delegate to the owning backend state or service boundary, and
-        return serialized values or existing domain errors to callers.
+    Flow: normalize inputs, then serialize with VS Code-style sparse persistence —
+        `exclude_defaults=True` drops every field still equal to its model default so
+        the TOML file only records preferences the user actually changed (this
+        recurses into nested models like `annotation_ai`, so an empty AI section is
+        omitted entirely). `exclude_none=True` additionally drops optional `None`
+        fields. Missing keys re-hydrate from the model defaults on the next load.
     """
     clean = prefs.validated()
     path = _preferences_path(user_id)
     tmp = path.with_suffix(".tmp")
-    payload = clean.model_dump(mode="json", exclude_none=True)
+    payload = clean.model_dump(mode="json", exclude_none=True, exclude_defaults=True)
     tmp.write_text(tomli_w.dumps(payload), encoding="utf-8")
     tmp.replace(path)
     return clean
@@ -106,5 +110,7 @@ def merge_preferences(
         overrides["ldaca_oni_api_token"] = update.ldaca_oni_api_token
     if update.analysis_multi_tab_enabled is not None:
         overrides["analysis_multi_tab_enabled"] = update.analysis_multi_tab_enabled
+    if update.annotation_ai is not None:
+        overrides["annotation_ai"] = update.annotation_ai
     merged = current.model_copy(update=overrides)
     return merged.validated()

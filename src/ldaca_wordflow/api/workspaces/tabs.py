@@ -77,11 +77,16 @@ class AnalysisTab(BaseModel):
     """A single analysis tab.
 
     Carries identity (``tab_id``), a pointer to the analysis result it shows
-    (``task_id``), a display ``title``, and selector state. ``inputs`` remains
-    the legacy source selector for existing clients. ``input_sets`` is keyed by
-    selector id (for example, ``source`` or ``classDescriptions``) so newer
-    views can persist multiple node selectors on the same tab. Remaining
-    analysis parameters live on the referenced ``AnalysisTask.request``.
+    (``task_id``), a display ``title``, selector state, and free-form view
+    settings. ``inputs`` remains the legacy source selector for existing
+    clients. ``input_sets`` is keyed by selector id (for example, ``source`` or
+    ``classDescriptions``) so newer views can persist multiple node selectors on
+    the same tab. ``settings`` is a flat string→string map a view uses to
+    round-trip lightweight scalar parameters that are not node selections — for
+    example the Annotation tab persists its Manual/AI mode, AI provider id,
+    model name, and prompt here so they survive reloads and tab switches like
+    the node selectors do. Heavier analysis parameters still live on the
+    referenced ``AnalysisTask.request``.
 
     Used by:
     - `AnalysisTabGroup` and the GET/PUT tab routes because the frontend tab
@@ -93,6 +98,7 @@ class AnalysisTab(BaseModel):
     title: str = "Untitled"
     inputs: list[AnalysisTabInput] = Field(default_factory=list)
     input_sets: dict[str, list[AnalysisTabInput]] = Field(default_factory=dict)
+    settings: dict[str, str] = Field(default_factory=dict)
 
 
 class AnalysisTabGroup(BaseModel):

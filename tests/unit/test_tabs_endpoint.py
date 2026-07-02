@@ -59,6 +59,12 @@ def _sample_group() -> dict:
                                 {"node_id": "classes", "column": "class"}
                             ],
                         },
+                        "settings": {
+                            "annotationMode": "ai",
+                            "aiProvider": "openai",
+                            "aiModel": "gpt-4o-mini",
+                            "aiPrompt": "Classify each text.",
+                        },
                     },
                     {
                         "tab_id": "t2",
@@ -66,6 +72,7 @@ def _sample_group() -> dict:
                         "title": "Untitled",
                         "inputs": [],
                         "input_sets": {},
+                        "settings": {},
                     },
                 ],
                 "active_tab_id": "t1",
@@ -150,6 +157,7 @@ async def test_put_replaces_existing_contents_not_merges(fake_workspace):
                         "title": "New",
                         "inputs": [],
                         "input_sets": {},
+                        "settings": {},
                     }
                 ],
                 "active_tab_id": "x",
@@ -199,3 +207,37 @@ async def test_put_then_get_round_trips_tab_inputs(fake_workspace):
     }
     assert result.groups["concordance"].tabs[1].inputs == []
     assert result.groups["concordance"].tabs[1].input_sets == {}
+    # Free-form per-view settings (Annotation's Manual/AI mode, provider, model,
+    # prompt) round-trip on the owning tab and default to an empty map when the
+    # sidecar omits them.
+    assert result.groups["concordance"].tabs[0].settings == {
+        "annotationMode": "ai",
+        "aiProvider": "openai",
+        "aiModel": "gpt-4o-mini",
+        "aiPrompt": "Classify each text.",
+    }
+    assert result.groups["concordance"].tabs[1].settings == {}
+
+
+@pytest.mark.asyncio
+async def test_get_defaults_settings_when_absent(fake_workspace):
+    """A tab persisted before ``settings`` existed hydrates to an empty map.
+
+    Guards backward compatibility: older sidecars have no ``settings`` key, so
+    the model must supply the default rather than failing validation.
+    """
+    legacy = {
+        "groups": {
+            "annotation": {
+                "tabs": [{"tab_id": "t1", "title": "Legacy"}],
+                "active_tab_id": "t1",
+            }
+        }
+    }
+    (fake_workspace.workspace_dir / "tabs.json").write_text(
+        json.dumps(legacy), encoding="utf-8"
+    )
+    result = await tabs_api.get_workspace_tabs(
+        workspace_id="ws1", current_user={"id": "u"}
+    )
+    assert result.groups["annotation"].tabs[0].settings == {}
