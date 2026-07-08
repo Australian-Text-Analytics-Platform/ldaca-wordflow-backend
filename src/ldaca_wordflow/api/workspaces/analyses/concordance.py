@@ -19,10 +19,9 @@ Flow:
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional, cast
+from typing import Any, Optional
 from uuid import uuid4
 
-import polars as pl
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
@@ -31,7 +30,6 @@ from ....analysis.implementations.concordance import (
 )
 from ....analysis.manager import get_task_manager
 from ....analysis.models import AnalysisStatus, AnalysisTask
-from ....analysis.results import GenericAnalysisResult
 from ....core.auth import get_current_user
 from ....core.exceptions import (
     InternalServiceError,
@@ -41,7 +39,7 @@ from ....core.exceptions import (
     TaskNotFoundError,
     WorkspaceNotFoundError,
 )
-from ....core.tokens_cache import hydrate_tokenization_lazyframe
+from ....core.worker_input_snapshots import create_worker_input_snapshot
 from ....core.workspace import workspace_manager
 from ....models import (
     AnalysisTaskActionResponse,
@@ -172,6 +170,32 @@ def _build_concordance_task_result(
         return None, "No analysis found for concordance"
     if not task.request:
         return None, "No concordance request available"
+    if task.result is None:
+        return {
+            "state": "running",
+            "message": "Concordance analysis running",
+            "data": {},
+            "metadata": {"task_id": task_id},
+        }, None
+
+    has_query_overrides = any(
+        value is not None
+        for value in (
+            query.node_id,
+            query.page,
+            query.page_number,
+            query.page_size,
+            query.sort_by,
+            query.descending,
+            query.show_metadata,
+        )
+    )
+    if not has_query_overrides:
+        result = task.result.to_json() if hasattr(task.result, "to_json") else task.result
+        if isinstance(result, dict):
+            result = dict(result)
+            result["metadata"] = {"task_id": task_id}
+            return result, None
 
     normalized_request = normalize_saved_request(task.request.model_dump()) or {}
     _apply_result_query_overrides(normalized_request, query)
@@ -199,13 +223,19 @@ async def run_concordance(
     """
     user_id = current_user["id"]
     workspace_id = workspace_manager.get_current_workspace_id(user_id)
-    if not workspace_id:
+    ws = workspace_manager.get_current_workspace(user_id)
+    if not workspace_id or ws is None:
         raise NoActiveWorkspaceError("No active workspace selected")
     task_manager = get_task_manager(user_id)
 
     if not request.node_ids:
         raise InvalidInputError("At least one node ID must be provided")
     try:
+        for node_id in request.node_ids:
+            if node_id not in ws.nodes:
+                raise NotFoundError(f"Node {node_id} not found")
+            if not request.node_columns.get(node_id):
+                raise InvalidInputError(f"Missing text column for node {node_id}")
         analysis_request = AnalysisConcordanceRequest(
             node_ids=request.node_ids,
             node_columns=request.node_columns,
@@ -219,14 +249,24 @@ async def run_concordance(
         )
 
         task_id = str(uuid4())
+        workspace_dir = workspace_manager.get_workspace_dir(user_id, workspace_id)
+        if workspace_dir is None:
+            raise WorkspaceNotFoundError("Workspace not found")
+        input_snapshot_dir = create_worker_input_snapshot(
+            user_id=user_id,
+            workspace_id=workspace_id,
+            task_id=task_id,
+            node_ids=request.node_ids,
+            workspace=ws,
+            artifact_dir=workspace_dir / "data" / "artifacts",
+        )
         task_manager.save_task(
             AnalysisTask(
                 task_id=task_id,
                 user_id=user_id,
                 workspace_id=workspace_id,
                 request=analysis_request,
-                status=AnalysisStatus.COMPLETED,
-                result=GenericAnalysisResult({"ready": True}),
+                status=AnalysisStatus.RUNNING,
             )
         )
         normalized_request = (
@@ -236,14 +276,26 @@ async def run_concordance(
         if request.sort_by:
             normalized_request["sort_by"] = request.sort_by
         normalized_request["descending"] = request.descending
-
-        response = build_concordance_response(
-            user_id,
-            workspace_id,
-            normalized_request,
+        tm = workspace_manager.get_task_manager(user_id)
+        await tm.submit_task(
+            user_id=user_id,
+            workspace_id=workspace_id,
+            task_type="concordance",
+            task_id=task_id,
+            task_args={
+                "input_snapshot_dir": str(input_snapshot_dir),
+                "request_payload": normalized_request,
+            },
+            task_name="Concordance",
         )
-        response["metadata"] = {"task_id": task_id}
-        return response
+
+        return {
+            "state": "running",
+            "message": "Concordance analysis started",
+            "data": {},
+            "analysis_params": normalized_request,
+            "metadata": {"task_id": task_id},
+        }
     except Exception as exc:
         raise InternalServiceError(f"Failed to run concordance: {exc}")
 
@@ -429,8 +481,8 @@ async def detach_concordance(
     if not workspace_id or ws is None:
         raise NoActiveWorkspaceError("No active workspace selected")
     tm = workspace_manager.get_task_manager(user_id)
-    node = ws.nodes[node_id]
-    node_data = node.data
+    if node_id not in ws.nodes:
+        raise NotFoundError(f"Node {node_id} not found")
 
     include_document_column = False
     include_extraction = False
@@ -460,44 +512,27 @@ async def detach_concordance(
                 continue
             columns_to_select.append(col)
 
-    corpus_df = (
-        node_data.select(
-            [pl.col(request.column)] + [pl.col(c) for c in columns_to_select]
-        )
-        .filter(
-            pl.col(request.column)
-            .cast(pl.Utf8, strict=False)
-            .str.strip_chars()
-            .str.len_chars()
-            .fill_null(0)
-            > 0
-        )
-        .collect()
-    )
-    node_corpus = [
-        str(value) if value is not None else ""
-        for value in corpus_df.get_column(request.column).to_list()
-    ]
-
-    extra_columns_data: dict[str, list] = {}
-    extra_columns_dtypes: dict[str, Any] = {}
-    for col in columns_to_select:
-        if col != request.column:
-            series = corpus_df.get_column(col)
-            extra_columns_data[col] = series.to_list()
-            extra_columns_dtypes[col] = series.dtype
-
     workspace_dir = workspace_manager.get_workspace_dir(user_id, workspace_id)
     if workspace_dir is None:
         raise WorkspaceNotFoundError("Workspace not found")
     try:
+        task_id = str(uuid4())
+        input_snapshot_dir = create_worker_input_snapshot(
+            user_id=user_id,
+            workspace_id=workspace_id,
+            task_id=task_id,
+            node_ids=[node_id],
+            workspace=ws,
+            artifact_dir=workspace_dir / "data" / "artifacts",
+        )
         task_info = await tm.submit_task(
             user_id=user_id,
             workspace_id=workspace_id,
             task_type="concordance_detach",
+            task_id=task_id,
             task_args={
                 "workspace_dir": str(workspace_dir),
-                "node_corpus": node_corpus,
+                "node_corpus": [],
                 "parent_node_id": node_id,
                 "document_column": request.column,
                 "search_word": request.search_word,
@@ -510,13 +545,11 @@ async def detach_concordance(
                 "include_document_column": include_document_column,
                 "include_extraction": include_extraction,
                 "selected_generated_columns": selected_generated_columns,
-                "extra_columns_data": extra_columns_data
-                if extra_columns_data
-                else None,
-                "extra_columns_dtypes": extra_columns_dtypes
-                if extra_columns_dtypes
-                else None,
+                "extra_columns_data": None,
+                "extra_columns_dtypes": None,
+                "extra_column_names": columns_to_select,
                 "materialized_path": request.materialized_path,
+                "input_snapshot_dir": str(input_snapshot_dir),
             },
         )
 
@@ -563,8 +596,8 @@ async def detach_concordance_dispersion(
     if not workspace_id or ws is None:
         raise NoActiveWorkspaceError("No active workspace selected")
     tm = workspace_manager.get_task_manager(user_id)
-    node = ws.nodes[node_id]
-    node_data = node.data
+    if node_id not in ws.nodes:
+        raise NotFoundError(f"Node {node_id} not found")
 
     # Source columns to project — same shape as the per-hit detach so the
     # caller can opt-in to metadata columns and opt-out of the document
@@ -584,33 +617,6 @@ async def detach_concordance_dispersion(
                 continue
             columns_to_select.append(col)
 
-    corpus_df = (
-        node_data.select(
-            [pl.col(request.column)] + [pl.col(c) for c in columns_to_select]
-        )
-        .filter(
-            pl.col(request.column)
-            .cast(pl.Utf8, strict=False)
-            .str.strip_chars()
-            .str.len_chars()
-            .fill_null(0)
-            > 0
-        )
-        .collect()
-    )
-    node_corpus = [
-        str(value) if value is not None else ""
-        for value in corpus_df.get_column(request.column).to_list()
-    ]
-
-    extra_columns_data: dict[str, list] = {}
-    extra_columns_dtypes: dict[str, Any] = {}
-    for col in columns_to_select:
-        if col != request.column:
-            series = corpus_df.get_column(col)
-            extra_columns_data[col] = series.to_list()
-            extra_columns_dtypes[col] = series.dtype
-
     workspace_dir = workspace_manager.get_workspace_dir(user_id, workspace_id)
     if workspace_dir is None:
         raise WorkspaceNotFoundError("Workspace not found")
@@ -622,6 +628,14 @@ async def detach_concordance_dispersion(
         )
     try:
         child_task_id = str(uuid4())
+        input_snapshot_dir = create_worker_input_snapshot(
+            user_id=user_id,
+            workspace_id=workspace_id,
+            task_id=child_task_id,
+            node_ids=[node_id],
+            workspace=ws,
+            artifact_dir=workspace_dir / "data" / "artifacts",
+        )
         task_info = await tm.submit_task(
             user_id=user_id,
             workspace_id=workspace_id,
@@ -630,7 +644,7 @@ async def detach_concordance_dispersion(
             task_name=request.new_node_name or None,
             task_args={
                 "workspace_dir": str(workspace_dir),
-                "node_corpus": node_corpus,
+                "node_corpus": [],
                 "parent_node_id": node_id,
                 "child_task_id": child_task_id,
                 "parent_task_id": request.parent_task_id,
@@ -643,13 +657,15 @@ async def detach_concordance_dispersion(
                 "case_sensitive": request.case_sensitive,
                 "new_node_name": request.new_node_name,
                 "include_document_column": include_document_column,
-                "extra_columns_data": extra_columns_data or None,
-                "extra_columns_dtypes": extra_columns_dtypes or None,
+                "extra_columns_data": None,
+                "extra_columns_dtypes": None,
+                "extra_column_names": columns_to_select,
                 "materialized_path": request.materialized_path,
                 "selected_bins": request.selected_bins,
                 "total_bins": request.total_bins,
                 "selected_matched_texts": request.selected_matched_texts,
                 "match_case_insensitive": request.match_case_insensitive,
+                "input_snapshot_dir": str(input_snapshot_dir),
             },
         )
         if request.parent_task_id:
@@ -702,7 +718,6 @@ async def materialize_concordance(
     if node_id not in ws.nodes:
         raise NotFoundError(f"Node {node_id} not found")
     node = ws.nodes[node_id]
-    node_data = node.data
 
     # Tokens-mode materialize needs the tokenization column alongside the
     # text. Look it up via the node's tokenization registry so we know exactly
@@ -720,64 +735,20 @@ async def materialize_concordance(
                     f"source column {request.column!r}" + "; re-run Tokenise first."
                 ),
             )
-        node_data = hydrate_tokenization_lazyframe(
-            node=node,
-            source_column=request.column,
-            user_id=user_id,
-        )
-
-    # Collect all source columns so the materialized parquet includes metadata.
-    # This allows the detach fast path to select only user-chosen columns later.
-    all_schema_columns = list(node_data.collect_schema().names())
-    extra_source_columns = [
-        c
-        for c in all_schema_columns
-        if c != request.column and c != tokenization_column
-    ]
-    select_exprs: list[pl.Expr] = [pl.col(request.column)] + [
-        pl.col(c) for c in extra_source_columns
-    ]
-    if tokenization_column is not None:
-        select_exprs.append(pl.col(tokenization_column))
-
-    corpus_df = cast(
-        pl.DataFrame,
-        (
-            node_data.select(select_exprs)
-            .filter(
-                pl.col(request.column)
-                .cast(pl.Utf8, strict=False)
-                .str.strip_chars()
-                .str.len_chars()
-                .fill_null(0)
-                > 0
-            )
-            .collect()
-        ),
-    )
-    node_corpus = [
-        str(value) if value is not None else ""
-        for value in corpus_df.get_column(request.column).to_list()
-    ]
-    node_tokens: Optional[list[Any]] = None
-    if tokenization_column is not None:
-        node_tokens = corpus_df.get_column(tokenization_column).to_list()
-
-    extra_columns_data: dict[str, list] | None = None
-    extra_columns_dtypes: dict[str, Any] | None = None
-    if extra_source_columns:
-        extra_columns_data = {}
-        extra_columns_dtypes = {}
-        for col in extra_source_columns:
-            series = corpus_df.get_column(col)
-            extra_columns_data[col] = series.to_list()
-            extra_columns_dtypes[col] = series.dtype
 
     workspace_dir = workspace_manager.get_workspace_dir(user_id, workspace_id)
     if workspace_dir is None:
         raise WorkspaceNotFoundError("Workspace not found")
     try:
         child_task_id = str(uuid4())
+        input_snapshot_dir = create_worker_input_snapshot(
+            user_id=user_id,
+            workspace_id=workspace_id,
+            task_id=child_task_id,
+            node_ids=[node_id],
+            workspace=ws,
+            artifact_dir=workspace_dir / "data" / "artifacts",
+        )
         task_info = await tm.submit_task(
             user_id=user_id,
             workspace_id=workspace_id,
@@ -785,7 +756,7 @@ async def materialize_concordance(
             task_id=child_task_id,
             task_args={
                 "workspace_dir": str(workspace_dir),
-                "node_corpus": node_corpus,
+                "node_corpus": [],
                 "child_task_id": child_task_id,
                 "parent_task_id": request.parent_task_id,
                 "parent_node_id": node_id,
@@ -796,10 +767,11 @@ async def materialize_concordance(
                 "regex": request.regex,
                 "whole_word": request.whole_word,
                 "case_sensitive": request.case_sensitive,
-                "extra_columns_data": extra_columns_data,
-                "extra_columns_dtypes": extra_columns_dtypes,
+                "extra_columns_data": None,
+                "extra_columns_dtypes": None,
                 "search_mode": request.search_mode,
-                "node_tokens": node_tokens,
+                "node_tokens": None,
+                "input_snapshot_dir": str(input_snapshot_dir),
             },
         )
         get_task_manager(user_id).link_child_task(request.parent_task_id, task_info.id)

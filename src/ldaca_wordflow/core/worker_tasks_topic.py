@@ -107,6 +107,53 @@ def _load_corpora_from_workspace(
     return raw_corpora
 
 
+def _load_corpora_from_snapshot(
+    input_snapshot_dir: str,
+    node_payloads: list[dict[str, Any]],
+) -> list[list[str]]:
+    """Return raw document lists from task-owned node plan snapshots.
+
+    Called by:
+    - ``_prepare_payload`` when submit routes pass snapshot refs instead of
+      eagerly collecting corpora on the API event loop.
+
+    Flow: load each snapshotted LazyFrame, enrich ``node_payloads`` with display
+    names and source schema metadata, and collect the selected text column inside
+    the worker process.
+    """
+
+    import polars as pl
+
+    from .worker_input_snapshots import load_snapshot_node
+
+    raw_corpora: list[list[str]] = []
+    for node_info in node_payloads:
+        node_id = str(node_info.get("node_id") or "")
+        text_column = str(node_info.get("text_column") or "")
+        if not node_id or not text_column:
+            raise ValueError(
+                "Topic modeling requires node_id and text_column for each node"
+            )
+
+        snapshot_node = load_snapshot_node(input_snapshot_dir, node_id)
+        node_info.setdefault("node_name", snapshot_node.name)
+        node_info.setdefault(
+            "original_columns",
+            list(snapshot_node.data.collect_schema().names()),
+        )
+        selected = cast(
+            pl.DataFrame,
+            snapshot_node.data.select(pl.col(text_column).alias("__doc_col__")).collect(),
+        )
+        raw_corpora.append(
+            [
+                str(value) if value is not None else ""
+                for value in selected["__doc_col__"].to_list()
+            ]
+        )
+    return raw_corpora
+
+
 def _prepare_payload(
     *,
     user_id: str,
@@ -114,6 +161,7 @@ def _prepare_payload(
     artifact_dir: str,
     corpora: list[list[str]] | None,
     workspace_dir: str | None,
+    input_snapshot_dir: str | None,
     progress_callback: Callable[[float, str], None] | None,
 ) -> _PreparedTopicPayload:
     """Prepare payload data consumed by topic-modeling worker pipeline.
@@ -128,13 +176,18 @@ def _prepare_payload(
     artifact_root.mkdir(parents=True, exist_ok=True)
 
     if corpora is None:
-        if workspace_dir is None:
+        if input_snapshot_dir is not None:
+            if progress_callback:
+                progress_callback(0.03, "Loading source documents from task snapshot...")
+            corpora = _load_corpora_from_snapshot(input_snapshot_dir, node_infos)
+        elif workspace_dir is not None:
+            if progress_callback:
+                progress_callback(0.03, "Loading source documents from workspace...")
+            corpora = _load_corpora_from_workspace(workspace_dir, node_infos, user_id)
+        else:
             raise ValueError(
-                "Topic modeling requires corpora or a workspace_dir to load them"
+                "Topic modeling requires corpora, input_snapshot_dir, or workspace_dir"
             )
-        if progress_callback:
-            progress_callback(0.03, "Loading source documents from workspace...")
-        corpora = _load_corpora_from_workspace(workspace_dir, node_infos, user_id)
 
     if len(corpora) != len(node_infos):
         raise ValueError(
@@ -280,6 +333,7 @@ def run_topic_modeling_task(
     artifact_prefix: str,
     min_topic_size: int = 10,
     workspace_dir: str | None = None,
+    input_snapshot_dir: str | None = None,
     corpora: list[list[str]] | None = None,
     random_seed: int = 42,
     representative_words_count: int = 5,
@@ -326,6 +380,7 @@ def run_topic_modeling_task(
             artifact_dir=artifact_dir,
             corpora=corpora,
             workspace_dir=workspace_dir,
+            input_snapshot_dir=input_snapshot_dir,
             progress_callback=progress_callback,
         )
 

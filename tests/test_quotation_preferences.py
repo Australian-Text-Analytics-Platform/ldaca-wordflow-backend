@@ -274,8 +274,8 @@ async def test_quotation_current_result_returns_all_quotes_for_document_page(
 
 
 @pytest.mark.asyncio
-async def test_quotation_endpoint_recomputes_on_demand(
-    authenticated_client, monkeypatch, seeded_paginated_quotation
+async def test_quotation_endpoint_submits_without_recomputing_on_demand(
+    authenticated_client, monkeypatch, seeded_paginated_quotation, tmp_path
 ):
     recompute_called = False
 
@@ -298,6 +298,21 @@ async def test_quotation_endpoint_recomputes_on_demand(
         "ldaca_wordflow.api.workspaces.analyses.quotation_core.compute_quote_dataframe",
         fake_compute,
     )
+    monkeypatch.setattr(
+        workspace_manager,
+        "get_workspace_dir",
+        lambda *_args, **_kwargs: tmp_path,
+    )
+
+    class ImmediateTaskManager:
+        async def submit_task(self, **kwargs):
+            return SimpleNamespace(id=kwargs["task_id"])
+
+    monkeypatch.setattr(
+        workspace_manager,
+        "get_task_manager",
+        lambda *_args, **_kwargs: ImmediateTaskManager(),
+    )
 
     response = await authenticated_client.post(
         "/api/workspaces/nodes/node-1/quotation",
@@ -306,5 +321,6 @@ async def test_quotation_endpoint_recomputes_on_demand(
 
     assert response.status_code == 200
     payload = response.json()
-    _assert_quotation_page_payload(payload, page=2, quote="beta")
-    assert recompute_called is True
+    assert payload["state"] == "running"
+    assert payload.get("metadata", {}).get("task_id")
+    assert recompute_called is False

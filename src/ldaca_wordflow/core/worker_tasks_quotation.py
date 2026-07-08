@@ -26,6 +26,142 @@ from .worker_utils import worker_task
 logger = logging.getLogger(__name__)
 
 
+def _collect_quotation_source_from_snapshot(
+    *,
+    input_snapshot_dir: str,
+    node_id: str,
+    document_column: str,
+    extra_column_names: list[str] | None,
+    include_all_metadata: bool = False,
+) -> tuple[list[str], dict[str, list] | None, dict[str, Any] | None]:
+    """Collect quotation source rows inside the worker process.
+
+    Used by:
+    - quotation detach and materialize workers when submit routes pass
+      task-owned LazyFrame snapshots instead of full Python corpora.
+
+    Flow: load the snapshotted node plan, select the document and requested
+    metadata columns, filter blank documents, and return aligned lists for the
+    existing quotation extraction builder.
+    """
+
+    import polars as pl
+
+    from ..api.workspaces.analyses.generated_columns import is_tokenization_column_name
+    from .worker_input_snapshots import load_snapshot_node
+
+    snapshot_node = load_snapshot_node(input_snapshot_dir, node_id)
+    node_data = snapshot_node.data
+    schema_names = list(node_data.collect_schema().names())
+    if include_all_metadata:
+        metadata_columns = [
+            column
+            for column in schema_names
+            if column != document_column and not is_tokenization_column_name(column)
+        ]
+    else:
+        metadata_columns = list(extra_column_names or [])
+
+    corpus_df = cast(
+        pl.DataFrame,
+        node_data.select([pl.col(document_column)] + [pl.col(c) for c in metadata_columns])
+        .filter(
+            pl.col(document_column)
+            .cast(pl.Utf8, strict=False)
+            .str.strip_chars()
+            .str.len_chars()
+            .fill_null(0)
+            > 0
+        )
+        .collect(),
+    )
+    node_corpus = [
+        str(value) if value is not None else ""
+        for value in corpus_df.get_column(document_column).to_list()
+    ]
+    if not metadata_columns:
+        return node_corpus, None, None
+
+    extra_columns_data: dict[str, list] = {}
+    extra_columns_dtypes: dict[str, Any] = {}
+    for column in metadata_columns:
+        series = corpus_df.get_column(column)
+        extra_columns_data[column] = series.to_list()
+        extra_columns_dtypes[column] = series.dtype
+    return node_corpus, extra_columns_data, extra_columns_dtypes
+
+
+@worker_task
+def run_quotation_analysis_task(
+    configure_worker_environment,
+    user_id: str,
+    workspace_id: str,
+    input_snapshot_dir: str,
+    node_id: str,
+    request_payload: dict[str, Any],
+    progress_callback: Callable[[float, str], None] | None = None,
+) -> dict[str, Any]:
+    """Execute the primary quotation analysis in a worker process.
+
+    Used by:
+    - ``core.worker.quotation_task`` because the API submit endpoint must not
+      run quotation extraction or page collection on the event loop.
+
+    Flow: configure the worker runtime, load the snapshotted node plan, reuse
+    the quotation page builder, and return the persisted task result payload.
+    """
+
+    configure_worker_environment()
+    try:
+        if progress_callback:
+            progress_callback(0.1, "Loading quotation input...")
+
+        import asyncio
+
+        from ..api.workspaces.analyses.quotation import (
+            DEFAULT_CONTEXT_LENGTH,
+            _compute_on_demand_page,
+        )
+        from ..models import QuotationEngineConfig
+        from .worker_input_snapshots import load_snapshot_node
+
+        snapshot_node = load_snapshot_node(input_snapshot_dir, node_id)
+        node = snapshot_node.to_node()
+        engine_payload = request_payload.get("engine") or {}
+        engine = QuotationEngineConfig.model_validate(engine_payload)
+        page_payload = asyncio.run(
+            _compute_on_demand_page(
+                node,
+                str(request_payload["column"]),
+                engine,
+                page=int(request_payload.get("page") or 1),
+                page_size=request_payload.get("page_size"),
+                sort_by=request_payload.get("sort_by"),
+                descending=bool(request_payload.get("descending", False)),
+                materialized_path=None,
+            )
+        )
+        if progress_callback:
+            progress_callback(1.0, "Quotation analysis completed")
+        return {
+            **page_payload,
+            "preferences": {"context_length": DEFAULT_CONTEXT_LENGTH},
+        }
+    except Exception as exc:
+        logger.exception(
+            "Quotation analysis task failed for user=%s workspace=%s node=%s",
+            user_id,
+            workspace_id,
+            node_id,
+        )
+        return {
+            "state": "failed",
+            "message": f"Quotation analysis task failed: {exc}",
+            "data": [],
+            "columns": [],
+        }
+
+
 def _build_quotation_occurrence_dataframe(
     node_corpus: list[str],
     document_column: str,
@@ -119,6 +255,8 @@ def run_quotation_detach_task(
     extra_columns_data: dict[str, list] | None = None,
     extra_columns_dtypes: dict[str, Any] | None = None,
     materialized_path: str | None = None,
+    input_snapshot_dir: str | None = None,
+    extra_column_names: list[str] | None = None,
     progress_callback: Callable[[float, str], None] | None = None,
 ) -> dict[str, Any]:
     """Run quotation detach and return a serialized detached node payload.
@@ -226,6 +364,15 @@ def run_quotation_detach_task(
 
         if progress_callback:
             progress_callback(0.2, "Preparing text data...")
+        if input_snapshot_dir is not None:
+            node_corpus, extra_columns_data, extra_columns_dtypes = (
+                _collect_quotation_source_from_snapshot(
+                    input_snapshot_dir=input_snapshot_dir,
+                    node_id=parent_node_id,
+                    document_column=document_column,
+                    extra_column_names=extra_column_names,
+                )
+            )
         if progress_callback:
             progress_callback(0.6, "Extracting quotations...")
 
@@ -311,6 +458,7 @@ def run_quotation_materialize_task(
     engine_config: dict[str, Any],
     extra_columns_data: dict[str, list] | None = None,
     extra_columns_dtypes: dict[str, Any] | None = None,
+    input_snapshot_dir: str | None = None,
     progress_callback: Callable[[float, str], None] | None = None,
 ) -> dict[str, Any]:
     """Run full quotation extraction and persist the flattened parquet.
@@ -335,6 +483,16 @@ def run_quotation_materialize_task(
 
         if progress_callback:
             progress_callback(0.3, "Extracting quotations...")
+        if input_snapshot_dir is not None:
+            node_corpus, extra_columns_data, extra_columns_dtypes = (
+                _collect_quotation_source_from_snapshot(
+                    input_snapshot_dir=input_snapshot_dir,
+                    node_id=parent_node_id,
+                    document_column=document_column,
+                    extra_column_names=None,
+                    include_all_metadata=True,
+                )
+            )
 
         quote_df, output_columns = _build_quotation_occurrence_dataframe(
             node_corpus=node_corpus,

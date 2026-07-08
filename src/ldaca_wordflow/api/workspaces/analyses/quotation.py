@@ -24,6 +24,7 @@ from ....analysis.implementations.quotation import (
     QuotationRequest as AnalysisQuotationRequest,
 )
 from ....analysis.manager import get_task_manager
+from ....analysis.models import AnalysisStatus, AnalysisTask
 from ....analysis.results import GenericAnalysisResult
 from ....core.auth import get_current_user
 from ....core.exceptions import (
@@ -40,6 +41,7 @@ from ....core.services.quotation_client import (
     QuotationServiceError,
     extract_remote_quotations,
 )
+from ....core.worker_input_snapshots import create_worker_input_snapshot
 from ....core.workspace import workspace_manager
 from ....models import (
     AnalysisTaskActionResponse,
@@ -142,7 +144,8 @@ async def quotation_task_request(
 
 
 @router.get(
-    "/quotation/tasks/{task_id}/result", response_model=QuotationAnalysisResponse | None
+    "/quotation/tasks/{task_id}/result",
+    response_model=QuotationAnalysisResponse | AnalysisTaskActionResponse | None,
 )
 async def quotation_task_result(
     task_id: str,
@@ -172,8 +175,15 @@ async def quotation_task_result(
         raise NoActiveWorkspaceError("No active workspace selected")
     task_manager = get_task_manager(user_id)
     task = task_manager.get_task(task_id)
-    if not task or not task.result:
+    if not task:
         return None
+    if not task.result:
+        return {
+            "state": "running",
+            "message": "Quotation analysis running",
+            "data": None,
+            "metadata": {"task_id": task_id},
+        }
 
     base_result = task.result.to_json()
     req_dict = task.request.model_dump()
@@ -338,13 +348,16 @@ async def update_quotation_task_result(
     return updated_result
 
 
-@router.post("/nodes/{node_id}/quotation", response_model=QuotationAnalysisResponse)
+@router.post(
+    "/nodes/{node_id}/quotation",
+    response_model=QuotationAnalysisResponse | AnalysisTaskActionResponse,
+)
 async def get_quotation(
     node_id: str,
     request: QuotationRequest,
     current_user: dict = Depends(get_current_user),
 ):
-    """Run quotation extraction on selected node and store latest task payload.
+    """Submit quotation extraction for selected node and store task payload.
 
     Flow:
     - Resolve authentication and request parameters from FastAPI dependencies.
@@ -355,7 +368,8 @@ async def get_quotation(
     - frontend quotation run/search action because they need this unit's "Run quotation extraction on selected node and store latest task payload" behavior.
 
     Why:
-    - Produces immediate result payload and persists it as current quotation task.
+    - Keeps the initial request responsive by moving extraction/page collection
+      into a worker task.
     """
     user_id = current_user["id"]
     workspace_id = workspace_manager.get_current_workspace_id(user_id)
@@ -367,61 +381,66 @@ async def get_quotation(
         workspace = workspace_manager.get_current_workspace(user_id)
         if workspace is None:
             raise NoActiveWorkspaceError("No active workspace selected")
-        node = workspace.nodes[node_id]
+        if node_id not in workspace.nodes:
+            raise NotFoundError(f"Node {node_id} not found")
 
         engine = request.engine or QuotationEngineConfig()
-
-        page = (
-            max(1, int(request.page))
-            if isinstance(request.page, int) and request.page
-            else 1
-        )
-
-        page_payload = await _compute_on_demand_page(
-            node,
-            request.column,
-            engine,
-            page=page,
-            page_size=request.page_size,
-            sort_by=request.sort_by or None,
-            descending=request.descending,
-            materialized_path=None,
-        )
-        resolved_page_size = page_payload.get("pagination", {}).get(
-            "page_size", DEFAULT_PAGE_SIZE
-        )
-
+        page = max(1, int(request.page)) if request.page else 1
         context_length_pref = DEFAULT_CONTEXT_LENGTH
-
-        result_payload: dict[str, Any] = {
-            **page_payload,
-            "preferences": {"context_length": context_length_pref},
-        }
 
         analysis_request = AnalysisQuotationRequest(
             node_id=node_id,
             column=request.column,
-            engine=request.engine.model_dump(mode="json") if request.engine else None,
+            engine=engine.model_dump(mode="json"),
             page=page,
-            page_size=resolved_page_size,
+            page_size=request.page_size,
             sort_by=request.sort_by or None,
             descending=request.descending,
             context_length=context_length_pref,
         )
 
-        task_id = task_manager.create_task(analysis_request)
-        task = task_manager.get_task(task_id)
-
-        if task is None:
-            raise InternalServiceError(
-                "Failed to load quotation task",
+        workspace_dir = workspace_manager.get_workspace_dir(user_id, workspace_id)
+        if workspace_dir is None:
+            raise WorkspaceNotFoundError("Workspace not found")
+        task_id = str(uuid4())
+        input_snapshot_dir = create_worker_input_snapshot(
+            user_id=user_id,
+            workspace_id=workspace_id,
+            task_id=task_id,
+            node_ids=[node_id],
+            workspace=workspace,
+            artifact_dir=workspace_dir / "data" / "artifacts",
+        )
+        task_manager.save_task(
+            AnalysisTask(
+                task_id=task_id,
+                user_id=user_id,
+                workspace_id=workspace_id,
+                request=analysis_request,
+                status=AnalysisStatus.RUNNING,
             )
-        task.request = analysis_request
-        task.complete(GenericAnalysisResult(result_payload))
-        task_manager.save_task(task)
+        )
 
-        result_payload["task_id"] = task.task_id
-        return result_payload
+        worker_task_manager = workspace_manager.get_task_manager(user_id)
+        await worker_task_manager.submit_task(
+            user_id=user_id,
+            workspace_id=workspace_id,
+            task_type="quotation",
+            task_id=task_id,
+            task_args={
+                "input_snapshot_dir": str(input_snapshot_dir),
+                "node_id": node_id,
+                "request_payload": analysis_request.model_dump(mode="json"),
+            },
+            task_name="Quotation",
+        )
+
+        return {
+            "state": "running",
+            "message": "Quotation analysis started",
+            "data": None,
+            "metadata": {"task_id": task_id},
+        }
     except HTTPException:
         raise
     except QuotationServiceError as exc:
@@ -504,9 +523,9 @@ async def detach_quotation(
     ws = workspace_manager.get_current_workspace(user_id)
     if not workspace_id or ws is None:
         raise NoActiveWorkspaceError("No active workspace selected")
-    node = ws.nodes[node_id]
+    if node_id not in ws.nodes:
+        raise NotFoundError(f"Node {node_id} not found")
     tm = workspace_manager.get_task_manager(user_id)
-    node_data = node.data
 
     include_document_column = False
     include_extraction = False
@@ -533,23 +552,27 @@ async def detach_quotation(
                 continue
             columns_to_select.append(col)
 
-    node_corpus, extra_columns_data, extra_columns_dtypes = (
-        qcore.collect_non_empty_quotation_corpus(
-            node_data, request.column, columns_to_select
-        )
-    )
-
     workspace_dir = workspace_manager.get_workspace_dir(user_id, workspace_id)
     if workspace_dir is None:
         raise WorkspaceNotFoundError("Workspace not found")
     try:
+        task_id = str(uuid4())
+        input_snapshot_dir = create_worker_input_snapshot(
+            user_id=user_id,
+            workspace_id=workspace_id,
+            task_id=task_id,
+            node_ids=[node_id],
+            workspace=ws,
+            artifact_dir=workspace_dir / "data" / "artifacts",
+        )
         task_info = await tm.submit_task(
             user_id=user_id,
             workspace_id=workspace_id,
             task_type="quotation_detach",
+            task_id=task_id,
             task_args={
                 "workspace_dir": str(workspace_dir),
-                "node_corpus": node_corpus,
+                "node_corpus": [],
                 "parent_node_id": node_id,
                 "document_column": request.column,
                 "engine_config": request.engine.model_dump() if request.engine else {},
@@ -557,9 +580,11 @@ async def detach_quotation(
                 "include_document_column": include_document_column,
                 "include_extraction": include_extraction,
                 "selected_generated_columns": selected_generated_columns,
-                "extra_columns_data": extra_columns_data or None,
-                "extra_columns_dtypes": extra_columns_dtypes or None,
+                "extra_columns_data": None,
+                "extra_columns_dtypes": None,
+                "extra_column_names": columns_to_select,
                 "materialized_path": request.materialized_path,
+                "input_snapshot_dir": str(input_snapshot_dir),
             },
             task_name="Detach Quotation",
         )
@@ -605,36 +630,21 @@ async def materialize_quotation(
         raise NoActiveWorkspaceError("No active workspace selected")
     if node_id not in ws.nodes:
         raise NotFoundError(f"Node {node_id} not found")
-    node = ws.nodes[node_id]
     tm = workspace_manager.get_task_manager(user_id)
-    node_data = node.data
-
-    # Materialise should preserve EVERY source-node column so the table
-    # view's metadata-column selector still has the original columns to
-    # pick from after Process All (the live unmaterialised path joins
-    # the source rows back to each quote-row, so they're visible there).
-    # Without this, the materialised parquet only carries the document
-    # column + QUOTE_* derivatives, and the table loses all metadata
-    # the moment the user clicks Process All.
-    source_schema = node_data.collect_schema()
-    source_columns = list(source_schema.names())
-    extra_metadata_columns = [
-        col
-        for col in source_columns
-        if col != request.column and not is_tokenization_column_name(col)
-    ]
-
-    node_corpus, extra_columns_data, extra_columns_dtypes = (
-        qcore.collect_non_empty_quotation_corpus(
-            node_data, request.column, extra_metadata_columns
-        )
-    )
 
     workspace_dir = workspace_manager.get_workspace_dir(user_id, workspace_id)
     if workspace_dir is None:
         raise WorkspaceNotFoundError("Workspace not found")
     try:
         child_task_id = str(uuid4())
+        input_snapshot_dir = create_worker_input_snapshot(
+            user_id=user_id,
+            workspace_id=workspace_id,
+            task_id=child_task_id,
+            node_ids=[node_id],
+            workspace=ws,
+            artifact_dir=workspace_dir / "data" / "artifacts",
+        )
         task_info = await tm.submit_task(
             user_id=user_id,
             workspace_id=workspace_id,
@@ -642,14 +652,15 @@ async def materialize_quotation(
             task_id=child_task_id,
             task_args={
                 "workspace_dir": str(workspace_dir),
-                "node_corpus": node_corpus,
+                "node_corpus": [],
                 "child_task_id": child_task_id,
                 "parent_task_id": request.parent_task_id,
                 "parent_node_id": node_id,
                 "document_column": request.column,
                 "engine_config": request.engine.model_dump() if request.engine else {},
-                "extra_columns_data": extra_columns_data or None,
-                "extra_columns_dtypes": extra_columns_dtypes or None,
+                "extra_columns_data": None,
+                "extra_columns_dtypes": None,
+                "input_snapshot_dir": str(input_snapshot_dir),
             },
             task_name="Materialize Quotation",
         )

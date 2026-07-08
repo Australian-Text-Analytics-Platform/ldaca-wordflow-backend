@@ -19,6 +19,7 @@ from concurrent.futures import Future, ProcessPoolExecutor
 from typing import Any, Callable
 
 from .worker_tasks_concordance import (
+    run_concordance_analysis_task,
     run_concordance_detach_task,
     run_concordance_dispersion_detach_task,
     run_concordance_materialize_task,
@@ -26,9 +27,11 @@ from .worker_tasks_concordance import (
 from .worker_tasks_download import run_workspace_download_task
 from .worker_tasks_import import run_ldaca_import_task
 from .worker_tasks_quotation import (
+    run_quotation_analysis_task,
     run_quotation_detach_task,
     run_quotation_materialize_task,
 )
+from .worker_tasks_sequential import run_sequential_analysis_task
 from .worker_tasks_token import run_token_frequencies_task
 from .worker_tasks_topic import run_topic_modeling_task
 from .worker_utils import configure_worker_environment
@@ -176,6 +179,8 @@ def concordance_detach_task(
     extra_columns_data: dict[str, list] | None = None,
     extra_columns_dtypes: dict[str, Any] | None = None,
     materialized_path: str | None = None,
+    input_snapshot_dir: str | None = None,
+    extra_column_names: list[str] | None = None,
     progress_callback: Callable[[float, str], None] | None = None,
     progress_queue: Any | None = None,
 ) -> dict[str, Any]:
@@ -210,6 +215,9 @@ def concordance_detach_task(
         extra_columns_data=extra_columns_data,
         extra_columns_dtypes=extra_columns_dtypes,
         materialized_path=materialized_path,
+        input_snapshot_dir=input_snapshot_dir,
+        extra_column_names=extra_column_names,
+        user_id=user_id,
         progress_callback=cb,
     )
 
@@ -238,6 +246,8 @@ def concordance_dispersion_detach_task(
     total_bins: int | None = None,
     selected_matched_texts: list[str] | None = None,
     match_case_insensitive: bool = False,
+    input_snapshot_dir: str | None = None,
+    extra_column_names: list[str] | None = None,
     progress_callback: Callable[[float, str], None] | None = None,
     progress_queue: Any | None = None,
 ) -> dict[str, Any]:
@@ -276,6 +286,9 @@ def concordance_dispersion_detach_task(
         total_bins=total_bins,
         selected_matched_texts=selected_matched_texts,
         match_case_insensitive=match_case_insensitive,
+        input_snapshot_dir=input_snapshot_dir,
+        extra_column_names=extra_column_names,
+        user_id=user_id,
         progress_callback=cb,
     )
 
@@ -299,6 +312,7 @@ def concordance_materialize_task(
     extra_columns_dtypes: dict[str, Any] | None = None,
     search_mode: str = "regex",
     node_tokens: list[Any] | None = None,
+    input_snapshot_dir: str | None = None,
     progress_callback: Callable[[float, str], None] | None = None,
     progress_queue: Any | None = None,
 ) -> dict[str, Any]:
@@ -332,6 +346,8 @@ def concordance_materialize_task(
         extra_columns_dtypes=extra_columns_dtypes,
         search_mode=search_mode,
         node_tokens=node_tokens,
+        input_snapshot_dir=input_snapshot_dir,
+        user_id=user_id,
         progress_callback=cb,
     )
 
@@ -351,6 +367,8 @@ def quotation_detach_task(
     extra_columns_data: dict[str, list] | None = None,
     extra_columns_dtypes: dict[str, Any] | None = None,
     materialized_path: str | None = None,
+    input_snapshot_dir: str | None = None,
+    extra_column_names: list[str] | None = None,
     progress_callback: Callable[[float, str], None] | None = None,
     progress_queue: Any | None = None,
 ) -> dict[str, Any]:
@@ -380,6 +398,8 @@ def quotation_detach_task(
         extra_columns_data=extra_columns_data,
         extra_columns_dtypes=extra_columns_dtypes,
         materialized_path=materialized_path,
+        input_snapshot_dir=input_snapshot_dir,
+        extra_column_names=extra_column_names,
         progress_callback=cb,
     )
 
@@ -396,6 +416,7 @@ def quotation_materialize_task(
     engine_config: dict[str, Any],
     extra_columns_data: dict[str, list] | None = None,
     extra_columns_dtypes: dict[str, Any] | None = None,
+    input_snapshot_dir: str | None = None,
     progress_callback: Callable[[float, str], None] | None = None,
     progress_queue: Any | None = None,
 ) -> dict[str, Any]:
@@ -422,6 +443,7 @@ def quotation_materialize_task(
         engine_config,
         extra_columns_data=extra_columns_data,
         extra_columns_dtypes=extra_columns_dtypes,
+        input_snapshot_dir=input_snapshot_dir,
         progress_callback=cb,
     )
 
@@ -434,6 +456,7 @@ def topic_modeling_task(
     artifact_prefix: str,
     min_topic_size: int,
     workspace_dir: str | None = None,
+    input_snapshot_dir: str | None = None,
     corpora: list[list[str]] | None = None,
     random_seed: int = 42,
     representative_words_count: int = 5,
@@ -458,6 +481,7 @@ def topic_modeling_task(
         user_id=user_id,
         workspace_id=workspace_id,
         workspace_dir=workspace_dir,
+        input_snapshot_dir=input_snapshot_dir,
         corpora=corpora,
         node_infos=node_infos,
         artifact_dir=artifact_dir,
@@ -470,20 +494,105 @@ def topic_modeling_task(
     )
 
 
+def concordance_task(
+    user_id: str,
+    workspace_id: str,
+    input_snapshot_dir: str,
+    request_payload: dict[str, Any],
+    progress_callback: Callable[[float, str], None] | None = None,
+    progress_queue: Any | None = None,
+) -> dict[str, Any]:
+    """Run the primary concordance analysis worker submitted by API routes.
+
+    Used by:
+    - concordance submit routes because their initial HTTP response must only
+      register/submit work and return a task id.
+    """
+
+    cb = _build_progress_callback(progress_queue, progress_callback)
+    return run_concordance_analysis_task(
+        configure_worker_environment=configure_worker_environment,
+        user_id=user_id,
+        workspace_id=workspace_id,
+        input_snapshot_dir=input_snapshot_dir,
+        request_payload=request_payload,
+        progress_callback=cb,
+    )
+
+
+def quotation_task(
+    user_id: str,
+    workspace_id: str,
+    input_snapshot_dir: str,
+    node_id: str,
+    request_payload: dict[str, Any],
+    progress_callback: Callable[[float, str], None] | None = None,
+    progress_queue: Any | None = None,
+) -> dict[str, Any]:
+    """Run the primary quotation analysis worker submitted by API routes.
+
+    Used by:
+    - quotation submit routes because their initial HTTP response must only
+      register/submit work and return a task id.
+    """
+
+    cb = _build_progress_callback(progress_queue, progress_callback)
+    return run_quotation_analysis_task(
+        configure_worker_environment=configure_worker_environment,
+        user_id=user_id,
+        workspace_id=workspace_id,
+        input_snapshot_dir=input_snapshot_dir,
+        node_id=node_id,
+        request_payload=request_payload,
+        progress_callback=cb,
+    )
+
+
+def sequential_analysis_task(
+    user_id: str,
+    workspace_id: str,
+    input_snapshot_dir: str,
+    node_id: str,
+    request_payload: dict[str, Any],
+    progress_callback: Callable[[float, str], None] | None = None,
+    progress_queue: Any | None = None,
+) -> dict[str, Any]:
+    """Run the sequential analysis background job submitted by API routes.
+
+    Used by:
+    - sequential-analysis submit routes because their initial HTTP response
+      must only register/submit work and return a task id.
+    """
+
+    cb = _build_progress_callback(progress_queue, progress_callback)
+    return run_sequential_analysis_task(
+        configure_worker_environment=configure_worker_environment,
+        user_id=user_id,
+        workspace_id=workspace_id,
+        input_snapshot_dir=input_snapshot_dir,
+        node_id=node_id,
+        request_payload=request_payload,
+        progress_callback=cb,
+    )
+
+
 def token_frequencies_task(
     user_id: str,
     workspace_id: str,
-    node_corpora: dict[str, list[str]],
-    node_display_names: dict[str, str],
     artifact_dir: str,
     artifact_prefix: str,
     token_limit: int,
+    node_corpora: dict[str, list[str]] | None = None,
+    node_display_names: dict[str, str] | None = None,
     stop_words: list[str] | None = None,
     progress_callback: Callable[[float, str], None] | None = None,
     progress_queue: Any | None = None,
     node_token_streams: dict[str, str] | None = None,
     tokenizer_model: str | None = None,
     node_tokenizer_models: dict[str, str] | None = None,
+    input_snapshot_dir: str | None = None,
+    node_ids: list[str] | None = None,
+    node_columns: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Run the token frequencies task background job submitted by API routes.
 
@@ -501,8 +610,8 @@ def token_frequencies_task(
         configure_worker_environment=configure_worker_environment,
         user_id=user_id,
         workspace_id=workspace_id,
-        node_corpora=node_corpora,
-        node_display_names=node_display_names,
+        node_corpora=node_corpora or {},
+        node_display_names=node_display_names or {},
         artifact_dir=artifact_dir,
         artifact_prefix=artifact_prefix,
         token_limit=token_limit,
@@ -511,6 +620,9 @@ def token_frequencies_task(
         node_token_streams=node_token_streams,
         tokenizer_model=tokenizer_model,
         node_tokenizer_models=node_tokenizer_models,
+        input_snapshot_dir=input_snapshot_dir,
+        node_ids=node_ids,
+        node_columns=node_columns,
     )
 
 
@@ -540,12 +652,15 @@ def _pid_reporting_wrapper(task_func: Any, **kwargs: Any) -> Any:
 TASK_REGISTRY: dict[str, Any] = {
     "ldaca_import": ldaca_import_task,
     "workspace_download": workspace_download_task,
+    "concordance": concordance_task,
     "concordance_detach": concordance_detach_task,
     "concordance_dispersion_detach": concordance_dispersion_detach_task,
     "concordance_materialize": concordance_materialize_task,
     "quotation_detach": quotation_detach_task,
+    "quotation": quotation_task,
     "quotation_materialize": quotation_materialize_task,
     "topic_modeling": topic_modeling_task,
+    "sequential_analysis": sequential_analysis_task,
     "token_frequencies": token_frequencies_task,
 }
 

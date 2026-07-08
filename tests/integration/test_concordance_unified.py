@@ -117,7 +117,7 @@ async def test_concordance_single_node_roundtrip(authenticated_client, workspace
     )
     assert resp.status_code == 200, resp.text
     payload = resp.json()
-    assert payload["state"] == "successful"
+    assert payload["state"] == "running"
     task_id = payload.get("metadata", {}).get("task_id")
     assert task_id
 
@@ -171,7 +171,7 @@ async def test_concordance_single_node_roundtrip(authenticated_client, workspace
     assert task is not None
     stored_result = task.result.to_json() if task.result else {}
     assert isinstance(stored_result, dict)
-    assert stored_result.get("ready") is True
+    assert stored_result.get("state") == "successful"
 
     # Request a smaller page size via POST (non-persistent override)
     current_res_post = await authenticated_client.post(
@@ -252,7 +252,7 @@ async def test_concordance_multi_node_separated(authenticated_client, workspace_
     )
     assert resp.status_code == 200, resp.text
     payload = resp.json()
-    assert payload["state"] == "successful"
+    assert payload["state"] == "running"
     task_id = payload.get("metadata", {}).get("task_id")
     assert task_id
 
@@ -329,7 +329,7 @@ async def test_concordance_multi_node_mismatched_columns(
     )
     assert resp.status_code == 200, resp.text
     payload = resp.json()
-    assert payload["state"] == "successful"
+    assert payload["state"] == "running"
     task_id = payload.get("metadata", {}).get("task_id")
     assert task_id
 

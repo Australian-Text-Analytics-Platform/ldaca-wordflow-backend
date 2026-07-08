@@ -223,26 +223,6 @@ async def test_tokens_materialize_route_selects_tokenization_column_once(
         },
     )
 
-    def hydrate_probe(
-        *,
-        node: Node,
-        source_column: str,
-        user_id: str,
-    ) -> pl.LazyFrame:
-        tokenization_column = node.find_tokenization_column(source_column)
-        assert tokenization_column is not None
-        tokens = [
-            [
-                {"token": "hello", "start": 0, "end": 5},
-                {"token": "world", "start": 6, "end": 11},
-            ],
-            [
-                {"token": "hello", "start": 0, "end": 5},
-                {"token": "again", "start": 6, "end": 11},
-            ],
-        ]
-        return node.data.with_columns(pl.Series(tokenization_column, tokens))
-
     captured_task_args: dict[str, Any] = {}
 
     class TaskManager:
@@ -270,12 +250,14 @@ async def test_tokens_materialize_route_selects_tokenization_column_once(
         def get_workspace_dir(self, _user_id: str, _workspace_id: str):
             return tmp_path
 
+        def ensure_workspace_artifacts_dir(self, _user_id: str, _workspace_id: str):
+            artifact_dir = tmp_path / "artifacts"
+            artifact_dir.mkdir(exist_ok=True)
+            return artifact_dir
+
     monkeypatch.setattr(concordance_api, "workspace_manager", WorkspaceManager())
     monkeypatch.setattr(
         concordance_api, "get_task_manager", lambda _user_id: LinkManager()
-    )
-    monkeypatch.setattr(
-        concordance_api, "hydrate_tokenization_lazyframe", hydrate_probe
     )
 
     response = await concordance_api.materialize_concordance(
@@ -292,5 +274,6 @@ async def test_tokens_materialize_route_selects_tokenization_column_once(
     )
 
     assert response["state"] == "running"
-    assert captured_task_args["node_tokens"] is not None
-    assert tokenization_column not in (captured_task_args["extra_columns_data"] or {})
+    assert captured_task_args["node_tokens"] is None
+    assert captured_task_args["extra_columns_data"] is None
+    assert captured_task_args["input_snapshot_dir"]

@@ -160,7 +160,8 @@ async def test_topic_modeling_request_persists_random_seed_and_word_count(
     assert isinstance(submit_kwargs, dict)
     task_args = submit_kwargs["task_args"]
     assert "corpora" not in task_args
-    assert Path(task_args["workspace_dir"]).exists()
+    assert "workspace_dir" not in task_args
+    assert Path(task_args["input_snapshot_dir"]).exists()
     assert task_args["node_infos"][0]["text_column"] == "document"
     assert request_data["random_seed"] == 123
     assert request_data["representative_words_count"] == 7

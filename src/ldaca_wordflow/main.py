@@ -91,8 +91,21 @@ async def lifespan(app: FastAPI):
     await init_db()
     await cleanup_expired_sessions()
 
-    # Worker pool initializes lazily on first task; prefetch heavy ML models
-    # in the background so first-request latency is not dominated by downloads.
+    # Start the process pool before the first analysis submit request. Submit
+    # routes are expected to register a task and return quickly; paying process
+    # creation cost there makes the first analysis feel blocked even when corpus
+    # preparation has moved into workers.
+    try:
+        from .core.worker import get_worker_pool
+
+        worker_pool = get_worker_pool()
+        if not worker_pool.is_running:
+            worker_pool.start()
+    except Exception as exc:
+        logger.warning("Worker pool warmup failed; first task will start it: %s", exc)
+
+    # Prefetch heavy ML models in the background so first worker execution
+    # latency is not dominated by downloads.
     from .core.model_prefetch import start_model_prefetch
 
     start_model_prefetch()

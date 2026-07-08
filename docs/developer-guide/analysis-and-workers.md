@@ -45,6 +45,7 @@ Registered worker tasks include:
 - token frequencies,
 - concordance detach, dispersion detach, and materialization,
 - quotation detach and materialization,
+- sequential analysis,
 - topic modeling.
 
 The LDaCA import worker uses `core/oni_client.py` to retrieve RO-Crate metadata
@@ -54,6 +55,21 @@ Keep new LDaCA import work in that Oni plus `rocrate-tabular` path.
 Worker functions should be picklable, import heavy modules inside the worker
 body, report progress through the provided queue, and write large outputs to
 artifacts instead of returning huge payloads.
+
+## Worker Input Snapshots
+
+Analysis submit routes must register and submit work quickly. They may validate
+request shape, resolve the active workspace, create task ids, pre-register the
+analysis task, and serialize task input snapshots, but they must not collect
+corpus rows, tokenize, aggregate, or spill analysis data inline on the FastAPI
+event loop.
+
+`core/worker_input_snapshots.py` owns the handoff. Submit routes serialize each
+selected node's `LazyFrame` plan plus small node metadata under
+`data/artifacts/task_inputs/{task_id}`. Workers load those snapshots and perform
+the expensive Polars operations out-of-process. This keeps the initial HTTP
+response at `{"state": "running", "metadata": {"task_id": ...}}` while preserving
+the exact input plans for the worker.
 
 ## Worker Completion Side Effects
 
@@ -93,12 +109,15 @@ The analysis routes live under `api/workspaces/analyses/`.
 
 - Token frequencies submit independent worker jobs, store result artifacts,
   support explicit task request/result endpoints, and expose update/clear flows.
-- Concordance supports regex and token modes, result paging, dispersion bins,
-  detach, dispersion detach, and materialization.
-- Quotation can use a local extractor or remote quotation service, then pages,
-  detaches, or materializes quote results.
-- Sequential analysis runs synchronously over lazy Polars expressions for time
-  and group buckets, with selected-period detach.
+- Concordance submits worker-backed regex or token-mode jobs, then supports
+  result paging, dispersion bins, detach, dispersion detach, and materialization.
+- Quotation submits worker-backed local-extractor or remote-service jobs, then
+  pages, detaches, or materializes quote results.
+- Sequential analysis submits a worker-backed task. The route snapshots the
+  selected node plan and returns a running task id; the worker collects and
+  aggregates the time or numeric buckets, then persists the result for the
+  task-specific request/result endpoints. Selected-period detach remains a
+  follow-up route over a completed result.
 - Topic modeling runs entirely through the Rust `polars-text` pipeline. The
   worker builds a single-column frame of sampled documents and calls
   `pl.col(...).text.topic_modeling(...)`, which chunks text by paragraph,

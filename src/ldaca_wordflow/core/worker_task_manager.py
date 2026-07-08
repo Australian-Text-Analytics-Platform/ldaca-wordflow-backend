@@ -60,6 +60,8 @@ def _is_terminal_task_event(event: dict[str, Any]) -> bool:
 ANALYSIS_TASK_TYPES = {
     "topic_modeling",
     "concordance",
+    "quotation",
+    "sequential_analysis",
     "token_frequencies",
 }
 

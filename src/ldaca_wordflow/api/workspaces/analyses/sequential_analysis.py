@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime
 from typing import Any, Optional, cast
+from uuid import uuid4
 
 import polars as pl
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -41,6 +42,7 @@ from ....core.exceptions import (
     ResourceConflictError,
     TaskNotFoundError,
 )
+from ....core.worker_input_snapshots import create_worker_input_snapshot
 from ....core.workspace import workspace_manager
 from ....models import (
     SequentialAnalysisDetachResponse,
@@ -610,48 +612,13 @@ async def run_sequential_analysis(
     user_id = current_user["id"]
     workspace_id, ws = _get_active_workspace(user_id)
 
-    task_manager = get_task_manager(user_id)
-
     try:
-        node = ws.nodes[node_id]
-        node_data = node.data
-
-        schema = node_data.collect_schema()
-
-        # Determine available columns
-        available_columns = list(schema.names())
-
-        column_type_lookup = _column_type_lookup(schema)
+        if node_id not in ws.nodes:
+            raise NotFoundError(f"Node {node_id} not found")
 
         if request.group_by_columns:
             if len(request.group_by_columns) > 3:
                 raise InvalidInputError("Maximum 3 group by columns allowed")
-        inferred_type = column_type_lookup.get(request.time_column)
-        numeric_types = {"integer", "float"}
-        if (
-            request.column_type == "numeric"
-            and inferred_type
-            and inferred_type not in numeric_types
-        ):
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Column '{request.time_column}' is not numeric based on schema metadata; "
-                    "select a numeric column or choose column_type='datetime'."
-                ),
-            )
-        if (
-            request.column_type == "datetime"
-            and inferred_type
-            and inferred_type in numeric_types
-        ):
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Column '{request.time_column}' appears to be numeric; "
-                    "choose column_type='numeric' to bin numeric values."
-                ),
-            )
 
         valid_frequencies = [
             "hourly",
@@ -669,49 +636,60 @@ async def run_sequential_analysis(
             raise InvalidInputError(
                 f"Invalid frequency '{request.frequency}'. Valid options: {valid_frequencies}",
             )
-        sequential_result = _run_sequential_analysis(
-            node_data,
-            time_column=request.time_column,
-            group_by_columns=request.group_by_columns,
-            frequency=request.frequency,
-            sort_by_time=request.sort_by_time,
-            column_type=request.column_type,
-            numeric_origin=request.numeric_origin,
-            numeric_interval=request.numeric_interval,
-            custom_interval_value=request.custom_interval_value,
-            custom_interval_unit=request.custom_interval_unit,
-            case_sensitive=request.case_sensitive,
-        )
 
-        result_payload: dict[str, Any] = {
-            "state": "successful",
-            "data": sequential_result.to_dicts(),
-            "columns": list(sequential_result.columns),
-            "total_records": len(sequential_result),
-        }
-
-        result_payload["chart_type"] = DEFAULT_CHART_TYPE
-
-        # Create/Update task
         req_dict = request.model_dump()
         req_dict["node_id"] = node_id
-
         req_model = AnalysisSequentialAnalysisRequest(**req_dict)
+        task_id = str(uuid4())
+        artifact_dir = workspace_manager.ensure_workspace_artifacts_dir(
+            user_id, workspace_id
+        )
+        if artifact_dir is None:
+            raise InternalServiceError("Workspace artifacts directory is unavailable")
+        input_snapshot_dir = create_worker_input_snapshot(
+            user_id=user_id,
+            workspace_id=workspace_id,
+            task_id=task_id,
+            node_ids=[node_id],
+            workspace=ws,
+            artifact_dir=artifact_dir,
+        )
 
-        task_id = task_manager.create_task(req_model)
-        task = task_manager.get_task(task_id)
-
-        if task is None:
-            raise InternalServiceError(
-                "Failed to load sequential analysis task",
+        task_manager = get_task_manager(user_id)
+        task_manager.save_task(
+            AnalysisTask(
+                task_id=task_id,
+                user_id=user_id,
+                workspace_id=workspace_id,
+                request=req_model,
+                status=AnalysisStatus.RUNNING,
             )
-        task.request = req_model
-        task.complete(GenericAnalysisResult(result_payload))
-        task_manager.save_task(task)
+        )
 
-        result_payload["metadata"] = {"task_id": task.task_id}
-        return result_payload
+        worker_task_manager = workspace_manager.get_task_manager(user_id)
+        worker_task = await worker_task_manager.submit_task(
+            user_id=user_id,
+            workspace_id=workspace_id,
+            task_type=SEQUENTIAL_TASK,
+            task_id=task_id,
+            task_args={
+                "input_snapshot_dir": str(input_snapshot_dir),
+                "node_id": node_id,
+                "request_payload": req_dict,
+            },
+            task_name="Sequential Analysis",
+        )
+        return {
+            "state": "running",
+            "data": None,
+            "columns": None,
+            "total_records": None,
+            "chart_type": None,
+            "metadata": {"task_id": task_id},
+        }
 
+    except (InvalidInputError, NotFoundError):
+        raise
     except Exception as e:  # pragma: no cover
         logger.error("Unexpected sequential analysis error: %s", e, exc_info=True)
         raise InternalServiceError(f"Internal server error: {e}")

@@ -43,7 +43,7 @@ from ....core.exceptions import (
     TaskNotFoundError,
     WorkspaceNotFoundError,
 )
-from ....core.tokens_cache import hydrate_tokenization_lazyframe
+from ....core.worker_input_snapshots import create_worker_input_snapshot
 from ....core.workspace import workspace_manager
 from ....models import (
     AnalysisClearResponse,
@@ -628,26 +628,27 @@ async def calculate_token_frequencies(
         if model and model.strip()
     }
 
-    # Prepare the artifact target early so the tokens-mode spill files
-    # share a parent directory with the eventual frequency parquets and
-    # get cleaned up together when the workspace's artifact dir is
-    # cleared. Computing it here also unifies the resume-from-error path.
+    # Prepare only durable task paths and metadata in the route. The worker
+    # loads the snapshotted LazyFrame plans and performs all collect/sink/token
+    # work out-of-process so this submit endpoint stays responsive.
     artifact_dir, artifact_prefix = _prepare_token_artifact_target(
         user_id, workspace_id
     )
 
-    node_corpora: dict[str, list[str]] = {}
-    node_token_streams: dict[str, str] = {}
     node_tokenizer_models: dict[str, str] = {}
-    node_display_names: dict[str, str] = {}
     for node_id in request.node_ids:
-        node = ws.nodes[node_id]
-        node_data = node.data
-
-        column_name = request.node_columns[node_id]
-
+        node = ws.nodes.get(node_id)
+        if node is None:
+            raise NotFoundError(f"Node {node_id} not found")
+        column_name = request.node_columns.get(node_id)
+        if not column_name:
+            raise InvalidInputError(f"Missing column selection for node {node_id}")
         tokenization_col = node.find_tokenization_column(column_name)
-        if tokenization_col is not None:
+        if tokenization_col is None:
+            model = requested_node_tokenizer_models.get(node_id) or tokenizer_model
+            if model:
+                node_tokenizer_models[node_id] = model
+        else:
             tokenization_registry = getattr(node, "tokenization", {})
             tokenization_meta = (
                 tokenization_registry.get(column_name, {})
@@ -661,50 +662,12 @@ async def calculate_token_frequencies(
             )
             if isinstance(model, str) and model.strip():
                 node_tokenizer_models[node_id] = model.strip()
-            node_data = hydrate_tokenization_lazyframe(
-                node=node,
-                source_column=column_name,
-                user_id=user_id,
-            )
-            # Spill the explode-flattened tokens to a parquet via streaming
-            # sink instead of materialising a
-            # ``list[list[str]]`` of Python str objects (which for 10 k
-            # CJK docs with ~1 k tokens each was ~500 MB of pure PyObject
-            # overhead). The worker scans the parquet and computes
-            # frequencies via ``group_by.len()`` in Polars — never
-            # touching Python until the small summary frame at the end.
-            stream_path = (
-                artifact_dir / f"{artifact_prefix}_tokens_stream_{node_id}.parquet"
-            )
-            (
-                node_data.select(
-                    pl.col(tokenization_col)
-                    .list.eval(pl.element().struct.field("token"))
-                    .explode()
-                    .alias("token")
-                )
-                .filter(pl.col("token").is_not_null())
-                .sink_parquet(stream_path)
-            )
-            node_token_streams[node_id] = str(stream_path)
-        else:
-            docs_df = node_data.select(
-                pl.col(column_name).alias("__doc_col__")
-            ).collect()
-            node_corpora[node_id] = [
-                str(v) if v is not None else ""
-                for v in docs_df["__doc_col__"].to_list()
-            ]
-        node_display_names[node_id] = str(getattr(node, "name", None) or node_id)
-
-    node_tokenizer_models.update(
-        {
-            node_id: requested_node_tokenizer_models.get(node_id) or tokenizer_model
-            for node_id in node_corpora
-        }
-    )
     missing_tokenizer_model_node_ids = [
-        node_id for node_id, model in node_tokenizer_models.items() if not model
+        node_id
+        for node_id in request.node_ids
+        if ws.nodes[node_id].find_tokenization_column(request.node_columns[node_id])
+        is None
+        and not node_tokenizer_models.get(node_id)
     ]
     if missing_tokenizer_model_node_ids:
         raise HTTPException(
@@ -716,26 +679,15 @@ async def calculate_token_frequencies(
         )
 
     requested_stop_words = sanitize_stop_words(request.stop_words)
-
-    submission_lock = _token_freq_submission_lock(user_id, workspace_id)
-    async with submission_lock:
-        task_info = await tm.submit_task(
-            user_id=user_id,
-            workspace_id=workspace_id,
-            task_type="token_frequencies",
-            task_args={
-                "node_corpora": node_corpora,
-                "node_token_streams": node_token_streams,
-                "node_display_names": node_display_names,
-                "artifact_dir": str(artifact_dir),
-                "artifact_prefix": artifact_prefix,
-                "token_limit": effective_limit,
-                "stop_words": requested_stop_words,
-                "tokenizer_model": tokenizer_model,
-                "node_tokenizer_models": node_tokenizer_models,
-            },
-        )
-
+    task_id = str(uuid4())
+    input_snapshot_dir = create_worker_input_snapshot(
+        user_id=user_id,
+        workspace_id=workspace_id,
+        task_id=task_id,
+        node_ids=request.node_ids,
+        workspace=ws,
+        artifact_dir=artifact_dir,
+    )
     analysis_request = AnalysisTokenFrequencyRequest(
         node_ids=request.node_ids,
         node_columns=request.node_columns,
@@ -748,7 +700,7 @@ async def calculate_token_frequencies(
     task_manager = get_task_manager(user_id)
     task_manager.save_task(
         AnalysisTask(
-            task_id=task_info.id,
+            task_id=task_id,
             user_id=user_id,
             workspace_id=workspace_id,
             request=analysis_request,
@@ -756,11 +708,31 @@ async def calculate_token_frequencies(
         )
     )
 
+    submission_lock = _token_freq_submission_lock(user_id, workspace_id)
+    async with submission_lock:
+        task_info = await tm.submit_task(
+            user_id=user_id,
+            workspace_id=workspace_id,
+            task_type="token_frequencies",
+            task_id=task_id,
+            task_args={
+                "input_snapshot_dir": str(input_snapshot_dir),
+                "node_ids": request.node_ids,
+                "node_columns": request.node_columns,
+                "artifact_dir": str(artifact_dir),
+                "artifact_prefix": artifact_prefix,
+                "token_limit": effective_limit,
+                "stop_words": requested_stop_words,
+                "tokenizer_model": tokenizer_model,
+                "node_tokenizer_models": node_tokenizer_models,
+            },
+        )
+
     return {
         "state": "running",
         "message": "Token frequency analysis started",
         "data": None,
         "token_limit": effective_limit,
         "stop_words": requested_stop_words,
-        "metadata": {"task_id": task_info.id},
+        "metadata": {"task_id": task_id},
     }

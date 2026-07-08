@@ -47,6 +47,271 @@ DISPERSION_EXTRACTED_CONTENTS_COLUMN = CONC_EXTRACTION_COLUMN
 logger = logging.getLogger(__name__)
 
 
+def _source_text_filter(document_column: str):
+    """Return the non-empty document filter used by concordance workers.
+
+    Called by:
+    - snapshot input loaders in this module because submit routes now pass
+      LazyFrame-plan snapshots instead of pre-collected corpora.
+    """
+
+    import polars as pl
+
+    return (
+        pl.col(document_column)
+        .cast(pl.Utf8, strict=False)
+        .str.strip_chars()
+        .str.len_chars()
+        .fill_null(0)
+        > 0
+    )
+
+
+def _collect_source_input_from_snapshot(
+    *,
+    input_snapshot_dir: str,
+    node_id: str,
+    document_column: str,
+    user_id: str | None,
+    extra_column_names: list[str] | None,
+    include_all_metadata: bool = False,
+    search_mode: str = "regex",
+) -> tuple[list[str], dict[str, list] | None, dict[str, Any] | None, list[Any] | None]:
+    """Collect concordance source inputs inside the worker process.
+
+    Used by:
+    - concordance detach, dispersion-detach, and materialize workers when submit
+      routes provide task input snapshots.
+
+    Flow:
+    1. Load the snapshotted LazyFrame plan for ``node_id``.
+    2. Optionally hydrate registered tokenization for tokens-mode searches.
+    3. Select/filter the document and requested metadata columns.
+    4. Materialize the aligned Python lists only after the job is already in the
+       process pool.
+    """
+
+    import polars as pl
+
+    from .worker_input_snapshots import load_snapshot_node
+
+    snapshot_node = load_snapshot_node(input_snapshot_dir, node_id)
+    node = snapshot_node.to_node()
+    node_data = snapshot_node.data
+    tokenization_column: str | None = None
+    if search_mode == "tokens":
+        if user_id is None:
+            raise ValueError("tokens-mode concordance snapshot input requires user_id")
+        tokenization_column = node.find_tokenization_column(document_column)
+        if tokenization_column is None:
+            raise ValueError(
+                f"No tokens column registered on node {node_id!r} for source column {document_column!r}"
+            )
+        from .tokens_cache import hydrate_tokenization_lazyframe
+
+        node_data = hydrate_tokenization_lazyframe(
+            node=node,
+            source_column=document_column,
+            user_id=user_id,
+        )
+
+    schema_names = list(node_data.collect_schema().names())
+    if include_all_metadata:
+        metadata_columns = [
+            column
+            for column in schema_names
+            if column != document_column and column != tokenization_column
+        ]
+    else:
+        metadata_columns = list(extra_column_names or [])
+
+    select_exprs = [pl.col(document_column)] + [pl.col(c) for c in metadata_columns]
+    if tokenization_column is not None:
+        select_exprs.append(pl.col(tokenization_column))
+
+    corpus_df = cast(
+        pl.DataFrame,
+        node_data.select(select_exprs)
+        .filter(_source_text_filter(document_column))
+        .collect(),
+    )
+    node_corpus = [
+        str(value) if value is not None else ""
+        for value in corpus_df.get_column(document_column).to_list()
+    ]
+
+    extra_columns_data: dict[str, list] | None = None
+    extra_columns_dtypes: dict[str, Any] | None = None
+    if metadata_columns:
+        extra_columns_data = {}
+        extra_columns_dtypes = {}
+        for column in metadata_columns:
+            series = corpus_df.get_column(column)
+            extra_columns_data[column] = series.to_list()
+            extra_columns_dtypes[column] = series.dtype
+
+    node_tokens = (
+        corpus_df.get_column(tokenization_column).to_list()
+        if tokenization_column is not None
+        else None
+    )
+    return node_corpus, extra_columns_data, extra_columns_dtypes, node_tokens
+
+
+def _build_concordance_response_from_snapshot(
+    *,
+    input_snapshot_dir: str,
+    user_id: str,
+    request_payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Build the initial concordance result from task-owned snapshots.
+
+    Used by:
+    - ``run_concordance_analysis_task`` because the primary concordance submit
+      route must only create the snapshot, register a task, and return.
+
+    Flow: load snapshot nodes, build the same source descriptors used by
+    route-side pagination helpers, compute each requested node page inside the
+    worker, and return the API result payload for task persistence.
+    """
+
+    from ..api.workspaces.analyses.concordance_core import (
+        DEFAULT_CONCORDANCE_DESCENDING,
+        DEFAULT_CONCORDANCE_PAGE,
+        _resolve_page_size,
+        compute_node_concordance_page,
+    )
+    from .worker_input_snapshots import load_snapshot_node
+
+    page = int(request_payload.get("page") or DEFAULT_CONCORDANCE_PAGE)
+    raw_page_size = request_payload.get("page_size")
+    page_size = (
+        int(raw_page_size)
+        if raw_page_size is not None and int(raw_page_size) > 0
+        else None
+    )
+    sort_by = request_payload.get("sort_by")
+    descending = bool(
+        request_payload.get("descending", DEFAULT_CONCORDANCE_DESCENDING)
+    )
+    node_ids = list(request_payload.get("node_ids") or [])
+    node_columns = dict(request_payload.get("node_columns") or {})
+
+    node_sources: dict[str, dict[str, Any]] = {}
+    label_to_node_map: dict[str, str] = {}
+    for node_id in node_ids:
+        column = node_columns.get(node_id)
+        if not column:
+            continue
+        snapshot_node = load_snapshot_node(input_snapshot_dir, node_id)
+        node = snapshot_node.to_node()
+        node_label = snapshot_node.name or node_id
+        label_to_node_map[node_label] = node_id
+        tokenization_column = node.find_tokenization_column(column)
+        node_sources[node_id] = {
+            "lf": snapshot_node.data,
+            "column": column,
+            "label": node_label,
+            "tokenization_column": tokenization_column,
+            "node": node,
+            "user_id": user_id,
+        }
+
+    if page_size is None:
+        estimates: list[int] = []
+        for node_id in node_ids:
+            src = node_sources.get(node_id)
+            if not src:
+                continue
+            estimates.append(
+                _resolve_page_size(
+                    src["lf"],
+                    src["column"],
+                    request_payload,
+                    None,
+                    tokenization_column=src.get("tokenization_column"),
+                )
+            )
+        if estimates:
+            page_size = max(estimates)
+
+    result_node_id = request_payload.get("result_node_id")
+    scoped_node_ids = (
+        [result_node_id]
+        if result_node_id and result_node_id in node_ids
+        else node_ids
+    )
+    data: dict[str, Any] = {}
+    for node_id in scoped_node_ids:
+        src = node_sources.get(node_id)
+        if not src:
+            continue
+        data[node_id] = compute_node_concordance_page(
+            src,
+            request_payload,
+            page=page,
+            page_size=page_size,
+            sort_by=sort_by,
+            descending=descending,
+        )
+
+    analysis_params = dict(request_payload)
+    if label_to_node_map:
+        analysis_params["label_to_node_map"] = label_to_node_map
+
+    return {
+        "state": "successful",
+        "message": "Concordance analysis complete",
+        "data": data,
+        "analysis_params": analysis_params,
+        "combinable": len(node_ids) > 1,
+    }
+
+
+@worker_task
+def run_concordance_analysis_task(
+    configure_worker_environment,
+    user_id: str,
+    workspace_id: str,
+    input_snapshot_dir: str,
+    request_payload: dict[str, Any],
+    progress_callback: Callable[[float, str], None] | None = None,
+) -> dict[str, Any]:
+    """Execute the primary concordance analysis in a worker process.
+
+    Used by:
+    - ``core.worker.concordance_task`` because the API submit endpoint must not
+      collect source rows or build first-page results on the event loop.
+
+    Flow: configure the worker runtime, load snapshotted node plans, compute the
+    requested first page, and return the persisted task result payload.
+    """
+
+    configure_worker_environment()
+    try:
+        if progress_callback:
+            progress_callback(0.1, "Loading concordance input...")
+        result = _build_concordance_response_from_snapshot(
+            input_snapshot_dir=input_snapshot_dir,
+            user_id=user_id,
+            request_payload=request_payload,
+        )
+        if progress_callback:
+            progress_callback(1.0, "Concordance analysis completed")
+        return result
+    except Exception as exc:
+        logger.exception(
+            "Concordance analysis task failed for user=%s workspace=%s",
+            user_id,
+            workspace_id,
+        )
+        return {
+            "state": "failed",
+            "message": f"Concordance analysis task failed: {exc}",
+            "data": {},
+        }
+
+
 def _build_concordance_occurrence_dataframe(
     node_corpus: list[str],
     document_column: str,
@@ -283,6 +548,9 @@ def run_concordance_detach_task(
     extra_columns_data: dict[str, list] | None = None,
     extra_columns_dtypes: dict[str, Any] | None = None,
     materialized_path: str | None = None,
+    input_snapshot_dir: str | None = None,
+    extra_column_names: list[str] | None = None,
+    user_id: str | None = None,
     progress_callback: Callable[[float, str], None] | None = None,
 ) -> dict[str, Any]:
     """Run concordance detach and return a serialized detached node payload.
@@ -311,6 +579,7 @@ def run_concordance_detach_task(
         from docworkspace import Node
 
         logger.info("[Worker %d] Starting concordance detach task", os.getpid())
+        metadata_column_names = list(extra_column_names or (extra_columns_data or {}))
 
         if materialized_path and os.path.exists(materialized_path):
             if progress_callback:
@@ -327,8 +596,8 @@ def run_concordance_detach_task(
             keep_cols: list[str] = []
             if include_document_column and document_column in mat_df.columns:
                 keep_cols.append(document_column)
-            if extra_columns_data:
-                for col_name in extra_columns_data:
+            if metadata_column_names:
+                for col_name in metadata_column_names:
                     if col_name in mat_df.columns and col_name not in keep_cols:
                         keep_cols.append(col_name)
             # Always keep CORE_CONCORDANCE_COLUMNS + freq columns when the
@@ -384,6 +653,20 @@ def run_concordance_detach_task(
 
         if progress_callback:
             progress_callback(0.2, "Preparing text data...")
+
+        if input_snapshot_dir is not None:
+            (
+                node_corpus,
+                extra_columns_data,
+                extra_columns_dtypes,
+                _node_tokens,
+            ) = _collect_source_input_from_snapshot(
+                input_snapshot_dir=input_snapshot_dir,
+                node_id=parent_node_id,
+                document_column=document_column,
+                user_id=user_id,
+                extra_column_names=extra_column_names,
+            )
 
         if progress_callback:
             progress_callback(0.55, "Generating concordance matches...")
@@ -682,6 +965,9 @@ def run_concordance_dispersion_detach_task(
     total_bins: int | None = None,
     selected_matched_texts: list[str] | None = None,
     match_case_insensitive: bool = False,
+    input_snapshot_dir: str | None = None,
+    extra_column_names: list[str] | None = None,
+    user_id: str | None = None,
     progress_callback: Callable[[float, str], None] | None = None,
 ) -> dict[str, Any]:
     """Aggregate concordance hits per document and detach as a workspace node.
@@ -721,6 +1007,7 @@ def run_concordance_dispersion_detach_task(
         # separately even though we already did the full-corpus work.
         side_effect_materialized_path: str | None = None
         side_effect_summary: dict[str, Any] | None = None
+        metadata_column_names = list(extra_column_names or (extra_columns_data or {}))
 
         if materialized_path and os.path.exists(materialized_path):
             if progress_callback:
@@ -729,6 +1016,22 @@ def run_concordance_dispersion_detach_task(
         else:
             if progress_callback:
                 progress_callback(0.25, "Generating concordance matches...")
+            if input_snapshot_dir is not None:
+                (
+                    node_corpus,
+                    extra_columns_data,
+                    extra_columns_dtypes,
+                    _node_tokens,
+                ) = _collect_source_input_from_snapshot(
+                    input_snapshot_dir=input_snapshot_dir,
+                    node_id=parent_node_id,
+                    document_column=document_column,
+                    user_id=user_id,
+                    extra_column_names=extra_column_names,
+                )
+                metadata_column_names = list(
+                    extra_column_names or (extra_columns_data or {})
+                )
             hits_df, _ = _build_concordance_occurrence_dataframe(
                 node_corpus=node_corpus,
                 document_column=document_column,
@@ -800,16 +1103,13 @@ def run_concordance_dispersion_detach_task(
         if progress_callback:
             progress_callback(0.65, "Aggregating hits per document...")
 
-        extra_metadata_columns = (
-            list(extra_columns_data.keys()) if extra_columns_data else []
-        )
         aggregated, output_columns = _aggregate_hits_per_document(
             hits_df,
             document_column=document_column,
             selected_bins=selected_bins,
             total_bins=total_bins,
             include_document_column=include_document_column,
-            extra_metadata_columns=extra_metadata_columns,
+            extra_metadata_columns=metadata_column_names,
             selected_matched_texts=selected_matched_texts,
             match_case_insensitive=match_case_insensitive,
         )
@@ -886,6 +1186,8 @@ def run_concordance_materialize_task(
     extra_columns_dtypes: dict[str, Any] | None = None,
     search_mode: str = "regex",
     node_tokens: list[Any] | None = None,
+    input_snapshot_dir: str | None = None,
+    user_id: str | None = None,
     progress_callback: Callable[[float, str], None] | None = None,
 ) -> dict[str, Any]:
     """Run full concordance extraction and persist the flattened parquet.
@@ -912,6 +1214,22 @@ def run_concordance_materialize_task(
 
         if progress_callback:
             progress_callback(0.25, "Generating concordance matches...")
+
+        if input_snapshot_dir is not None:
+            (
+                node_corpus,
+                extra_columns_data,
+                extra_columns_dtypes,
+                node_tokens,
+            ) = _collect_source_input_from_snapshot(
+                input_snapshot_dir=input_snapshot_dir,
+                node_id=parent_node_id,
+                document_column=document_column,
+                user_id=user_id,
+                extra_column_names=None,
+                include_all_metadata=True,
+                search_mode=search_mode,
+            )
 
         if search_mode == "tokens":
             if node_tokens is None:

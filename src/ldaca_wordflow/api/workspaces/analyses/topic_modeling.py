@@ -38,6 +38,7 @@ from ....core.exceptions import (
     TaskNotFoundError,
     WorkspaceNotFoundError,
 )
+from ....core.worker_input_snapshots import create_worker_input_snapshot
 from ....core.workspace import workspace_manager
 from ....models import (
     AnalysisClearResponse,
@@ -402,50 +403,18 @@ async def run_topic_modeling(
         raise InvalidInputError("At least one node ID must be provided")
     node_infos: list[dict[str, object]] = []
     for node_id in request.node_ids:
-        node = ws.nodes[node_id]
-        node_data = node.data
-
         column_name = request.node_columns[node_id]
-        available_columns = list(node_data.collect_schema().names())
-
+        if node_id not in ws.nodes:
+            raise NotFoundError(f"Node {node_id} not found")
         node_infos.append(
             {
                 "node_id": node_id,
-                "node_name": getattr(node, "name", None) or node_id,
                 "text_column": column_name,
-                "original_columns": available_columns,
             }
         )
 
     tm = workspace_manager.get_task_manager(user_id)
-    submission_lock = _topic_submission_lock(user_id, workspace_id)
-    async with submission_lock:
-        workspace_dir = update_workspace(user_id, workspace_id, ws)
-        if workspace_dir is None:
-            raise InternalServiceError(
-                "Failed to persist workspace before topic modeling",
-            )
-        artifact_dir, artifact_prefix = _prepare_topic_artifact_target(
-            user_id, workspace_id
-        )
-        worker_task = await tm.submit_task(
-            user_id=user_id,
-            workspace_id=workspace_id,
-            task_type="topic_modeling",
-            task_args={
-                "workspace_dir": str(workspace_dir),
-                "node_infos": node_infos,
-                "artifact_dir": str(artifact_dir),
-                "artifact_prefix": artifact_prefix,
-                "min_topic_size": request.min_topic_size,
-                "random_seed": request.random_seed,
-                "representative_words_count": request.representative_words_count,
-                "sample_fractions": request.sample_fractions,
-            },
-            task_name="Topic Modeling",
-        )
-
-    analysis_tm = get_task_manager(user_id)
+    task_id = str(uuid4())
     min_topic_size = (
         request.min_topic_size if request.min_topic_size is not None else 10
     )
@@ -455,7 +424,6 @@ async def run_topic_modeling(
         if request.representative_words_count is not None
         else 5
     )
-
     analysis_request = AnalysisTopicModelingRequest(
         node_ids=request.node_ids,
         node_columns=request.node_columns,
@@ -464,20 +432,52 @@ async def run_topic_modeling(
         representative_words_count=representative_words_count,
         sample_fractions=request.sample_fractions,
     )
-    analysis_tm.save_task(
-        AnalysisTask(
-            task_id=worker_task.id,
+    submission_lock = _topic_submission_lock(user_id, workspace_id)
+    async with submission_lock:
+        artifact_dir, artifact_prefix = _prepare_topic_artifact_target(
+            user_id, workspace_id
+        )
+        input_snapshot_dir = create_worker_input_snapshot(
             user_id=user_id,
             workspace_id=workspace_id,
-            request=analysis_request,
-            status=AnalysisStatus.RUNNING,
+            task_id=task_id,
+            node_ids=request.node_ids,
+            workspace=ws,
+            artifact_dir=artifact_dir,
         )
-    )
+        analysis_tm = get_task_manager(user_id)
+        analysis_tm.save_task(
+            AnalysisTask(
+                task_id=task_id,
+                user_id=user_id,
+                workspace_id=workspace_id,
+                request=analysis_request,
+                status=AnalysisStatus.RUNNING,
+            )
+        )
+        worker_task = await tm.submit_task(
+            user_id=user_id,
+            workspace_id=workspace_id,
+            task_type="topic_modeling",
+            task_id=task_id,
+            task_args={
+                "input_snapshot_dir": str(input_snapshot_dir),
+                "node_infos": node_infos,
+                "artifact_dir": str(artifact_dir),
+                "artifact_prefix": artifact_prefix,
+                "min_topic_size": min_topic_size,
+                "random_seed": random_seed,
+                "representative_words_count": representative_words_count,
+                "sample_fractions": request.sample_fractions,
+            },
+            task_name="Topic Modeling",
+        )
+
     return TopicModelingResponse(
         state="running",
         message="Topic Modeling analysis started",
         data=None,
-        metadata=_task_metadata(worker_task.id),
+        metadata=_task_metadata(task_id),
     )
 
 

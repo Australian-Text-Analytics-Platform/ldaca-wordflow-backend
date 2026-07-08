@@ -17,7 +17,7 @@ from ldaca_wordflow.api.workspaces.analyses.token_frequencies import (
     MAX_SERVER_TOKEN_LIMIT,
     SERVER_LIMIT_MULTIPLIER,
 )
-from ldaca_wordflow.core.worker import token_frequencies_task
+from ldaca_wordflow.core.worker import sequential_analysis_task, token_frequencies_task
 from ldaca_wordflow.core.workspace import workspace_manager
 
 
@@ -108,6 +108,33 @@ def _simulate_token_frequency_completion(workspace_id: str):
 
     task.complete(GenericAnalysisResult(worker_result))
     task_manager.save_task(task)
+
+
+def _simulate_sequential_analysis_completion(workspace_id: str, task_id: str):
+    """Run the snapshotted sequential worker task and persist its result."""
+
+    task_manager = get_task_manager("test")
+    task = task_manager.get_task(task_id)
+    assert task is not None
+
+    req = task.request.model_dump() if hasattr(task.request, "model_dump") else {}
+    node_id = req.get("node_id")
+    assert node_id
+    artifacts_dir = workspace_manager.ensure_workspace_artifacts_dir(
+        "test", workspace_id
+    )
+    assert artifacts_dir is not None
+    worker_result = sequential_analysis_task(
+        user_id="test",
+        workspace_id=workspace_id,
+        input_snapshot_dir=str(artifacts_dir / "task_inputs" / task_id),
+        node_id=node_id,
+        request_payload=req,
+    )
+
+    task.complete(GenericAnalysisResult(worker_result))
+    task_manager.save_task(task)
+    return worker_result
 
 
 def _list_analysis_records(user_id: str, workspace_id: str, task: str | None = None):
@@ -464,6 +491,21 @@ class TestSequentialAnalysisPersistence:
 
         assert response.status_code == 200
         result_data = response.json()
+        assert result_data.get("state") == "running"
+        task_id = result_data.get("metadata", {}).get("task_id")
+        assert task_id
+        _simulate_sequential_analysis_completion(workspace_id, task_id)
+        result_response = await get_json(
+            client,
+            f"/api/workspaces/sequential-analysis/tasks/{task_id}/result",
+        )
+        assert result_response.status_code == 200
+        result_data = result_response.json()
+        metadata = result_data.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+            result_data["metadata"] = metadata
+        metadata["task_id"] = task_id
         assert_successful_result(result_data)
         return result_data
 
@@ -575,8 +617,6 @@ class TestSequentialAnalysisPersistence:
         monkeypatch,
     ):
         """Numeric sequential analysis should persist origin/interval inputs."""
-        captured_kwargs: dict[str, object] = {}
-
         dummy_df = pl.DataFrame({"score": [0, 5, 10, 15]})
         dummy_node = SimpleNamespace(data=dummy_df.lazy())
         dummy_workspace = SimpleNamespace(nodes={timeline_node_id: dummy_node})
@@ -596,14 +636,6 @@ class TestSequentialAnalysisPersistence:
             lambda *_args, **_kwargs: dummy_workspace,
         )
 
-        original_run = sequential_module._run_sequential_analysis
-
-        def _capture_run(*_args, **kwargs):
-            captured_kwargs.update(kwargs)
-            return original_run(*_args, **kwargs)
-
-        monkeypatch.setattr(sequential_module, "_run_sequential_analysis", _capture_run)
-
         payload = {
             "time_column": "score",
             "column_type": "numeric",
@@ -619,8 +651,13 @@ class TestSequentialAnalysisPersistence:
         )
 
         assert response.status_code == 200
-        assert captured_kwargs.get("column_type") == "numeric"
-        assert captured_kwargs.get("numeric_interval") == 5
+        task_id = response.json().get("metadata", {}).get("task_id")
+        assert task_id
+        task = get_task_manager("test").get_task(task_id)
+        assert task is not None
+        request_data = task.request.model_dump()
+        assert request_data.get("column_type") == "numeric"
+        assert request_data.get("numeric_interval") == 5
 
     async def test_sequential_analysis_numeric_requires_interval(
         self,
@@ -865,6 +902,7 @@ class TestSequentialAnalysisPersistence:
 
         task_id = response.json().get("metadata", {}).get("task_id")
         assert task_id
+        _simulate_sequential_analysis_completion(workspace_id, task_id)
 
         detach_response = await post_json(
             authenticated_client,
@@ -961,12 +999,12 @@ class TestAnalysisPersistenceEdgeCases:
         }
 
         # When: We call the endpoint with invalid data
-        with pytest.raises(KeyError):
-            await post_json(
-                authenticated_client,
-                "/api/workspaces/token-frequencies",
-                invalid_request,
-            )
+        response = await post_json(
+            authenticated_client,
+            "/api/workspaces/token-frequencies",
+            invalid_request,
+        )
+        assert response.status_code == 404
 
         # And: No analysis records were created
         analyses = _list_analysis_records(test_user["id"], workspace_id)

@@ -38,6 +38,9 @@ def run_token_frequencies_task(
     node_token_streams: dict[str, str] | None = None,
     tokenizer_model: str | None = None,
     node_tokenizer_models: dict[str, str] | None = None,
+    input_snapshot_dir: str | None = None,
+    node_ids: list[str] | None = None,
+    node_columns: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Execute token-frequency analysis inside a worker process.
 
@@ -88,13 +91,74 @@ def run_token_frequencies_task(
             MAX_SERVER_TOKEN_LIMIT,
         )
 
-        token_streams = node_token_streams or {}
+        token_streams = dict(node_token_streams or {})
+        corpora = dict(node_corpora or {})
+        display_names = dict(node_display_names or {})
         fallback_tokenizer_model = (tokenizer_model or "").strip() or None
         requested_node_tokenizer_models = {
             node_id: model.strip()
             for node_id, model in (node_tokenizer_models or {}).items()
             if model and model.strip()
         }
+
+        if input_snapshot_dir is not None:
+            if progress_callback:
+                progress_callback(0.12, "Preparing token frequency inputs...")
+            from .worker_input_snapshots import load_snapshot_node
+            from .tokens_cache import hydrate_tokenization_lazyframe
+
+            if not node_ids:
+                raise ValueError("Token frequency snapshot input requires node_ids")
+            if not node_columns:
+                raise ValueError("Token frequency snapshot input requires node_columns")
+            for node_id in node_ids:
+                snapshot_node = load_snapshot_node(input_snapshot_dir, node_id)
+                source_column = node_columns.get(node_id)
+                if not source_column:
+                    raise ValueError(f"Missing token-frequency column for node {node_id}")
+                display_names[node_id] = snapshot_node.name
+                node = snapshot_node.to_node()
+                tokenization_col = node.find_tokenization_column(source_column)
+                if tokenization_col is not None:
+                    tokenization_meta = node.tokenization.get(source_column, {})
+                    model = (
+                        tokenization_meta.get("model")
+                        if isinstance(tokenization_meta, dict)
+                        else None
+                    )
+                    if isinstance(model, str) and model.strip():
+                        requested_node_tokenizer_models[node_id] = model.strip()
+                    node_data = hydrate_tokenization_lazyframe(
+                        node=node,
+                        source_column=source_column,
+                        user_id=user_id,
+                    )
+                    stream_path = (
+                        artifact_root
+                        / f"{artifact_prefix}_tokens_stream_{node_id}.parquet"
+                    )
+                    (
+                        node_data.select(
+                            pl.col(tokenization_col)
+                            .list.eval(pl.element().struct.field("token"))
+                            .explode()
+                            .alias("token")
+                        )
+                        .filter(pl.col("token").is_not_null())
+                        .sink_parquet(stream_path)
+                    )
+                    token_streams[node_id] = str(stream_path)
+                else:
+                    docs_df = cast(
+                        pl.DataFrame,
+                        snapshot_node.data.select(
+                            pl.col(source_column).alias("__doc_col__")
+                        ).collect(),
+                    )
+                    corpora[node_id] = [
+                        str(value) if value is not None else ""
+                        for value in docs_df["__doc_col__"].to_list()
+                    ]
 
         def tokenizer_model_for_node(node_id: str) -> str | None:
             """Support token-frequency worker helpers with a tokenizer model for node helper.
@@ -111,14 +175,14 @@ def run_token_frequencies_task(
                 requested_node_tokenizer_models.get(node_id) or fallback_tokenizer_model
             )
 
-        node_ids = list({**node_corpora, **token_streams}.keys())
-        if not node_ids:
+        prepared_node_ids = list({**corpora, **token_streams}.keys())
+        if not prepared_node_ids:
             raise ValueError("At least one corpus is required")
-        if len(node_ids) > 2:
+        if len(prepared_node_ids) > 2:
             raise ValueError("Maximum of 2 corpora can be compared")
         missing_tokenizer_model_node_ids = [
             node_id
-            for node_id in node_corpora
+            for node_id in corpora
             if tokenizer_model_for_node(node_id) is None
         ]
         if missing_tokenizer_model_node_ids:
@@ -127,12 +191,12 @@ def run_token_frequencies_task(
                 + ", ".join(missing_tokenizer_model_node_ids)
             )
 
-        for i, node_id in enumerate(node_ids):
-            node_name = node_display_names.get(node_id) or node_id
+        for i, node_id in enumerate(prepared_node_ids):
+            node_name = display_names.get(node_id) or node_id
 
             if progress_callback:
                 progress_callback(
-                    0.2 + 0.3 * (i + 1) / max(len(node_ids), 1),
+                    0.2 + 0.3 * (i + 1) / max(len(prepared_node_ids), 1),
                     f"Prepared text data for {node_name}",
                 )
 
@@ -142,7 +206,7 @@ def run_token_frequencies_task(
         frequency_results: dict[str, dict[str, int]] = {}
         node_models_used: dict[str, str] = {}
         stats_df = None
-        for node_id in node_ids:
+        for node_id in prepared_node_ids:
             if node_id in token_streams:
                 # The API endpoint spilled one row per token (post-explode,
                 # post-null-filter) to a parquet via
@@ -170,7 +234,7 @@ def run_token_frequencies_task(
                     for row in freq_df.to_dicts()
                 }
             else:
-                docs = node_corpora.get(node_id) or []
+                docs = corpora.get(node_id) or []
                 series = pl.Series(
                     "document",
                     [str(v) if v is not None else "" for v in docs],
@@ -183,10 +247,10 @@ def run_token_frequencies_task(
                     model=effective_tokenizer_model,
                 )
 
-        if len(node_ids) == 2:
+        if len(prepared_node_ids) == 2:
             stats_df = pt.token_frequency_stats(
-                frequency_results[node_ids[0]],
-                frequency_results[node_ids[1]],
+                frequency_results[prepared_node_ids[0]],
+                frequency_results[prepared_node_ids[1]],
             )
 
         if progress_callback:
@@ -212,7 +276,7 @@ def run_token_frequencies_task(
                     pl.col("frequency").cast(pl.Int64),
                 ]
             ).lazy().sink_parquet(token_path)
-            display_name = node_display_names.get(frame_key, frame_key)
+            display_name = display_names.get(frame_key, frame_key)
             node_artifacts.append(
                 {
                     "node_id": frame_key,
@@ -222,7 +286,7 @@ def run_token_frequencies_task(
             )
 
         statistics_path: str | None = None
-        if len(node_ids) == 2 and stats_df is not None:
+        if len(prepared_node_ids) == 2 and stats_df is not None:
             stats_path = artifact_root / f"{artifact_prefix}_token_statistics.parquet"
             stats_df.lazy().sink_parquet(stats_path)
             statistics_path = str(stats_path)
@@ -235,7 +299,7 @@ def run_token_frequencies_task(
             )
 
         analysis_params_dict = {
-            "node_ids": list(node_ids),
+            "node_ids": list(prepared_node_ids),
             "node_columns": {},
             "token_limit": effective_limit,
             "server_limit": server_limit,
@@ -246,7 +310,7 @@ def run_token_frequencies_task(
 
         result_payload: dict[str, Any] = {
             "state": "successful",
-            "message": f"Successfully calculated token frequencies for {len(node_ids)} node(s)",
+            "message": f"Successfully calculated token frequencies for {len(prepared_node_ids)} node(s)",
             "artifacts": {
                 "version": 1,
                 "nodes": node_artifacts,
@@ -267,7 +331,7 @@ def run_token_frequencies_task(
                 "stop_words": requested_stop_words,
                 "tokenizer_model": shared_model,
                 "node_tokenizer_models": node_models_used,
-                "node_display_names": {**node_display_names},
+                "node_display_names": {**display_names},
             },
             "stop_words": requested_stop_words,
         }
