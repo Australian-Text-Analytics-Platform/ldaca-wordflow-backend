@@ -45,7 +45,9 @@ async def _wait_for_concordance_result(
     last_payload = None
 
     while time.monotonic() < deadline:
-        resp = await client.get(f"/api/workspaces/concordance/tasks/{task_id}/result")
+        resp = await client.get(
+            f"/api/workspaces/{workspace_id}/analysis-tasks/{task_id}/result"
+        )
         if resp.status_code != 200:
             await asyncio.sleep(poll_interval)
             continue
@@ -112,7 +114,7 @@ async def test_concordance_single_node_roundtrip(authenticated_client, workspace
     }
 
     resp = await authenticated_client.post(
-        "/api/workspaces/concordance",
+        f"/api/workspaces/{workspace_id}/concordance",
         json=request_payload,
     )
     assert resp.status_code == 200, resp.text
@@ -144,7 +146,7 @@ async def test_concordance_single_node_roundtrip(authenticated_client, workspace
 
     # Current request should surface the persisted request
     current_req = await authenticated_client.get(
-        f"/api/workspaces/concordance/tasks/{task_id}/request"
+        f"/api/workspaces/{workspace_id}/analysis-tasks/{task_id}/request"
     )
     assert current_req.status_code == 200
     current_req_payload = current_req.json()
@@ -175,7 +177,7 @@ async def test_concordance_single_node_roundtrip(authenticated_client, workspace
 
     # Request a smaller page size via POST (non-persistent override)
     current_res_post = await authenticated_client.post(
-        f"/api/workspaces/concordance/tasks/{task_id}/result",
+        f"/api/workspaces/{workspace_id}/analysis-tasks/{task_id}/result-query",
         json={"node_id": node.id, "page_size": 1},
     )
     assert current_res_post.status_code == 200
@@ -190,7 +192,7 @@ async def test_concordance_single_node_roundtrip(authenticated_client, workspace
 
     # Request the second page explicitly using node_id and page_number alias
     page_two = await authenticated_client.post(
-        f"/api/workspaces/concordance/tasks/{task_id}/result",
+        f"/api/workspaces/{workspace_id}/analysis-tasks/{task_id}/result-query",
         json={"node_id": node.id, "page_number": 2, "page_size": 1},
     )
     assert page_two.status_code == 200
@@ -247,7 +249,7 @@ async def test_concordance_multi_node_separated(authenticated_client, workspace_
     }
 
     resp = await authenticated_client.post(
-        "/api/workspaces/concordance",
+        f"/api/workspaces/{workspace_id}/concordance",
         json=request_payload,
     )
     assert resp.status_code == 200, resp.text
@@ -274,7 +276,7 @@ async def test_concordance_multi_node_separated(authenticated_client, workspace_
     # A scoped node_id page override re-pages only that node; the sibling key is
     # absent from the partial response so the frontend keeps its existing slice.
     scoped = await authenticated_client.post(
-        f"/api/workspaces/concordance/tasks/{task_id}/result",
+        f"/api/workspaces/{workspace_id}/analysis-tasks/{task_id}/result-query",
         json={"node_id": left_node.id, "page": 2, "page_size": 1},
     )
     assert scoped.status_code == 200
@@ -324,7 +326,7 @@ async def test_concordance_multi_node_mismatched_columns(
     }
 
     resp = await authenticated_client.post(
-        "/api/workspaces/concordance",
+        f"/api/workspaces/{workspace_id}/concordance",
         json=request_payload,
     )
     assert resp.status_code == 200, resp.text

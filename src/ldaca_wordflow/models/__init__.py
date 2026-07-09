@@ -123,6 +123,7 @@ from .topic_modeling import (
 )
 from .workspace import (
     CurrentWorkspaceResponse,
+    CurrentWorkspaceUpdateRequest,
     NodeColorUpdateRequest,
     NodeDocumentColumnUpdateRequest,
     NodeTokenizationPreferenceRequest,
@@ -130,13 +131,16 @@ from .workspace import (
     TokenizerModelsResponse,
     WorkspaceActionResponse,
     WorkspaceCreateRequest,
+    WorkspaceGraphNode,
     WorkspaceGraphResponse,
     WorkspaceInfo,
     WorkspaceNodeInfo,
+    WorkspaceNodeInfoRequest,
+    WorkspaceNodeInfoResponse,
     WorkspaceNodeReorderRequest,
-    WorkspaceNodesResponse,
     WorkspaceSummary,
     WorkspaceTaskStartResponse,
+    WorkspaceUpdateRequest,
     WorkspaceUploadResponse,
 )
 

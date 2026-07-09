@@ -8,6 +8,8 @@ node WITHOUT passing ``tokenization=``, so downstream tools using
 
 from __future__ import annotations
 
+import uuid
+
 import polars as pl
 import pytest
 from docworkspace.workspace.core import Workspace
@@ -119,7 +121,7 @@ def single_parent(monkeypatch: pytest.MonkeyPatch):
         nodes_join,
         nodes_slice,
     ):
-        monkeypatch.setattr(mod, "update_workspace", lambda *a, **k: None)
+        monkeypatch.setattr(mod, "update_workspace", lambda *a, **k: None, raising=False)
     return manager, parent
 
 
@@ -148,7 +150,7 @@ def two_parents(monkeypatch: pytest.MonkeyPatch):
         nodes_join,
         nodes_slice,
     ):
-        monkeypatch.setattr(mod, "update_workspace", lambda *a, **k: None)
+        monkeypatch.setattr(mod, "update_workspace", lambda *a, **k: None, raising=False)
     return manager, parent_a, parent_b
 
 
@@ -172,7 +174,11 @@ def _child(manager: _FakeManager, parent_ids: set[str]) -> Node:
 async def test_clone_inherits_tokenization(single_parent):
     manager, parent = single_parent
 
-    await nodes_api.clone_node(parent.id, current_user={"id": "user"})
+    await nodes_api.clone_node(
+        workspace_id=uuid.UUID(manager.workspace_id),
+        node_id=parent.id,
+        current_user={"id": "user"},
+    )
 
     child = _child(manager, {parent.id})
     assert child.tokenization["text"]["column_name"] == TOKENIZATION_COLUMN
@@ -187,7 +193,12 @@ async def test_filter_inherits_tokenization(single_parent):
         conditions=[FilterCondition(column="id", operator="greater_than", value=0)],
     )
 
-    await nodes_api.filter_node(parent.id, request, current_user={"id": "user"})
+    await nodes_api.filter_node(
+        workspace_id=uuid.UUID(manager.workspace_id),
+        node_id=parent.id,
+        request=request,
+        current_user={"id": "user"},
+    )
 
     child = _child(manager, {parent.id})
     assert child.tokenization["text"] == TOKENIZATION_META
@@ -198,7 +209,12 @@ async def test_slice_inherits_tokenization(single_parent):
     manager, parent = single_parent
     request = SliceRequest(offset=0, length=1)
 
-    await nodes_api.slice_node(parent.id, request, current_user={"id": "user"})
+    await nodes_api.slice_node(
+        workspace_id=uuid.UUID(manager.workspace_id),
+        node_id=parent.id,
+        request=request,
+        current_user={"id": "user"},
+    )
 
     child = _child(manager, {parent.id})
     assert child.tokenization["text"] == TOKENIZATION_META
@@ -209,7 +225,12 @@ async def test_sample_inherits_tokenization(single_parent):
     manager, parent = single_parent
     request = SliceRequest(mode="random_sample", sample_size=0.5, random_seed=1)
 
-    await nodes_api.slice_node(parent.id, request, current_user={"id": "user"})
+    await nodes_api.slice_node(
+        workspace_id=uuid.UUID(manager.workspace_id),
+        node_id=parent.id,
+        request=request,
+        current_user={"id": "user"},
+    )
 
     child = _child(manager, {parent.id})
     assert child.tokenization["text"] == TOKENIZATION_META
@@ -225,7 +246,11 @@ async def test_concat_inherits_tokenization_from_parents(two_parents):
     manager, parent_a, parent_b = two_parents
     request = ConcatRequest(node_ids=[parent_a.id, parent_b.id], deduplicate=False)
 
-    await nodes_api.concat_nodes(request, current_user={"id": "user"})
+    await nodes_api.concat_nodes(
+        workspace_id=uuid.UUID(manager.workspace_id),
+        request=request,
+        current_user={"id": "user"},
+    )
 
     child = _child(manager, {parent_a.id, parent_b.id})
     assert child.tokenization["text"]["model"] == "lindera:ja-ipadic"
@@ -236,6 +261,7 @@ async def test_join_inherits_tokenization_from_both_parents(two_parents):
     manager, parent_a, parent_b = two_parents
 
     await nodes_api.join_nodes(
+        workspace_id=uuid.UUID(manager.workspace_id),
         left_node_id=parent_a.id,
         right_node_id=parent_b.id,
         left_on="id",
@@ -265,7 +291,10 @@ async def test_expression_apply_with_columns_inherits_tokenization(single_parent
     )
 
     await nodes_api.polars_expression_apply(
-        parent.id, request, current_user={"id": "user"}
+        workspace_id=uuid.UUID(manager.workspace_id),
+        node_id=parent.id,
+        request=request,
+        current_user={"id": "user"},
     )
 
     child = _child(manager, {parent.id})
@@ -284,7 +313,10 @@ async def test_expression_apply_select_drops_tokenization_if_column_gone(single_
     )
 
     await nodes_api.polars_expression_apply(
-        parent.id, request, current_user={"id": "user"}
+        workspace_id=uuid.UUID(manager.workspace_id),
+        node_id=parent.id,
+        request=request,
+        current_user={"id": "user"},
     )
 
     child = _child(manager, {parent.id})

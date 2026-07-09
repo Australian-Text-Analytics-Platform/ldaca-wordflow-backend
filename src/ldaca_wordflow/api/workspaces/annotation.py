@@ -12,36 +12,35 @@ Flow:
 
 from __future__ import annotations
 
-from typing import cast
+import uuid
+from typing import Annotated, cast
 
 import polars as pl
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict, Field
 
-from ...core.annotation_ai import (
-    DEFAULT_BATCH_SIZE,
-    AnnotationAiError,
-    AnnotationClassOption,
-    InferenceConfig,
-    annotate_all,
-    annotate_batch,
-    list_models,
-    resolve_provider_wire,
-)
+from ...core.annotation_ai import AnnotationAiError, InferenceConfig, list_models
 from ...core.annotation_preview_store import preview_store, signature_of
 from ...core.auth import get_current_user
 from ...core.exceptions import BadGatewayError, InvalidInputError, NotFoundError
 from ...models import WorkspaceNodeInfo
+from .annotation_ai_workflows import (
+    annotate_all_annotation_ai_rows,
+    detach_previewed_annotation_ai_rows,
+    preview_annotation_ai_page,
+)
 from .schema_filter import frontend_node_info
 from .utils import (
     Node,
-    _create_and_persist_child_node,
-    require_current_workspace,
+    require_workspace,
     stage_dataframe_as_lazy,
     update_workspace,
 )
 
-router = APIRouter(prefix="/workspaces", tags=["annotation"])
+router = APIRouter(
+    prefix="/workspaces/{workspace_id:uuid}",
+    tags=["annotation"],
+)
 
 CLASS_DESCRIPTION_NODE_BASE_NAME = "Annotation Classes"
 
@@ -183,6 +182,7 @@ def _updated_class_description_frame(
 
 @router.post("/annotation/class-descriptions", response_model=WorkspaceNodeInfo)
 async def create_annotation_class_descriptions(
+    workspace_id: uuid.UUID,
     current_user: dict = Depends(get_current_user),
 ):
     """Create an empty class-description table for the Annotation view.
@@ -198,7 +198,8 @@ async def create_annotation_class_descriptions(
     - Save the workspace and return the standard node metadata response.
     """
     user_id = current_user["id"]
-    workspace = require_current_workspace(user_id)
+    workspace_id_str = str(workspace_id)
+    workspace = require_workspace(user_id, workspace_id_str)
     node_name = _unique_class_description_node_name(
         {node.name for node in workspace.nodes.values()}
     )
@@ -211,7 +212,7 @@ async def create_annotation_class_descriptions(
         operation="annotation_class_descriptions",
     )
     workspace.add_node(node)
-    update_workspace(user_id, workspace.id, workspace)
+    update_workspace(user_id, workspace_id_str, workspace)
     return frontend_node_info(node)
 
 
@@ -232,6 +233,7 @@ class AnnotationCreateColumnRequest(BaseModel):
     response_model=WorkspaceNodeInfo,
 )
 async def create_annotation_column(
+    workspace_id: uuid.UUID,
     node_id: str,
     payload: AnnotationCreateColumnRequest,
     current_user: dict = Depends(get_current_user),
@@ -251,7 +253,8 @@ async def create_annotation_column(
     - Persist the workspace and return the refreshed node metadata.
     """
     user_id = current_user["id"]
-    workspace = require_current_workspace(user_id)
+    workspace_id_str = str(workspace_id)
+    workspace = require_workspace(user_id, workspace_id_str)
     node = workspace.nodes.get(node_id)
     if node is None:
         raise NotFoundError("Source node not found")
@@ -266,7 +269,7 @@ async def create_annotation_column(
     node.data = stage_dataframe_as_lazy(
         materialized, workspace.ws_root_dir, node_name=node.name
     )
-    update_workspace(user_id, workspace.id, workspace)
+    update_workspace(user_id, workspace_id_str, workspace)
     return frontend_node_info(node)
 
 
@@ -289,6 +292,7 @@ class AnnotationSetCellRequest(BaseModel):
     response_model=WorkspaceNodeInfo,
 )
 async def set_annotation_cell(
+    workspace_id: uuid.UUID,
     node_id: str,
     payload: AnnotationSetCellRequest,
     current_user: dict = Depends(get_current_user),
@@ -308,7 +312,8 @@ async def set_annotation_cell(
       the materialized frame, persist the workspace, and return node metadata.
     """
     user_id = current_user["id"]
-    workspace = require_current_workspace(user_id)
+    workspace_id_str = str(workspace_id)
+    workspace = require_workspace(user_id, workspace_id_str)
     node = workspace.nodes.get(node_id)
     if node is None:
         raise NotFoundError("Source node not found")
@@ -333,7 +338,7 @@ async def set_annotation_cell(
     node.data = stage_dataframe_as_lazy(
         updated, workspace.ws_root_dir, node_name=node.name
     )
-    update_workspace(user_id, workspace.id, workspace)
+    update_workspace(user_id, workspace_id_str, workspace)
     return frontend_node_info(node)
 
 
@@ -353,6 +358,7 @@ class AnnotationSetParentRequest(BaseModel):
     response_model=WorkspaceNodeInfo,
 )
 async def set_annotation_class_parent(
+    workspace_id: uuid.UUID,
     node_id: str,
     payload: AnnotationSetParentRequest,
     current_user: dict = Depends(get_current_user),
@@ -370,7 +376,8 @@ async def set_annotation_class_parent(
     - Persist and return the standard node metadata response.
     """
     user_id = current_user["id"]
-    workspace = require_current_workspace(user_id)
+    workspace_id_str = str(workspace_id)
+    workspace = require_workspace(user_id, workspace_id_str)
     node = workspace.nodes.get(node_id)
     if node is None:
         raise NotFoundError("Class description node not found")
@@ -381,7 +388,7 @@ async def set_annotation_class_parent(
         raise InvalidInputError("A node cannot be its own parent")
     node.parents = [parent]
     workspace.place_node_after_parent(node)
-    update_workspace(user_id, workspace.id, workspace)
+    update_workspace(user_id, workspace_id_str, workspace)
     return frontend_node_info(node)
 
 
@@ -390,6 +397,7 @@ async def set_annotation_class_parent(
     response_model=AnnotationClassDescriptionsPayload,
 )
 async def get_annotation_class_descriptions(
+    workspace_id: uuid.UUID,
     node_id: str,
     class_column: str = "class",
     description_column: str = "description",
@@ -401,7 +409,7 @@ async def get_annotation_class_descriptions(
     - Frontend Annotation view because the class editor needs a compact
       two-column row payload independent of the full workspace table UI.
     """
-    workspace = require_current_workspace(current_user["id"])
+    workspace = require_workspace(current_user["id"], str(workspace_id))
     node = workspace.nodes.get(node_id)
     if node is None:
         raise NotFoundError("Node not found")
@@ -413,6 +421,7 @@ async def get_annotation_class_descriptions(
     response_model=AnnotationClassDescriptionsPayload,
 )
 async def update_annotation_class_descriptions(
+    workspace_id: uuid.UUID,
     node_id: str,
     payload: AnnotationClassDescriptionsPayload,
     current_user: dict = Depends(get_current_user),
@@ -429,7 +438,8 @@ async def update_annotation_class_descriptions(
     - Restage the dataframe as workspace data and save the workspace.
     """
     user_id = current_user["id"]
-    workspace = require_current_workspace(user_id)
+    workspace_id_str = str(workspace_id)
+    workspace = require_workspace(user_id, workspace_id_str)
     node = workspace.nodes.get(node_id)
     if node is None:
         raise NotFoundError("Node not found")
@@ -441,39 +451,12 @@ async def update_annotation_class_descriptions(
     )
     updated = _updated_class_description_frame(existing, payload)
     node.data = stage_dataframe_as_lazy(updated, workspace.ws_root_dir, node_name=node.name)
-    update_workspace(user_id, workspace.id, workspace)
+    update_workspace(user_id, workspace_id_str, workspace)
     return _class_description_payload_from_node(
         node,
         payload.class_column,
         payload.description_column,
     )
-
-
-def _annotation_classes_from_node(
-    node: Node,
-    class_column: str,
-    description_column: str,
-) -> list[AnnotationClassOption]:
-    """Load a class-description node's classes as the AI engine's option list.
-
-    Called by:
-    - ``annotate_ai_preview`` and ``annotate_ai_all`` because the valid label set
-      must be read server-side from the class node (authoritative) rather than
-      trusted from the request. Reuses ``_class_description_payload_from_node`` for
-      identical column validation/serialization, then drops blank and duplicate
-      class names so the prompt lists each choice once — mirroring the frontend's
-      former client-side class de-duplication.
-    """
-    payload = _class_description_payload_from_node(node, class_column, description_column)
-    seen: set[str] = set()
-    classes: list[AnnotationClassOption] = []
-    for row in payload.rows:
-        name = row.class_name.strip()
-        if not name or name in seen:
-            continue
-        seen.add(name)
-        classes.append(AnnotationClassOption(name=name, description=row.description))
-    return classes
 
 
 class AnnotationAiModelsRequest(BaseModel):
@@ -533,11 +516,12 @@ class AnnotationAiPreviewRequest(BaseModel):
 class AnnotationAiPreviewResponse(BaseModel):
     """One predicted class (or null) per previewed row, aligned to page order."""
 
+    session_id: str
     labels: list[str | None] = Field(default_factory=list)
 
 
-class AnnotationAiPreviewStateRequest(BaseModel):
-    """Config identifying which cached preview session to hydrate.
+class AnnotationAiPreviewStateQuery(BaseModel):
+    """Query params identifying which cached preview session to hydrate.
 
     Used by:
     - Frontend AnnotationAiPreviewPanel on mount because the panel's per-row maps
@@ -548,7 +532,6 @@ class AnnotationAiPreviewStateRequest(BaseModel):
       the panel's current provider/model/prompt/classes/knobs before returning them.
     """
 
-    node_id: str
     text_column: str
     class_node_id: str
     class_column: str = "class"
@@ -584,14 +567,12 @@ class AnnotationAiPreviewOverrideRequest(BaseModel):
     Used by:
     - Frontend AnnotationAiPreviewPanel when the user changes a prediction in the
       dropdown, so the choice survives a tab switch and is honoured by
-      detach/annotate-all. Only the row and its new label are needed — the edit
-      targets the node's single active session, so no config has to travel with it.
+      detach/annotate-all. Only the new label is needed in the body because the
+      session node and row index are resource identifiers in the URL.
       A blank/whitespace ``label`` means the user picked "None" and is stored as an
       explicit null override (which still wins over the model's label).
     """
 
-    node_id: str
-    row_index: int
     label: str | None = None
 
 
@@ -599,20 +580,6 @@ class AnnotationAiPreviewOverrideResponse(BaseModel):
     """Whether the edit was applied (False when no active session exists)."""
 
     ok: bool = True
-
-
-class AnnotationAiPreviewClearRequest(BaseModel):
-    """Request to drop a node's cached AI preview session.
-
-    Used by:
-    - Frontend AnnotationAiPreviewPanel's "Close preview" action. Closing the panel
-      is an explicit "I'm done previewing" signal (unlike a tab switch, which only
-      unmounts the panel and must keep the cache so it can rehydrate). Only the node
-      is needed — the store is keyed per user+workspace+node, so the current
-      workspace resolves the rest.
-    """
-
-    node_id: str
 
 
 class AnnotationAiPreviewClearResponse(BaseModel):
@@ -630,7 +597,6 @@ class AnnotationAiAnnotateAllRequest(BaseModel):
       results back in one go, unlike the transient per-page preview.
     """
 
-    node_id: str
     text_column: str
     annotation_column: str
     class_node_id: str
@@ -657,30 +623,14 @@ class AnnotationAiAnnotateAllResponse(BaseModel):
     total_rows: int
 
 
-class AnnotationAiDetachRow(BaseModel):
-    """One previewed row to detach: its absolute source-row index and label.
-
-    Used by:
-    - AnnotationAiDetachRequest as an optional client-supplied override list. The
-      authoritative previewed rows now live in the server-side preview store, so
-      the panel no longer needs to send them; this model is kept for backward
-      compatibility and lets a caller force specific row/label pairs if provided.
-    """
-
-    row_index: int
-    label: str | None = None
-
-
 class AnnotationAiDetachRequest(BaseModel):
     """Request to copy the previewed rows into a new annotated child table.
 
     Used by:
     - Frontend AnnotationAiPreviewPanel's "Detach Previewed Rows" button. The rows
       the user previewed (across every page they viewed) are read from the
-      server-side preview store, so the panel sends only the node + target column.
-      ``rows`` is optional: when omitted the server materialises exactly the stored
-      previewed rows (with their overrides applied); when supplied it takes
-      precedence, preserving the old explicit-list behaviour.
+      server-side preview store, so the node lives in the URL and the panel sends
+      only the target column plus optional operation settings.
     - The same panel's Detach button *gating*: with ``dry_run`` true the endpoint
       only probes the server session and returns how many rows would be detached
       (``node`` is null, nothing is created). The panel calls this on mount so the
@@ -689,9 +639,7 @@ class AnnotationAiDetachRequest(BaseModel):
       confirmation dialog can show the exact count.
     """
 
-    node_id: str
     annotation_column: str
-    rows: list[AnnotationAiDetachRow] | None = None
     new_node_name: str | None = None
     dry_run: bool = False
 
@@ -710,6 +658,7 @@ class AnnotationAiDetachResponse(BaseModel):
 
 @router.post("/annotation/ai/models", response_model=AnnotationAiModelsResponse)
 async def list_annotation_ai_models(
+    workspace_id: uuid.UUID,
     payload: AnnotationAiModelsRequest,
     current_user: dict = Depends(get_current_user),
 ):
@@ -721,9 +670,11 @@ async def list_annotation_ai_models(
       unauthenticated caller cannot use the backend as an open model-listing proxy.
 
     Flow:
+    - Validate the workspace path because the route is workspace-scoped.
     - Delegate to ``core.annotation_ai.list_models`` (native SDK per provider).
     - Translate any provider/SDK failure into a 502 with the provider's message.
     """
+    require_workspace(current_user["id"], str(workspace_id))
     try:
         models = await list_models(payload.provider_id, payload.base_url, payload.api_key)
     except AnnotationAiError as error:
@@ -731,12 +682,16 @@ async def list_annotation_ai_models(
     return AnnotationAiModelsResponse(models=models)
 
 
-@router.post("/annotation/ai/preview", response_model=AnnotationAiPreviewResponse)
+@router.post(
+    "/annotation-ai-preview-sessions",
+    response_model=AnnotationAiPreviewResponse,
+)
 async def annotate_ai_preview(
+    workspace_id: uuid.UUID,
     payload: AnnotationAiPreviewRequest,
     current_user: dict = Depends(get_current_user),
 ):
-    """AI-classify one page of texts, caching results in the preview store.
+    """AI-classify one page of texts, caching results in a preview session.
 
     Used by:
     - Frontend AnnotationAiPreviewPanel because previewing must not mutate the
@@ -755,95 +710,24 @@ async def annotate_ai_preview(
       model labels for the whole page in order; provider errors become a 502.
     """
     user_id = current_user["id"]
-    workspace = require_current_workspace(user_id)
-    node = workspace.nodes.get(payload.node_id)
-    if node is None:
-        raise NotFoundError("Source node not found")
-    schema = dict(node.data.collect_schema().items())
-    if payload.text_column not in schema:
-        raise InvalidInputError(f"Column not found: {payload.text_column}")
-    class_node = workspace.nodes.get(payload.class_node_id)
-    if class_node is None:
-        raise NotFoundError("Class description node not found")
-    classes = _annotation_classes_from_node(
-        class_node, payload.class_column, payload.description_column
+    workspace_id_str = str(workspace_id)
+    workspace = require_workspace(user_id, workspace_id_str)
+    return await preview_annotation_ai_page(
+        user_id=user_id,
+        workspace_id=workspace_id_str,
+        workspace=workspace,
+        payload=payload,
     )
-    if not classes:
-        raise InvalidInputError("No annotation classes defined")
-    page = max(1, payload.page)
-    page_size = max(1, payload.page_size)
-    start_idx = (page - 1) * page_size
-    page_df = cast(
-        pl.DataFrame,
-        node.data.slice(start_idx, page_size)
-        .select(pl.col(payload.text_column).cast(pl.String).fill_null(""))
-        .collect(),
-    )
-    texts = page_df[payload.text_column].to_list()
-    wire = resolve_provider_wire(payload.provider_id, payload.base_url)
-    config = InferenceConfig.from_request(
-        temperature=payload.temperature,
-        reasoning_enabled=payload.reasoning_enabled,
-        reasoning_effort=payload.reasoning_effort,
-    )
-    # Key the cache by everything that changes a prediction. Syncing resets the
-    # session if that signature changed since the last preview, so stale labels for
-    # a different provider/model/prompt are never reused.
-    signature = signature_of(
-        text_column=payload.text_column,
-        class_node_id=payload.class_node_id,
-        class_column=payload.class_column,
-        description_column=payload.description_column,
-        provider_id=payload.provider_id,
-        base_url=payload.base_url,
-        model=payload.model,
-        instruction=payload.instruction,
-        temperature=config.temperature,
-        reasoning_enabled=config.reasoning_enabled,
-        reasoning_effort=config.reasoning_effort,
-    )
-    preview_store.sync(
-        user_id,
-        workspace.id,
-        payload.node_id,
-        signature=signature,
-        annotation_column=payload.annotation_column,
-    )
-    page_indices = list(range(start_idx, start_idx + len(texts)))
-    cached = preview_store.computed_indices(user_id, workspace.id, payload.node_id, page_indices)
-    # Only the page rows we have not classified before hit the provider.
-    missing = [(index, text) for index, text in zip(page_indices, texts) if index not in cached]
-    if missing:
-        try:
-            fresh = await annotate_batch(
-                wire,
-                payload.model,
-                payload.api_key,
-                payload.instruction,
-                classes,
-                [text for _, text in missing],
-                config,
-            )
-        except AnnotationAiError as error:
-            raise BadGatewayError(str(error)) from error
-        preview_store.put_ai_labels(
-            user_id,
-            workspace.id,
-            payload.node_id,
-            {index: label for (index, _), label in zip(missing, fresh)},
-        )
-    labels = preview_store.ai_labels_for_page(
-        user_id, workspace.id, payload.node_id, page_indices
-    )
-    return AnnotationAiPreviewResponse(labels=labels)
 
 
-@router.post(
-    "/annotation/ai/preview/state",
+@router.get(
+    "/annotation-ai-preview-sessions/{node_id}",
     response_model=AnnotationAiPreviewStateResponse,
 )
 async def annotate_ai_preview_state(
-    payload: AnnotationAiPreviewStateRequest,
+    workspace_id: uuid.UUID,
+    node_id: str,
+    query: Annotated[AnnotationAiPreviewStateQuery, Depends()],
     current_user: dict = Depends(get_current_user),
 ):
     """Return the cached preview rows for a node so the panel can rehydrate.
@@ -861,29 +745,32 @@ async def annotate_ai_preview_state(
       stale labels.
     """
     user_id = current_user["id"]
-    workspace = require_current_workspace(user_id)
-    node = workspace.nodes.get(payload.node_id)
+    workspace_id_str = str(workspace_id)
+    workspace = require_workspace(user_id, workspace_id_str)
+    node = workspace.nodes.get(node_id)
     if node is None:
         raise NotFoundError("Source node not found")
     config = InferenceConfig.from_request(
-        temperature=payload.temperature,
-        reasoning_enabled=payload.reasoning_enabled,
-        reasoning_effort=payload.reasoning_effort,
+        temperature=query.temperature,
+        reasoning_enabled=query.reasoning_enabled,
+        reasoning_effort=query.reasoning_effort,
     )
     signature = signature_of(
-        text_column=payload.text_column,
-        class_node_id=payload.class_node_id,
-        class_column=payload.class_column,
-        description_column=payload.description_column,
-        provider_id=payload.provider_id,
-        base_url=payload.base_url,
-        model=payload.model,
-        instruction=payload.instruction,
+        text_column=query.text_column,
+        class_node_id=query.class_node_id,
+        class_column=query.class_column,
+        description_column=query.description_column,
+        provider_id=query.provider_id,
+        base_url=query.base_url,
+        model=query.model,
+        instruction=query.instruction,
         temperature=config.temperature,
         reasoning_enabled=config.reasoning_enabled,
         reasoning_effort=config.reasoning_effort,
     )
-    rows = preview_store.state(user_id, workspace.id, payload.node_id, signature=signature)
+    rows = preview_store.state(
+        user_id, workspace_id_str, node_id, signature=signature
+    )
     return AnnotationAiPreviewStateResponse(
         rows=[
             AnnotationAiPreviewRowState(
@@ -898,11 +785,14 @@ async def annotate_ai_preview_state(
     )
 
 
-@router.put(
-    "/annotation/ai/preview/override",
+@router.patch(
+    "/annotation-ai-preview-sessions/{node_id}/rows/{row_index}",
     response_model=AnnotationAiPreviewOverrideResponse,
 )
 async def annotate_ai_preview_override(
+    workspace_id: uuid.UUID,
+    node_id: str,
+    row_index: int,
     payload: AnnotationAiPreviewOverrideRequest,
     current_user: dict = Depends(get_current_user),
 ):
@@ -910,7 +800,8 @@ async def annotate_ai_preview_override(
 
     Used by:
     - Frontend AnnotationAiPreviewPanel when the user changes a prediction in the
-      dropdown, so the edit survives a tab switch (it returns via ``preview/state``)
+      dropdown, so the edit survives a tab switch (it returns via the session
+      resource)
       and is honoured by detach/annotate-all. A blank label is stored as an explicit
       null override (the user chose "None"), which still wins over the model label.
 
@@ -920,23 +811,25 @@ async def annotate_ai_preview_override(
       session (the edit is stale — an override can only follow a preview).
     """
     user_id = current_user["id"]
-    workspace = require_current_workspace(user_id)
-    node = workspace.nodes.get(payload.node_id)
+    workspace_id_str = str(workspace_id)
+    workspace = require_workspace(user_id, workspace_id_str)
+    node = workspace.nodes.get(node_id)
     if node is None:
         raise NotFoundError("Source node not found")
     label = (payload.label or "").strip() or None
     applied = preview_store.set_override(
-        user_id, workspace.id, payload.node_id, payload.row_index, label
+        user_id, workspace_id_str, node_id, row_index, label
     )
     return AnnotationAiPreviewOverrideResponse(ok=applied)
 
 
-@router.post(
-    "/annotation/ai/preview/clear",
+@router.delete(
+    "/annotation-ai-preview-sessions/{node_id}",
     response_model=AnnotationAiPreviewClearResponse,
 )
 async def annotate_ai_preview_clear(
-    payload: AnnotationAiPreviewClearRequest,
+    workspace_id: uuid.UUID,
+    node_id: str,
     current_user: dict = Depends(get_current_user),
 ):
     """Discard the node's cached AI preview session.
@@ -949,22 +842,25 @@ async def annotate_ai_preview_clear(
       detach/annotate-all counts so a later preview starts clean.
 
     Flow:
-    - Resolve the current workspace (the store is keyed per user+workspace+node).
+    - Resolve the path workspace (the store is keyed per user+workspace+node).
     - Clear the node's session unconditionally. Clearing is idempotent, so a missing
       session (nothing previewed, or already cleared) is a successful no-op; the node
       itself is not required to still exist, which is why no 404 is raised here.
     """
     user_id = current_user["id"]
-    workspace = require_current_workspace(user_id)
-    preview_store.clear(user_id, workspace.id, payload.node_id)
+    workspace_id_str = str(workspace_id)
+    require_workspace(user_id, workspace_id_str)
+    preview_store.clear(user_id, workspace_id_str, node_id)
     return AnnotationAiPreviewClearResponse(ok=True)
 
 
 @router.post(
-    "/annotation/ai/annotate-all",
+    "/annotation-ai-preview-sessions/{node_id}/annotations",
     response_model=AnnotationAiAnnotateAllResponse,
 )
 async def annotate_ai_all(
+    workspace_id: uuid.UUID,
+    node_id: str,
     payload: AnnotationAiAnnotateAllRequest,
     current_user: dict = Depends(get_current_user),
 ):
@@ -989,101 +885,24 @@ async def annotate_ai_all(
       is written.
     """
     user_id = current_user["id"]
-    workspace = require_current_workspace(user_id)
-    node = workspace.nodes.get(payload.node_id)
-    if node is None:
-        raise NotFoundError("Source node not found")
-    existing = cast(pl.DataFrame, node.data.collect())
-    schema = dict(existing.schema)
-    if payload.text_column not in schema:
-        raise InvalidInputError(f"Column not found: {payload.text_column}")
-    annotation_column = payload.annotation_column.strip()
-    if not annotation_column:
-        raise InvalidInputError("Annotation column name is required")
-    if annotation_column not in schema:
-        raise InvalidInputError(f"Column not found: {annotation_column}")
-    if schema[annotation_column] != pl.String:
-        raise InvalidInputError(f"Annotation column must be text: {annotation_column}")
-    class_node = workspace.nodes.get(payload.class_node_id)
-    if class_node is None:
-        raise NotFoundError("Class description node not found")
-    classes = _annotation_classes_from_node(
-        class_node, payload.class_column, payload.description_column
-    )
-    if not classes:
-        raise InvalidInputError("No annotation classes defined")
-    texts = (
-        existing.select(pl.col(payload.text_column).cast(pl.String).fill_null(""))
-        .to_series()
-        .to_list()
-    )
-    wire = resolve_provider_wire(payload.provider_id, payload.base_url)
-    batch_size = payload.batch_size or DEFAULT_BATCH_SIZE
-    config = InferenceConfig.from_request(
-        temperature=payload.temperature,
-        reasoning_enabled=payload.reasoning_enabled,
-        reasoning_effort=payload.reasoning_effort,
-    )
-    # Reuse cached preview labels only when they belong to this exact config; a
-    # signature mismatch means the panel previewed with different settings, so those
-    # labels must not leak into a run the user configured differently.
-    signature = signature_of(
-        text_column=payload.text_column,
-        class_node_id=payload.class_node_id,
-        class_column=payload.class_column,
-        description_column=payload.description_column,
-        provider_id=payload.provider_id,
-        base_url=payload.base_url,
-        model=payload.model,
-        instruction=payload.instruction,
-        temperature=config.temperature,
-        reasoning_enabled=config.reasoning_enabled,
-        reasoning_effort=config.reasoning_effort,
-    )
-    cached = preview_store.effective_rows(
-        user_id, workspace.id, payload.node_id, signature=signature
-    )
-    # Send only the rows we have no cached label for; assemble the full column by
-    # index afterwards so cached and freshly-computed labels land in row order.
-    missing = [(index, text) for index, text in enumerate(texts) if index not in cached]
-    try:
-        fresh = await annotate_all(
-            wire,
-            payload.model,
-            payload.api_key,
-            payload.instruction,
-            classes,
-            [text for _, text in missing],
-            batch_size=batch_size,
-            config=config,
-        )
-    except AnnotationAiError as error:
-        raise BadGatewayError(str(error)) from error
-    fresh_by_index = {index: label for (index, _), label in zip(missing, fresh)}
-    labels = [
-        cached[index] if index in cached else fresh_by_index.get(index)
-        for index in range(len(texts))
-    ]
-    updated = existing.with_columns(
-        pl.Series(annotation_column, labels, dtype=pl.String)
-    )
-    node.data = stage_dataframe_as_lazy(updated, workspace.ws_root_dir, node_name=node.name)
-    update_workspace(user_id, workspace.id, workspace)
-    # The predictions now live in the column, so the transient cache is redundant.
-    preview_store.clear(user_id, workspace.id, payload.node_id)
-    labeled_rows = sum(1 for label in labels if label)
-    return AnnotationAiAnnotateAllResponse(
-        node=WorkspaceNodeInfo.model_validate(frontend_node_info(node)),
-        labeled_rows=labeled_rows,
-        total_rows=existing.height,
+    workspace_id_str = str(workspace_id)
+    workspace = require_workspace(user_id, workspace_id_str)
+    return await annotate_all_annotation_ai_rows(
+        user_id=user_id,
+        workspace_id=workspace_id_str,
+        workspace=workspace,
+        node_id=node_id,
+        payload=payload,
     )
 
 
 @router.post(
-    "/annotation/ai/detach-previewed",
+    "/annotation-ai-preview-sessions/{node_id}/detachments",
     response_model=AnnotationAiDetachResponse,
 )
 async def detach_ai_previewed_rows(
+    workspace_id: uuid.UUID,
+    node_id: str,
     payload: AnnotationAiDetachRequest,
     current_user: dict = Depends(get_current_user),
 ):
@@ -1098,9 +917,8 @@ async def detach_ai_previewed_rows(
 
     Flow:
     - Resolve the workspace + source node (404).
-    - Build the row->label map from the node's active preview session (every
-      previewed row across all viewed pages, override winning over the model label);
-      fall back to any explicit ``rows`` the client sent.
+    - Build the row->label map from the node's active preview session: every
+      previewed row across all viewed pages, with overrides winning over model labels.
     - When ``dry_run`` is set, return that map's size immediately (``node=None``,
       nothing created). The panel calls this on mount to gate/label its Detach
       button from the authoritative server session, so a tab switch (which wipes the
@@ -1108,7 +926,7 @@ async def detach_ai_previewed_rows(
     - Otherwise require a non-blank annotation column (400) and at least one row
       (400) — this is what fixes "detach only grabbed one page", since the source of
       truth is now the whole server session rather than the panel's current page.
-    - Collect the source once; validate every ``row_index`` is in range (400).
+    - Collect the source once; validate every stored row index is in range (400).
     - Filter the source down to those indices (original order preserved), overwrite
       the annotation column with the aligned labels (blank/whitespace -> null), and
       stage the subset as a lazy frame.
@@ -1116,60 +934,12 @@ async def detach_ai_previewed_rows(
       lineage shows in the graph) and return the new node metadata + row count.
     """
     user_id = current_user["id"]
-    workspace = require_current_workspace(user_id)
-    node = workspace.nodes.get(payload.node_id)
-    if node is None:
-        raise NotFoundError("Source node not found")
-    # Prefer an explicit client list when provided (back-compat / forced rows);
-    # otherwise materialise the whole active preview session so every viewed page is
-    # detached, not just the page currently on screen.
-    index_to_label: dict[int, str | None] = {}
-    if payload.rows:
-        for row in payload.rows:
-            index_to_label[row.row_index] = (row.label or "").strip() or None
-    else:
-        index_to_label = dict(
-            preview_store.effective_rows(user_id, workspace.id, payload.node_id)
-        )
-    # Dry-run probe: report how many rows would detach without materialising a child.
-    # Returns 0 (not a 400) for an empty session so the panel can simply disable its
-    # button; this is the source of truth the panel gates on across tab switches.
-    if payload.dry_run:
-        return AnnotationAiDetachResponse(node=None, detached_rows=len(index_to_label))
-    annotation_column = payload.annotation_column.strip()
-    if not annotation_column:
-        raise InvalidInputError("Annotation column name is required")
-    existing = cast(pl.DataFrame, node.data.collect())
-    total_rows = existing.height
-    if not index_to_label:
-        raise InvalidInputError("No previewed rows to detach")
-    for index in index_to_label:
-        if index < 0 or index >= total_rows:
-            raise InvalidInputError(f"Row index out of range: {index}")
-    sorted_indices = sorted(index_to_label)
-    labels_in_order = [index_to_label[index] for index in sorted_indices]
-    # `filter` preserves the source's ascending order, so labels sorted by index
-    # line up with the selected rows without a join.
-    selected = (
-        existing.with_row_index("__detach_row_index__")
-        .filter(pl.col("__detach_row_index__").is_in(sorted_indices))
-        .drop("__detach_row_index__")
-        .with_columns(pl.Series(annotation_column, labels_in_order, dtype=pl.String))
-    )
-    new_node_name = (payload.new_node_name or "").strip() or f"{node.name}_previewed"
-    lazy_data = stage_dataframe_as_lazy(
-        selected, workspace.ws_root_dir, node_name=new_node_name
-    )
-    new_node = _create_and_persist_child_node(
-        workspace=workspace,
-        data=lazy_data,
-        name=new_node_name,
-        operation=f"annotation_detach_previewed({node.name})",
-        parents=[node],
+    workspace_id_str = str(workspace_id)
+    workspace = require_workspace(user_id, workspace_id_str)
+    return detach_previewed_annotation_ai_rows(
         user_id=user_id,
-        workspace_id=workspace.id,
-    )
-    return AnnotationAiDetachResponse(
-        node=WorkspaceNodeInfo.model_validate(frontend_node_info(new_node)),
-        detached_rows=selected.height,
+        workspace_id=workspace_id_str,
+        workspace=workspace,
+        node_id=node_id,
+        payload=payload,
     )

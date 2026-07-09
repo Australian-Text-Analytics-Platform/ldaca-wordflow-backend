@@ -600,16 +600,10 @@ def run_concordance_detach_task(
                 for col_name in metadata_column_names:
                     if col_name in mat_df.columns and col_name not in keep_cols:
                         keep_cols.append(col_name)
-            # Always keep CORE_CONCORDANCE_COLUMNS + freq columns when the
-            # caller didn't send an explicit selection (backwards-compat).
-            # Otherwise honor exactly the generated columns the user ticked —
-            # deselected generated columns are dropped from the output.
+            # Honor exactly the generated columns the user selected.
+            # Deselected generated columns are dropped from the output.
             all_generated = set(MATERIALIZED_CONCORDANCE_COLUMNS)
-            wanted_generated = (
-                all_generated
-                if selected_generated_columns is None
-                else set(selected_generated_columns)
-            )
+            wanted_generated = set(selected_generated_columns or [])
             for col in mat_df.columns:
                 if col in keep_cols:
                     continue
@@ -685,16 +679,10 @@ def run_concordance_detach_task(
             extra_columns_dtypes=extra_columns_dtypes,
         )
 
-        # Decide which generated columns the user wants. None == backwards-
-        # compatible "keep all core + freq"; otherwise honor the explicit
-        # selection so deselected generated columns are dropped (and, for the
-        # frequency columns, never even computed).
+        # Decide which generated columns the user wants. Deselected generated
+        # columns are dropped and, for frequency columns, never even computed.
         all_generated = set(MATERIALIZED_CONCORDANCE_COLUMNS)
-        wanted_generated = (
-            all_generated
-            if selected_generated_columns is None
-            else set(selected_generated_columns)
-        )
+        wanted_generated = set(selected_generated_columns or [])
         need_freq = (
             CONC_L1_FREQ_COLUMN in wanted_generated
             or CONC_R1_FREQ_COLUMN in wanted_generated

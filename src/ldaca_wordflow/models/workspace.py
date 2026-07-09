@@ -71,6 +71,21 @@ class CurrentWorkspaceResponse(BaseModel):
     id: str | None = None
 
 
+class CurrentWorkspaceUpdateRequest(BaseModel):
+    """Request body for updating the user's selected workspace pointer.
+
+    Used by:
+    - ``PUT /users/me/current-workspace`` because current workspace is UI
+      session state owned by the authenticated user, not an implicit target
+      selector for workspace-scoped data APIs.
+
+    Flow: accept a workspace id to select that workspace, or ``null`` to clear
+        the user's current workspace pointer.
+    """
+
+    workspace_id: str | None = None
+
+
 class SetCurrentWorkspaceResponse(BaseModel):
     """Response schema returned by API routes and consumed by generated clients for set current workspace response.
 
@@ -130,6 +145,34 @@ class WorkspaceNodeInfo(BaseModel):
     can_redo: bool | None = None
     dtype_normalization: list[DtypeNormalizationChange] | None = None
     tokenizer_models: dict[str, str] = Field(default_factory=dict)
+
+
+class WorkspaceNodeInfoRequest(BaseModel):
+    """Request schema for fetching node-info metadata for one or many nodes.
+
+    Used by:
+    - the workspace node-info collection route and generated frontend clients
+      because graph responses carry only lightweight topology while schema,
+      columns, shape, and tokenizer metadata are fetched on demand.
+
+    Flow: validate the requested node id list, preserving caller order so the
+        response can line up with the submitted ids.
+    """
+
+    nodes: list[str] = Field(default_factory=list)
+
+
+class WorkspaceNodeInfoResponse(BaseModel):
+    """Response schema for collection-level workspace node-info metadata.
+
+    Used by:
+    - the workspace node-info collection route and generated frontend clients
+      because single-node and batch metadata reads share one typed contract.
+
+    Flow: serialize the requested node-info payloads in request order.
+    """
+
+    nodes: list[WorkspaceNodeInfo]
 
 
 class NodeDocumentColumnUpdateRequest(BaseModel):
@@ -224,6 +267,33 @@ class WorkspaceGraphEdge(BaseModel):
     label: str | None = None
 
 
+class WorkspaceGraphNode(BaseModel):
+    """Lightweight node summary used by workspace graph/topology responses.
+
+    Used by:
+    - workspace graph routes and generated frontend graph/list clients because
+      graph rendering needs node identity and display/action state, while full
+      schema metadata belongs to ``WorkspaceNodeInfo`` through the collection
+      node-info route.
+
+    Flow: serialize only graph-facing fields so the graph endpoint does not
+        collect or duplicate per-node schema, columns, shape, tokenizer, or
+        dtype-normalization metadata.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    id: str
+    name: str
+    operation: str | None = None
+    parent_ids: list[str] = Field(default_factory=list)
+    child_ids: list[str] = Field(default_factory=list)
+    document: str | None = None
+    color: str | None = None
+    can_undo: bool | None = None
+    can_redo: bool | None = None
+
+
 class WorkspaceGraphResponse(BaseModel):
     """Response schema returned by API routes and consumed by generated clients for workspace graph response.
 
@@ -237,7 +307,7 @@ class WorkspaceGraphResponse(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    nodes: list[WorkspaceNodeInfo]
+    nodes: list[WorkspaceGraphNode]
     edges: list[WorkspaceGraphEdge]
 
 
@@ -255,20 +325,6 @@ class WorkspaceNodeReorderRequest(BaseModel):
     ordered_ids: list[str]
 
 
-class WorkspaceNodesResponse(BaseModel):
-    """Response schema returned by API routes and consumed by generated clients for workspace nodes response.
-
-    Used by:
-    - backend API routes, backend request/response models because they need a stable JSON
-      contract shared by route handlers, generated clients, and tests.
-
-    Flow: resolve the user workspace directory, refresh cached path indexes, coordinate task
-        cleanup, and return stable workspace metadata to callers.
-    """
-
-    nodes: list[WorkspaceNodeInfo]
-
-
 class WorkspaceCreateRequest(BaseModel):
     """Request schema used by API routes and generated clients for workspace create request.
 
@@ -281,6 +337,21 @@ class WorkspaceCreateRequest(BaseModel):
     """
 
     name: str
+    description: str | None = None
+
+
+class WorkspaceUpdateRequest(BaseModel):
+    """Request body for updating explicit workspace metadata.
+
+    Used by:
+    - ``PATCH /workspaces/{workspace_id}`` because callers should name the
+      target workspace in the URL and send mutable metadata in the body.
+
+    Flow: accept partial name/description updates so route handlers can apply
+        only the fields the caller intentionally supplied.
+    """
+
+    name: str | None = None
     description: str | None = None
 
 

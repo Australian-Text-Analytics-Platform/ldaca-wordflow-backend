@@ -118,9 +118,9 @@ def run_quotation_analysis_task(
 
         import asyncio
 
-        from ..api.workspaces.analyses.quotation import (
+        from ..api.workspaces.analyses.quotation_core import (
             DEFAULT_CONTEXT_LENGTH,
-            _compute_on_demand_page,
+            compute_remote_on_demand_page,
         )
         from ..models import QuotationEngineConfig
         from .worker_input_snapshots import load_snapshot_node
@@ -130,7 +130,7 @@ def run_quotation_analysis_task(
         engine_payload = request_payload.get("engine") or {}
         engine = QuotationEngineConfig.model_validate(engine_payload)
         page_payload = asyncio.run(
-            _compute_on_demand_page(
+            compute_remote_on_demand_page(
                 node,
                 str(request_payload["column"]),
                 engine,
@@ -306,17 +306,11 @@ def run_quotation_detach_task(
             # column plus QUOTE_extraction (so re-ticking is cheap), but the
             # detached node should respect the user's column picks: keep only
             # the generated columns they left ticked, opt-in QUOTE_extraction,
-            # and pass through the document/metadata columns. A `None`
-            # selection preserves the old "keep all generated" behavior for
-            # legacy callers.
+            # and pass through the document/metadata columns.
             mat_lazy = pl.scan_parquet(materialized_path)
             mat_columns = list(mat_lazy.collect_schema().names())
             generated_set = set(QUOTE_COLUMN_NAMES)
-            wanted_generated = (
-                generated_set
-                if selected_generated_columns is None
-                else set(selected_generated_columns)
-            )
+            wanted_generated = set(selected_generated_columns or [])
             keep_cols: list[str] = []
             for col in mat_columns:
                 if col in generated_set:
@@ -386,14 +380,9 @@ def run_quotation_detach_task(
 
         # Final projection honoring the user's column choice. Generated quote
         # columns are kept only when ticked; QUOTE_extraction stays opt-in; the
-        # document column and metadata columns pass through. A `None` selection
-        # keeps every generated column (legacy "keep all" behavior).
+        # document column and metadata columns pass through.
         generated_set = set(QUOTE_COLUMN_NAMES)
-        wanted_generated = (
-            generated_set
-            if selected_generated_columns is None
-            else set(selected_generated_columns)
-        )
+        wanted_generated = set(selected_generated_columns or [])
         keep_columns: list[str] = []
         for col in output_columns:
             if col in generated_set:

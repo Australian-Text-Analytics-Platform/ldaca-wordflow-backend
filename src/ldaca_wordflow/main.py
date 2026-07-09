@@ -13,13 +13,16 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
 from contextlib import asynccontextmanager
 from typing import IO, Any, cast
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
+from pydantic import BaseModel
 
 # Import API routers
 from .api.admin import router as admin_router
@@ -28,17 +31,31 @@ from .api.config import router as config_router
 from .api.files import router as files_router
 from .api.preferences import router as preferences_router
 from .api.tasks import router as tasks_router
+from .api.users import router as users_router
 from .api.workspaces import router as workspaces_router
 
 # Ensure DocWorkspace API conversion utilities are available at startup.
 from .core import docworkspace_data_types  # noqa: F401
+from .core.api_models import ErrorResponse
 from .core.auth_service import cleanup_expired_sessions
+from .core.exceptions import AppError
 from .db import init_db
 from .settings import reload_settings, settings
 
 __version__ = "3.0.0"
 
 logger = logging.getLogger(__name__)
+
+COMMON_APP_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
+    400: {"model": ErrorResponse, "description": "Bad request"},
+    401: {"model": ErrorResponse, "description": "Authentication required"},
+    403: {"model": ErrorResponse, "description": "Access denied"},
+    404: {"model": ErrorResponse, "description": "Resource not found"},
+    409: {"model": ErrorResponse, "description": "Resource conflict"},
+    410: {"model": ErrorResponse, "description": "Resource no longer available"},
+    500: {"model": ErrorResponse, "description": "Internal service error"},
+    502: {"model": ErrorResponse, "description": "Upstream service error"},
+}
 
 
 def generate_operation_id(route: APIRoute) -> str:
@@ -156,7 +173,75 @@ app = FastAPI(
     docs_url="/api/docs",
     redoc_url="/api/redoc",
     openapi_url="/api/openapi.json",
+    responses=COMMON_APP_ERROR_RESPONSES,
 )
+
+
+def _error_code_for_app_error(exc: AppError) -> str:
+    """Derive a stable client-facing code from an ``AppError`` subclass.
+
+    Called by:
+    - ``app_error_handler`` because application errors should share one JSON
+      envelope without each route hard-coding error strings.
+
+    Flow: convert the semantic exception class name to snake_case, remove the
+        generic ``_error`` suffix, and keep the base ``AppError`` distinct as
+        ``app_error``.
+    """
+
+    name = exc.__class__.__name__
+    snake = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", name)
+    snake = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", snake).lower()
+    if snake.endswith("_error"):
+        snake = snake.removesuffix("_error")
+    return snake or "app_error"
+
+
+def _app_error_payload(exc: AppError) -> ErrorResponse:
+    """Convert an ``AppError`` into the public error response model.
+
+    Called by:
+    - ``app_error_handler`` so FastAPI responses and OpenAPI schemas can share
+      the same error envelope.
+
+    Flow: use string details as the message, use dict details to preserve
+        structured fields, and fall back to the semantic error code when no
+        detail was supplied.
+    """
+
+    code = _error_code_for_app_error(exc)
+    detail = exc.detail
+    if isinstance(detail, dict):
+        message_value = detail.get("message") or detail.get("detail") or code
+        details = {k: v for k, v in detail.items() if k not in {"message", "detail"}}
+        return ErrorResponse(
+            error=code,
+            message=str(message_value),
+            details=details or None,
+        )
+    message = str(detail) if detail is not None else code
+    return ErrorResponse(error=code, message=message, details=None)
+
+
+@app.exception_handler(AppError)
+async def app_error_handler(_request: Request, exc: AppError) -> JSONResponse:
+    """Serialize semantic application exceptions through ``ErrorResponse``.
+
+    Used by:
+    - FastAPI's exception dispatch because routes raise ``AppError``
+      subclasses for domain failures and clients need one predictable envelope.
+
+    Flow: build the response model, preserve the exception's status code and
+        headers, and return JSON so route handlers do not need local
+        ``HTTPException``-style response shaping.
+    """
+
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=_app_error_payload(exc).model_dump(),
+        headers=exc.headers,
+    )
+
 
 # Setup request logging (before CORS so it captures everything)
 from ._middleware import RequestLoggingMiddleware
@@ -172,13 +257,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(auth_router, prefix="/api", tags=["authentication"])
-app.include_router(config_router, prefix="/api", tags=["configuration"])
-app.include_router(files_router, prefix="/api", tags=["file_management"])
-app.include_router(preferences_router, prefix="/api", tags=["preferences"])
-app.include_router(tasks_router, prefix="/api", tags=["task_streaming"])
-app.include_router(workspaces_router, prefix="/api", tags=["workspace_management"])
-app.include_router(admin_router, prefix="/api", tags=["administration"])
+app.include_router(auth_router, prefix="/api")
+app.include_router(config_router, prefix="/api")
+app.include_router(files_router, prefix="/api")
+app.include_router(preferences_router, prefix="/api")
+app.include_router(tasks_router, prefix="/api")
+app.include_router(users_router, prefix="/api")
+app.include_router(workspaces_router, prefix="/api")
+app.include_router(admin_router, prefix="/api")
 
 
 # =============================================================================
@@ -186,7 +272,22 @@ app.include_router(admin_router, prefix="/api", tags=["administration"])
 # =============================================================================
 
 
-@app.get("/api")
+class RootResponse(BaseModel):
+    """API root/index response for generated clients and docs.
+
+    Used by:
+    - ``root`` because the public API entrypoint returns stable service
+      metadata while keeping the nested endpoint catalogue flexible.
+    """
+
+    message: str
+    version: str
+    description: str
+    features: dict[str, str]
+    endpoints: dict[str, Any]
+
+
+@app.get("/api", response_model=RootResponse)
 async def root():
     """Return API feature/index metadata.
 
@@ -221,6 +322,7 @@ async def root():
                 "logout": "/api/auth/logout",
                 "status": "/api/auth/status",
             },
+            "runtime_config": "/api/runtime-config",
             "files": {
                 "list": "/api/files/",
                 "upload": "/api/files/upload",
@@ -231,16 +333,21 @@ async def root():
             },
             "workspaces": {
                 "create": "/api/workspaces/",
-                "current": "/api/workspaces/current",
-                "info": "/api/workspaces/info",
-                "delete": "/api/workspaces/delete",
-                "nodes": "/api/workspaces/nodes",
-                "node_data": "/api/workspaces/nodes/{node_id}/data",
-                "save": "/api/workspaces/save",
-                "description": "/api/workspaces/description",
-                "unload": "/api/workspaces/unload",
+                "current": "/api/users/me/current-workspace",
+                "info": "/api/workspaces/{workspace_id}",
+                "delete": "/api/workspaces/{workspace_id}",
+                "nodes": "/api/workspaces/{workspace_id}/nodes",
+                "node_data": "/api/workspaces/{workspace_id}/nodes/{node_id}/data",
+                "save": "/api/workspaces/{workspace_id}/save",
+                "download": "/api/workspaces/{workspace_id}/download",
+                "download_artifact": "/api/workspaces/{workspace_id}/download/tasks/{task_id}/artifact",
+                "unload": "/api/workspaces/{workspace_id}/unload",
             },
-            "admin": {"users": "/api/admin/users", "cleanup": "/api/admin/cleanup"},
+            "admin": {
+                "users": "/api/admin/users",
+                "cleanup": "/api/admin/cleanup",
+                "config": "/api/admin/config",
+            },
         },
     }
 

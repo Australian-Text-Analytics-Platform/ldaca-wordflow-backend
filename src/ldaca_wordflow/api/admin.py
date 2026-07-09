@@ -10,15 +10,19 @@ Flow:
 """
 
 import logging
+import os
 from datetime import datetime
+from pathlib import Path
 
 from fastapi import APIRouter, Depends
+from pydantic import BaseModel
 
+from .config import AdminConfigResponse, AdminConfigUpdate, build_admin_config_response
+from .. import db as _db
 from ..core.auth import get_current_user
 from ..core.auth_service import _utc_now_naive, cleanup_expired_sessions
-from ..settings import settings
 from ..core.exceptions import AccessDeniedError
-from .. import db as _db
+from ..settings import get_settings, reload_settings
 
 logger = logging.getLogger(__name__)
 
@@ -47,11 +51,12 @@ def _require_admin(current_user: dict) -> None:
     Called by:
     - Local helpers, route handlers, or service methods in this module because they need this unit's "Authorize admin routes" behavior.
     """
-    if not settings.multi_user:
+    current_settings = get_settings()
+    if not current_settings.multi_user:
         return
 
     current_email = str(current_user.get("email") or "").strip().lower()
-    admin_allowlist = settings.get_admin_emails()
+    admin_allowlist = current_settings.get_admin_emails()
 
     if current_email and current_email in admin_allowlist:
         return
@@ -59,7 +64,38 @@ def _require_admin(current_user: dict) -> None:
     raise AccessDeniedError("Admin access required")
 
 
-@router.get("/users")
+class AdminUserResponse(BaseModel):
+    """Admin-visible user summary with active session count.
+
+    Used by:
+    - ``list_users`` because the admin user table returns DB-backed user rows
+      plus a computed active-session count.
+    """
+
+    id: str
+    email: str
+    name: str | None
+    created_at: datetime | None
+    last_login: datetime | None
+    active_sessions: int
+
+
+class AdminUsersResponse(BaseModel):
+    """Response schema for the admin user list route."""
+
+    users: list[AdminUserResponse]
+    total: int
+    requested_by: str
+
+
+class AdminCleanupResponse(BaseModel):
+    """Response schema for the admin session-cleanup route."""
+
+    message: str
+    performed_by: str
+
+
+@router.get("/users", response_model=AdminUsersResponse)
 async def list_users(current_user: dict = Depends(get_current_user)):
     """List users with active-session counts.
 
@@ -125,7 +161,7 @@ async def list_users(current_user: dict = Depends(get_current_user)):
         }
 
 
-@router.get("/cleanup")
+@router.get("/cleanup", response_model=AdminCleanupResponse)
 async def admin_cleanup(current_user: dict = Depends(get_current_user)):
     """Trigger cleanup of expired session rows.
 
@@ -150,3 +186,28 @@ async def admin_cleanup(current_user: dict = Depends(get_current_user)):
         "message": "Expired sessions cleaned up successfully",
         "performed_by": current_user["email"],
     }
+
+
+@router.patch("/config", response_model=AdminConfigResponse)
+async def update_admin_config(
+    config: AdminConfigUpdate, current_user: dict = Depends(get_current_user)
+):
+    """Update process-local runtime configuration.
+
+    Used by:
+    - frontend working-directory settings because changing the data root affects
+      file/workspace state and must stay behind the admin boundary.
+
+    Flow:
+    - Authenticate and authorize the caller through the shared admin allowlist.
+    - Store the requested data root in the process environment.
+    - Reload the settings singleton so existing import sites observe the new
+      process-local value, then return the effective admin config snapshot.
+    """
+    _require_admin(current_user)
+
+    new_path = Path(config.data_root)
+    logger.info("Admin config update by %s: data_root=%s", current_user["email"], new_path)
+    os.environ["DATA_ROOT"] = str(new_path)
+    reload_settings()
+    return build_admin_config_response()

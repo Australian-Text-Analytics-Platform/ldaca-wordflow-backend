@@ -2,9 +2,8 @@
 
 Includes:
     - POST /workspaces/{workspace_id}/concordance
-    - GET  /workspaces/{workspace_id}/concordance/tasks/{task_id}/result
-    - POST /workspaces/{workspace_id}/concordance/tasks/{task_id}/result
-    - POST /workspaces/{workspace_id}/nodes/{node_id}/concordance/detach
+    - shared GET/POST analysis-task result routes
+    - analysis-task detach, materialize, and dispersion helpers
 
 Used by:
 - FastAPI workspace analysis routers, frontend analysis features, and backend tests because they need this unit's "Concordance analysis endpoints" behavior.
@@ -20,21 +19,18 @@ from __future__ import annotations
 
 import logging
 from typing import Any, Optional
-from uuid import uuid4
+from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends
+from pydantic import BaseModel, ConfigDict
 
-from ....analysis.implementations.concordance import (
-    ConcordanceRequest as AnalysisConcordanceRequest,
-)
 from ....analysis.manager import get_task_manager
 from ....analysis.models import AnalysisStatus, AnalysisTask
 from ....core.auth import get_current_user
 from ....core.exceptions import (
+    AccessDeniedError,
     InternalServiceError,
     InvalidInputError,
-    NoActiveWorkspaceError,
     NotFoundError,
     TaskNotFoundError,
     WorkspaceNotFoundError,
@@ -52,20 +48,23 @@ from ....models import (
     ConcordanceMaterializeRequest,
     DetachNodeOption,
 )
-from ..utils import _build_detach_options
+from ..utils import _build_detach_options, require_workspace
 from .concordance_core import (
     CORE_CONCORDANCE_COLUMNS,
-    DEFAULT_CONCORDANCE_PAGE,
     build_concordance_response,
     normalize_saved_request,
     read_dispersion_bins,
 )
+from .concordance_submission import submit_concordance_analysis
 from .generated_columns import (
     CONC_EXTRACTION_COLUMN,
     MATERIALIZED_CONCORDANCE_COLUMNS,
 )
 
-router = APIRouter(prefix="/workspaces", tags=["concordance"])
+router = APIRouter(
+    prefix="/workspaces/{workspace_id:uuid}",
+    tags=["concordance"],
+)
 logger = logging.getLogger(__name__)
 
 
@@ -93,6 +92,7 @@ class ConcordanceResultQuery(BaseModel):
     descending: Optional[bool] = None
     show_metadata: Optional[bool] = None
     update_only: bool = False
+    model_config = ConfigDict(extra="forbid")
 
 
 def _apply_result_query_overrides(
@@ -204,6 +204,7 @@ def _build_concordance_task_result(
 
 @router.post("/concordance", response_model=ConcordanceAnalysisResponse)
 async def run_concordance(
+    workspace_id: UUID,
     request: ConcordanceAnalysisRequest,
     current_user: dict = Depends(get_current_user),
 ):
@@ -222,119 +223,18 @@ async def run_concordance(
         responses while using shared concordance response builders.
     """
     user_id = current_user["id"]
-    workspace_id = workspace_manager.get_current_workspace_id(user_id)
-    ws = workspace_manager.get_current_workspace(user_id)
-    if not workspace_id or ws is None:
-        raise NoActiveWorkspaceError("No active workspace selected")
-    task_manager = get_task_manager(user_id)
-
-    if not request.node_ids:
-        raise InvalidInputError("At least one node ID must be provided")
-    try:
-        for node_id in request.node_ids:
-            if node_id not in ws.nodes:
-                raise NotFoundError(f"Node {node_id} not found")
-            if not request.node_columns.get(node_id):
-                raise InvalidInputError(f"Missing text column for node {node_id}")
-        analysis_request = AnalysisConcordanceRequest(
-            node_ids=request.node_ids,
-            node_columns=request.node_columns,
-            search_word=request.search_word,
-            num_left_tokens=request.num_left_tokens,
-            num_right_tokens=request.num_right_tokens,
-            regex=request.regex,
-            whole_word=request.whole_word,
-            case_sensitive=request.case_sensitive,
-            search_mode=request.search_mode,
-        )
-
-        task_id = str(uuid4())
-        workspace_dir = workspace_manager.get_workspace_dir(user_id, workspace_id)
-        if workspace_dir is None:
-            raise WorkspaceNotFoundError("Workspace not found")
-        input_snapshot_dir = create_worker_input_snapshot(
-            user_id=user_id,
-            workspace_id=workspace_id,
-            task_id=task_id,
-            node_ids=request.node_ids,
-            workspace=ws,
-            artifact_dir=workspace_dir / "data" / "artifacts",
-        )
-        task_manager.save_task(
-            AnalysisTask(
-                task_id=task_id,
-                user_id=user_id,
-                workspace_id=workspace_id,
-                request=analysis_request,
-                status=AnalysisStatus.RUNNING,
-            )
-        )
-        normalized_request = (
-            normalize_saved_request(analysis_request.model_dump()) or {}
-        )
-        normalized_request.setdefault("page", DEFAULT_CONCORDANCE_PAGE)
-        if request.sort_by:
-            normalized_request["sort_by"] = request.sort_by
-        normalized_request["descending"] = request.descending
-        tm = workspace_manager.get_task_manager(user_id)
-        await tm.submit_task(
-            user_id=user_id,
-            workspace_id=workspace_id,
-            task_type="concordance",
-            task_id=task_id,
-            task_args={
-                "input_snapshot_dir": str(input_snapshot_dir),
-                "request_payload": normalized_request,
-            },
-            task_name="Concordance",
-        )
-
-        return {
-            "state": "running",
-            "message": "Concordance analysis started",
-            "data": {},
-            "analysis_params": normalized_request,
-            "metadata": {"task_id": task_id},
-        }
-    except Exception as exc:
-        raise InternalServiceError(f"Failed to run concordance: {exc}")
+    workspace_id_str = str(workspace_id)
+    ws = require_workspace(user_id, workspace_id_str)
+    return await submit_concordance_analysis(
+        user_id=user_id,
+        workspace_id=workspace_id_str,
+        workspace=ws,
+        request=request,
+    )
 
 
-@router.get(
-    "/concordance/tasks/{task_id}/request",
-    response_model=AnalysisConcordanceRequest,
-)
-async def concordance_task_request(
-    task_id: str,
-    current_user: dict = Depends(get_current_user),
-):
-    """Return stored request payload for a concordance task.
-
-    Flow:
-    - Resolve authentication and request parameters from FastAPI dependencies.
-    - Delegate validation, manager calls, artifacts, or state changes to the owning helper.
-    - Shape the response payload or raise the HTTP error the client should see.
-
-    Used by:
-    - Frontend and API clients through the FastAPI GET /concordance/tasks/{task_id}/request route because they need this unit's "Return stored request payload for a concordance task" behavior.
-    """
-    user_id = current_user["id"]
-    workspace_id = workspace_manager.get_current_workspace_id(user_id)
-    if not workspace_id:
-        raise NoActiveWorkspaceError("No active workspace selected")
-    task_manager = get_task_manager(user_id)
-    task = task_manager.get_task(task_id)
-    if task is None:
-        raise TaskNotFoundError("Task not found")
-    request = task.request
-    return request.model_dump()
-
-
-@router.get(
-    "/concordance/tasks/{task_id}/bins",
-    response_model=ConcordanceDispersionBinsResponse,
-)
 async def concordance_task_dispersion_bins(
+    workspace_id: UUID,
     task_id: str,
     node_id: str,
     current_user: dict = Depends(get_current_user),
@@ -347,8 +247,8 @@ async def concordance_task_dispersion_bins(
     - Shape the response payload or raise the HTTP error the client should see.
 
     Used by:
-    - Frontend dispersion summary plot, when a node has been materialised by because they need this unit's "Return 100-bucket dispersion histogram for one materialised concordance node" behavior.
-      "Process All". The frontend re-aggregates these 100 buckets into a
+    - shared analysis-task dispersion-bins route, when a node has been
+      materialised by "Process All". The frontend re-aggregates these buckets into a
       smaller number of display bins (4, 5, 10, 20, 25, 50, 100) without
       another network round-trip.
 
@@ -358,13 +258,13 @@ async def concordance_task_dispersion_bins(
       term, regardless of corpus size.
     """
     user_id = current_user["id"]
-    workspace_id = workspace_manager.get_current_workspace_id(user_id)
-    if not workspace_id:
-        raise NoActiveWorkspaceError("No active workspace selected")
+    workspace_id_str = str(workspace_id)
     task_manager = get_task_manager(user_id)
     task = task_manager.get_task(task_id)
     if task is None or not task.request:
         raise TaskNotFoundError("Task not found")
+    if task.workspace_id != workspace_id_str:
+        raise AccessDeniedError("Task does not belong to this workspace")
     materialized_paths = getattr(task.request, "materialized_paths", None) or {}
     path = materialized_paths.get(node_id)
     if not path:
@@ -381,11 +281,8 @@ async def concordance_task_dispersion_bins(
     }
 
 
-@router.get(
-    "/concordance/tasks/{task_id}/result",
-    response_model=ConcordanceAnalysisResponse | None,
-)
 async def concordance_task_result(
+    workspace_id: str,
     task_id: str,
     query: ConcordanceResultQuery = Depends(),
     current_user: dict = Depends(get_current_user),
@@ -398,27 +295,22 @@ async def concordance_task_result(
     - Shape the response payload or raise the HTTP error the client should see.
 
     Used by:
-    - Frontend polling route: `GET /workspaces/{id}/concordance/tasks/{id}/result` because they need this unit's "Read concordance result with optional pagination/sort overrides" behavior.
+    - shared analysis-task result route because concordance result reads need
+      the existing optional pagination/sort override behavior.
 
     Why:
     - Hydrates saved concordance state while allowing query-time view changes.
 
     """
     user_id = current_user["id"]
-    workspace_id = workspace_manager.get_current_workspace_id(user_id)
-    if not workspace_id:
-        raise NoActiveWorkspaceError("No active workspace selected")
     result, _failure_message = _build_concordance_task_result(
         user_id, workspace_id, task_id, query
     )
     return result
 
 
-@router.post(
-    "/concordance/tasks/{task_id}/result",
-    response_model=ConcordanceAnalysisResponse | None,
-)
 async def concordance_task_result_post(
+    workspace_id: str,
     task_id: str,
     query: ConcordanceResultQuery,
     current_user: dict = Depends(get_current_user),
@@ -431,18 +323,14 @@ async def concordance_task_result_post(
     - Shape the response payload or raise the HTTP error the client should see.
 
     Used by:
-    - Frontend state-sync route: because they need this unit's "Read concordance result using POST body overrides" behavior.
-        `POST /workspaces/{id}/concordance/tasks/{id}/result`
+    - shared analysis-task result-query route because concordance per-node
+      pagination and sort overrides are body-shaped result reads.
 
     Why:
-    - Preserves compatibility with clients that send result preferences in body
-        payloads instead of query parameters.
+    - Keeps richer result reads separate from presentation-preference updates.
 
     """
     user_id = current_user["id"]
-    workspace_id = workspace_manager.get_current_workspace_id(user_id)
-    if not workspace_id:
-        raise NoActiveWorkspaceError("No active workspace selected")
     result, failure_message = _build_concordance_task_result(
         user_id, workspace_id, task_id, query
     )
@@ -451,14 +339,12 @@ async def concordance_task_result_post(
     return result
 
 
-@router.post(
-    "/nodes/{node_id}/concordance/detach",
-    response_model=AnalysisTaskActionResponse,
-)
 async def detach_concordance(
+    workspace_id: UUID,
     node_id: str,
     request: ConcordanceDetachRequest,
     current_user: dict = Depends(get_current_user),
+    parent_task_id: str | None = None,
 ):
     """Submit a background task to create a concordance-detached node.
 
@@ -468,18 +354,16 @@ async def detach_concordance(
     - Shape the response payload or raise the HTTP error the client should see.
 
     Used by:
-    - Frontend detach action: because they need this unit's "Submit a background task to create a concordance-detached node" behavior.
-        `POST /workspaces/{id}/nodes/{node_id}/concordance/detach`
+    - shared analysis-task detachments route because concordance detaches are
+      task-scoped child actions that create workspace nodes asynchronously.
 
     Why:
     - Runs potentially expensive row extraction out-of-band and returns task id
         for progress tracking.
     """
     user_id = current_user["id"]
-    workspace_id = workspace_manager.get_current_workspace_id(user_id)
-    ws = workspace_manager.get_current_workspace(user_id)
-    if not workspace_id or ws is None:
-        raise NoActiveWorkspaceError("No active workspace selected")
+    workspace_id_str = str(workspace_id)
+    ws = require_workspace(user_id, workspace_id_str)
     tm = workspace_manager.get_task_manager(user_id)
     if node_id not in ws.nodes:
         raise NotFoundError(f"Node {node_id} not found")
@@ -489,37 +373,34 @@ async def detach_concordance(
     columns_to_select: list[str] = []
     # The generated CONC_* columns are user-choosable like any other column.
     # Record exactly which ones the client kept so the worker drops the rest.
-    # `None` (no selection sent) preserves the legacy "keep all generated"
-    # behavior for older callers. Generated columns must NOT be projected from
-    # the source node here — they don't exist in `node_data` and are produced
-    # by the detach worker; selecting them off source raises ColumnNotFound.
+    # Generated columns must NOT be projected from the source node here — they
+    # don't exist in `node_data` and are produced by the detach worker;
+    # selecting them off source raises ColumnNotFound.
     generated_names = set(MATERIALIZED_CONCORDANCE_COLUMNS)
-    selected_generated_columns: list[str] | None = None
-    if request.selected_columns is not None:
-        selected_generated_columns = []
-        for col in request.selected_columns:
-            if col == request.column:
-                include_document_column = True
-                continue
-            # CONC_extraction is a generated column, not a source schema
-            # column — translate the tick into a worker-side flag and skip
-            # source selection.
-            if col == CONC_EXTRACTION_COLUMN:
-                include_extraction = True
-                continue
-            if col in generated_names:
-                selected_generated_columns.append(col)
-                continue
-            columns_to_select.append(col)
+    selected_generated_columns: list[str] = []
+    for col in request.selected_columns:
+        if col == request.column:
+            include_document_column = True
+            continue
+        # CONC_extraction is a generated column, not a source schema
+        # column — translate the tick into a worker-side flag and skip
+        # source selection.
+        if col == CONC_EXTRACTION_COLUMN:
+            include_extraction = True
+            continue
+        if col in generated_names:
+            selected_generated_columns.append(col)
+            continue
+        columns_to_select.append(col)
 
-    workspace_dir = workspace_manager.get_workspace_dir(user_id, workspace_id)
+    workspace_dir = workspace_manager.get_workspace_dir(user_id, workspace_id_str)
     if workspace_dir is None:
         raise WorkspaceNotFoundError("Workspace not found")
     try:
         task_id = str(uuid4())
         input_snapshot_dir = create_worker_input_snapshot(
             user_id=user_id,
-            workspace_id=workspace_id,
+            workspace_id=workspace_id_str,
             task_id=task_id,
             node_ids=[node_id],
             workspace=ws,
@@ -527,7 +408,7 @@ async def detach_concordance(
         )
         task_info = await tm.submit_task(
             user_id=user_id,
-            workspace_id=workspace_id,
+            workspace_id=workspace_id_str,
             task_type="concordance_detach",
             task_id=task_id,
             task_args={
@@ -552,6 +433,8 @@ async def detach_concordance(
                 "input_snapshot_dir": str(input_snapshot_dir),
             },
         )
+        if parent_task_id:
+            get_task_manager(user_id).link_child_task(parent_task_id, task_info.id)
 
         return {
             "state": "running",
@@ -564,14 +447,12 @@ async def detach_concordance(
         raise InternalServiceError(f"Error submitting detach task: {exc}")
 
 
-@router.post(
-    "/nodes/{node_id}/concordance/dispersion-detach",
-    response_model=AnalysisTaskActionResponse,
-)
 async def detach_concordance_dispersion(
+    workspace_id: UUID,
     node_id: str,
     request: ConcordanceDispersionDetachRequest,
     current_user: dict = Depends(get_current_user),
+    parent_task_id: str | None = None,
 ):
     """Submit a per-document aggregated detach (dispersion view).
 
@@ -588,13 +469,13 @@ async def detach_concordance_dispersion(
     - Shape the response payload or raise the HTTP error the client should see.
 
     Used by:
-    - Frontend and API clients through the FastAPI POST /nodes/{node_id}/concordance/dispersion-detach route because they need this unit's "Submit a per-document aggregated detach (dispersion view)" behavior.
+    - shared analysis-task dispersion-detachments route because dispersion
+      detaches need the parent task path for materialization events and task
+      child links.
     """
     user_id = current_user["id"]
-    workspace_id = workspace_manager.get_current_workspace_id(user_id)
-    ws = workspace_manager.get_current_workspace(user_id)
-    if not workspace_id or ws is None:
-        raise NoActiveWorkspaceError("No active workspace selected")
+    workspace_id_str = str(workspace_id)
+    ws = require_workspace(user_id, workspace_id_str)
     tm = workspace_manager.get_task_manager(user_id)
     if node_id not in ws.nodes:
         raise NotFoundError(f"Node {node_id} not found")
@@ -604,20 +485,19 @@ async def detach_concordance_dispersion(
     # column.
     include_document_column = False
     columns_to_select: list[str] = []
-    if request.selected_columns:
-        for col in request.selected_columns:
-            if col == request.column:
-                include_document_column = True
-                continue
-            # `CONC_extraction` is the dispersion-detach worker's own output
-            # column (the per-document joined raw-window string); a stale
-            # client that picks it would otherwise crash this endpoint with
-            # `ColumnNotFoundError` on the source-frame select.
-            if col == CONC_EXTRACTION_COLUMN:
-                continue
-            columns_to_select.append(col)
+    for col in request.selected_columns:
+        if col == request.column:
+            include_document_column = True
+            continue
+        # `CONC_extraction` is the dispersion-detach worker's own output
+        # column (the per-document joined raw-window string); selecting it
+        # would otherwise crash this endpoint with `ColumnNotFoundError` on
+        # the source-frame select.
+        if col == CONC_EXTRACTION_COLUMN:
+            continue
+        columns_to_select.append(col)
 
-    workspace_dir = workspace_manager.get_workspace_dir(user_id, workspace_id)
+    workspace_dir = workspace_manager.get_workspace_dir(user_id, workspace_id_str)
     if workspace_dir is None:
         raise WorkspaceNotFoundError("Workspace not found")
     if request.selected_bins is not None and (
@@ -630,7 +510,7 @@ async def detach_concordance_dispersion(
         child_task_id = str(uuid4())
         input_snapshot_dir = create_worker_input_snapshot(
             user_id=user_id,
-            workspace_id=workspace_id,
+            workspace_id=workspace_id_str,
             task_id=child_task_id,
             node_ids=[node_id],
             workspace=ws,
@@ -638,7 +518,7 @@ async def detach_concordance_dispersion(
         )
         task_info = await tm.submit_task(
             user_id=user_id,
-            workspace_id=workspace_id,
+            workspace_id=workspace_id_str,
             task_type="concordance_dispersion_detach",
             task_id=child_task_id,
             task_name=request.new_node_name or None,
@@ -647,7 +527,7 @@ async def detach_concordance_dispersion(
                 "node_corpus": [],
                 "parent_node_id": node_id,
                 "child_task_id": child_task_id,
-                "parent_task_id": request.parent_task_id,
+                "parent_task_id": parent_task_id,
                 "document_column": request.column,
                 "search_word": request.search_word,
                 "num_left_tokens": request.num_left_tokens,
@@ -668,10 +548,8 @@ async def detach_concordance_dispersion(
                 "input_snapshot_dir": str(input_snapshot_dir),
             },
         )
-        if request.parent_task_id:
-            get_task_manager(user_id).link_child_task(
-                request.parent_task_id, task_info.id
-            )
+        if parent_task_id:
+            get_task_manager(user_id).link_child_task(parent_task_id, task_info.id)
 
         return {
             "state": "running",
@@ -685,14 +563,12 @@ async def detach_concordance_dispersion(
         )
 
 
-@router.post(
-    "/nodes/{node_id}/concordance/materialize",
-    response_model=AnalysisTaskActionResponse,
-)
 async def materialize_concordance(
+    workspace_id: UUID,
     node_id: str,
     request: ConcordanceMaterializeRequest,
     current_user: dict = Depends(get_current_user),
+    parent_task_id: str | None = None,
 ):
     """Submit a background task that writes the full flattened occurrence parquet.
 
@@ -706,13 +582,13 @@ async def materialize_concordance(
     - Shape the response payload or raise the HTTP error the client should see.
 
     Used by:
-    - Frontend and API clients through the FastAPI POST /nodes/{node_id}/concordance/materialize route because they need this unit's "Submit a background task that writes the full flattened occurrence parquet" behavior.
+    - shared analysis-task materializations route because concordance
+      materialization is a child operation of the analysis task selected by the
+      URL.
     """
     user_id = current_user["id"]
-    workspace_id = workspace_manager.get_current_workspace_id(user_id)
-    ws = workspace_manager.get_current_workspace(user_id)
-    if not workspace_id or ws is None:
-        raise NoActiveWorkspaceError("No active workspace selected")
+    workspace_id_str = str(workspace_id)
+    ws = require_workspace(user_id, workspace_id_str)
     tm = workspace_manager.get_task_manager(user_id)
 
     if node_id not in ws.nodes:
@@ -728,22 +604,19 @@ async def materialize_concordance(
         if hasattr(node, "find_tokenization_column"):
             tokenization_column = node.find_tokenization_column(request.column)
         if tokenization_column is None:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"No tokens column registered on node {node_id!r} for "
-                    f"source column {request.column!r}" + "; re-run Tokenise first."
-                ),
+            raise InvalidInputError(
+                f"No tokens column registered on node {node_id!r} for "
+                f"source column {request.column!r}; re-run Tokenise first."
             )
 
-    workspace_dir = workspace_manager.get_workspace_dir(user_id, workspace_id)
+    workspace_dir = workspace_manager.get_workspace_dir(user_id, workspace_id_str)
     if workspace_dir is None:
         raise WorkspaceNotFoundError("Workspace not found")
     try:
         child_task_id = str(uuid4())
         input_snapshot_dir = create_worker_input_snapshot(
             user_id=user_id,
-            workspace_id=workspace_id,
+            workspace_id=workspace_id_str,
             task_id=child_task_id,
             node_ids=[node_id],
             workspace=ws,
@@ -751,14 +624,14 @@ async def materialize_concordance(
         )
         task_info = await tm.submit_task(
             user_id=user_id,
-            workspace_id=workspace_id,
+            workspace_id=workspace_id_str,
             task_type="concordance_materialize",
             task_id=child_task_id,
             task_args={
                 "workspace_dir": str(workspace_dir),
                 "node_corpus": [],
                 "child_task_id": child_task_id,
-                "parent_task_id": request.parent_task_id,
+                "parent_task_id": parent_task_id,
                 "parent_node_id": node_id,
                 "document_column": request.column,
                 "search_word": request.search_word,
@@ -774,7 +647,8 @@ async def materialize_concordance(
                 "input_snapshot_dir": str(input_snapshot_dir),
             },
         )
-        get_task_manager(user_id).link_child_task(request.parent_task_id, task_info.id)
+        if parent_task_id:
+            get_task_manager(user_id).link_child_task(parent_task_id, task_info.id)
         return {
             "state": "running",
             "message": "Concordance materialize started",
@@ -785,11 +659,8 @@ async def materialize_concordance(
         raise InternalServiceError(f"Error submitting materialize task: {exc}")
 
 
-@router.get(
-    "/nodes/{node_id}/concordance/detach-options",
-    response_model=ConcordanceDetachOptionsResponse,
-)
 async def concordance_detach_options(
+    workspace_id: UUID,
     node_id: str,
     column: str,
     current_user: dict = Depends(get_current_user),
@@ -802,17 +673,16 @@ async def concordance_detach_options(
     - Shape the response payload or raise the HTTP error the client should see.
 
     Used by:
-    - Frontend concordance detach dialog because they need this unit's "Return detachable concordance columns for one node" behavior.
+    - shared analysis-task detach-options route because concordance detach
+      dialogs need node and column metadata while staying under the parent task
+      namespace.
 
     Why:
     - Keeps mandatory generated concordance columns and optional metadata
       columns aligned with backend detach behavior.
     """
     user_id = current_user["id"]
-    workspace_id = workspace_manager.get_current_workspace_id(user_id)
-    ws = workspace_manager.get_current_workspace(user_id)
-    if not workspace_id or ws is None:
-        raise NoActiveWorkspaceError("No active workspace selected")
+    ws = require_workspace(user_id, str(workspace_id))
     node = ws.nodes[node_id]
 
     return _build_detach_options(

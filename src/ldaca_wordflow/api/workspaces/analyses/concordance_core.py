@@ -20,7 +20,6 @@ from typing import Any, Optional, cast
 import polars as pl
 
 from ....core.utils import stringify_unsafe_integers
-from ....core.workspace import workspace_manager
 from .concordance_tokens_mode import (
     compute_tokens_concordance_page,
     find_token_matches,
@@ -39,7 +38,8 @@ from .generated_columns import (
     compute_concordance_extraction_string,
 )
 from .page_size_estimation import DEFAULT_PAGE_SIZE_CANDIDATES, estimate_page_size
-from ....core.exceptions import NotFoundError
+from ....core.exceptions import NotFoundError, WorkspaceNotFoundError
+from ..utils import require_workspace
 
 
 logger = logging.getLogger(__name__)
@@ -376,11 +376,9 @@ def resolve_node_sources(
     node_sources: dict[str, dict[str, Any]] = {}
     label_to_node_map: dict[str, str] = {}
     node_labels: dict[str, str] = {}
-    if workspace_manager.get_current_workspace_id(user_id) != workspace_id:
-        if not workspace_manager.set_current_workspace(user_id, workspace_id):
-            return {}, {}, {}, "Workspace not found"
-    workspace = workspace_manager.get_current_workspace(user_id)
-    if workspace is None:
+    try:
+        workspace = require_workspace(user_id, workspace_id)
+    except WorkspaceNotFoundError:
         return {}, {}, {}, "Workspace not found"
 
     for node_id in node_ids:
@@ -930,8 +928,6 @@ def build_concordance_response(
         user_id, workspace_id, request
     )
     if resolve_error is not None:
-        from fastapi import HTTPException
-
         raise NotFoundError(resolve_error)
     data: dict[str, Any] = {}
 

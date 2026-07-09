@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import uuid
+
 import polars as pl
 import pytest
 from fastapi import HTTPException
@@ -101,7 +103,7 @@ def fake_workspace_manager(monkeypatch: pytest.MonkeyPatch, sample_nodes):
     class FakeWorkspaceManager:
         def __init__(self, nodes: dict[str, DummyNode]) -> None:
             self.nodes = nodes
-            self.workspace_id = "ws1"
+            self.workspace_id = "00000000-0000-0000-0000-000000000001"
             self.workspace = DummyWorkspace(nodes, self)
             self.add_calls: list[dict[str, object]] = []
 
@@ -140,7 +142,11 @@ async def test_concat_preview_success(fake_workspace_manager, sample_nodes):
     request = ConcatPreviewRequest(node_ids=["node_a", "node_b"])
 
     result = await nodes_api.concat_nodes_preview(
-        request, page=1, page_size=2, current_user={"id": "user"}
+        workspace_id=uuid.UUID(fake_workspace_manager.workspace_id),
+        request=request,
+        page=1,
+        page_size=2,
+        current_user={"id": "user"},
     )
 
     assert result["columns"] == ["id", "name", "value"]
@@ -158,7 +164,11 @@ async def test_concat_preview_schema_mismatch(fake_workspace_manager):
 
     with pytest.raises(HTTPException) as excinfo:
         await nodes_api.concat_nodes_preview(
-            request, page=1, page_size=2, current_user={"id": "user"}
+            workspace_id=uuid.UUID(fake_workspace_manager.workspace_id),
+            request=request,
+            page=1,
+            page_size=2,
+            current_user={"id": "user"},
         )
 
     assert excinfo.value.status_code == 400
@@ -172,7 +182,11 @@ async def test_concat_creation_happy_path(fake_workspace_manager, sample_nodes):
     # rows were collapsed.
     request = ConcatRequest(node_ids=["node_a", "node_b"], new_node_name="Combined")
 
-    result = await nodes_api.concat_nodes(request, current_user={"id": "user"})
+    result = await nodes_api.concat_nodes(
+        workspace_id=uuid.UUID(fake_workspace_manager.workspace_id),
+        request=request,
+        current_user={"id": "user"},
+    )
 
     # ensure conversion returns meaningful structure
     assert result["name"] == "Combined"
@@ -194,7 +208,11 @@ async def test_concat_creation_without_dedup(fake_workspace_manager, sample_node
         node_ids=["node_a", "node_b"], new_node_name="Combined", deduplicate=False
     )
 
-    await nodes_api.concat_nodes(request, current_user={"id": "user"})
+    await nodes_api.concat_nodes(
+        workspace_id=uuid.UUID(fake_workspace_manager.workspace_id),
+        request=request,
+        current_user={"id": "user"},
+    )
 
     new_node = fake_workspace_manager.add_calls[0]["node"]
     assert new_node.operation.startswith("concat(")

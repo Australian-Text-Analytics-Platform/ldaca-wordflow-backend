@@ -136,7 +136,7 @@ class QuotationDetachRequest(BaseModel):
     column: str
     new_node_name: str | None = None  # If not provided, will be auto-generated
     engine: QuotationEngineConfig | None = None
-    selected_columns: list[str] | None = None
+    selected_columns: list[str] = Field(min_length=1)
     materialized_path: str | None = None  # Reuse existing flattened parquet
 
     model_config = ConfigDict(extra="forbid")
@@ -153,9 +153,9 @@ class QuotationMaterializeRequest(BaseModel):
         responses in the shape expected by frontend clients and tests.
     """
 
+    node_id: str
     column: str
     engine: QuotationEngineConfig | None = None
-    parent_task_id: str
 
     model_config = ConfigDict(extra="forbid")
 

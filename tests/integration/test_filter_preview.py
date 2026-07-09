@@ -21,7 +21,7 @@ async def test_filter_preview_returns_paginated_rows(authenticated_client, monke
             self.data = df.lazy()
             self.name = "sample"
 
-    workspace_id = "ws-any"
+    workspace_id = "00000000-0000-0000-0000-000000000101"
     dummy_ws = DummyWorkspace({"node456": DummyNode()})
 
     monkeypatch.setattr(
@@ -36,7 +36,7 @@ async def test_filter_preview_returns_paginated_rows(authenticated_client, monke
     )
 
     response = await authenticated_client.post(
-        "/api/workspaces/nodes/node456/filter/preview",
+        f"/api/workspaces/{workspace_id}/nodes/node456/filter/preview",
         params={"page": 1, "page_size": 2},
         json={
             "conditions": [
@@ -71,7 +71,7 @@ async def test_filter_preview_in_operator(authenticated_client, monkeypatch):
             self.data = df.lazy()
             self.name = "sample"
 
-    workspace_id = "ws-any"
+    workspace_id = "00000000-0000-0000-0000-000000000101"
     dummy_ws = DummyWorkspace({"node456": DummyNode()})
 
     monkeypatch.setattr(
@@ -86,7 +86,7 @@ async def test_filter_preview_in_operator(authenticated_client, monkeypatch):
     )
 
     response = await authenticated_client.post(
-        "/api/workspaces/nodes/node456/filter/preview",
+        f"/api/workspaces/{workspace_id}/nodes/node456/filter/preview",
         params={"page": 1, "page_size": 10},
         json={
             "conditions": [
@@ -118,7 +118,7 @@ async def test_filter_preview_in_operator_with_null(authenticated_client, monkey
             self.data = df.lazy()
             self.name = "sample"
 
-    workspace_id = "ws-any"
+    workspace_id = "00000000-0000-0000-0000-000000000101"
     dummy_ws = DummyWorkspace({"node456": DummyNode()})
 
     monkeypatch.setattr(
@@ -133,7 +133,7 @@ async def test_filter_preview_in_operator_with_null(authenticated_client, monkey
     )
 
     response = await authenticated_client.post(
-        "/api/workspaces/nodes/node456/filter/preview",
+        f"/api/workspaces/{workspace_id}/nodes/node456/filter/preview",
         params={"page": 1, "page_size": 10},
         json={
             "conditions": [
@@ -167,7 +167,7 @@ async def test_filter_preview_in_operator_matches_any_list_string_element(
             self.data = df.lazy()
             self.name = "sample"
 
-    workspace_id = "ws-any"
+    workspace_id = "00000000-0000-0000-0000-000000000101"
     dummy_ws = DummyWorkspace({"node456": DummyNode()})
 
     monkeypatch.setattr(
@@ -182,7 +182,7 @@ async def test_filter_preview_in_operator_matches_any_list_string_element(
     )
 
     response = await authenticated_client.post(
-        "/api/workspaces/nodes/node456/filter/preview",
+        f"/api/workspaces/{workspace_id}/nodes/node456/filter/preview",
         params={"page": 1, "page_size": 10},
         json={
             "conditions": [
@@ -216,7 +216,7 @@ async def test_filter_preview_list_string_in_does_not_match_null_rows(
             self.data = df.lazy()
             self.name = "sample"
 
-    workspace_id = "ws-any"
+    workspace_id = "00000000-0000-0000-0000-000000000101"
     dummy_ws = DummyWorkspace({"node456": DummyNode()})
 
     monkeypatch.setattr(
@@ -231,7 +231,7 @@ async def test_filter_preview_list_string_in_does_not_match_null_rows(
     )
 
     response = await authenticated_client.post(
-        "/api/workspaces/nodes/node456/filter/preview",
+        f"/api/workspaces/{workspace_id}/nodes/node456/filter/preview",
         params={"page": 1, "page_size": 10},
         json={
             "conditions": [
@@ -280,10 +280,11 @@ async def test_filter_preview_tmdist_topic_proportion(
             self.name = "sample"
 
     dummy_ws = DummyWorkspace({"node456": DummyNode()})
+    workspace_id = "00000000-0000-0000-0000-000000000102"
     monkeypatch.setattr(
         workspace_utils.workspace_manager,
         "get_current_workspace_id",
-        lambda user_id: "ws-tmdist",
+        lambda user_id: workspace_id,
     )
     monkeypatch.setattr(
         workspace_utils.workspace_manager,
@@ -292,7 +293,7 @@ async def test_filter_preview_tmdist_topic_proportion(
     )
 
     response = await authenticated_client.post(
-        "/api/workspaces/nodes/node456/filter/preview",
+        f"/api/workspaces/{workspace_id}/nodes/node456/filter/preview",
         params={"page": 1, "page_size": 10},
         json={
             "conditions": [

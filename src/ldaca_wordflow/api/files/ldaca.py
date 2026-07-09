@@ -12,7 +12,7 @@ import logging
 from collections.abc import Mapping, Sequence
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header
 
 from ...core.auth import get_current_user
 from ...core.oni_client import OniClient, OniSearchMethod

@@ -11,7 +11,7 @@ class _DummyNode:
 
 class _DummyWorkspace:
     def __init__(self, persist_calls: dict[str, int], nodes=None):
-        self.id = "ws-alpha"
+        self.id = "00000000-0000-0000-0000-000000000201"
         self.name = "ws"
         self._persist_calls = persist_calls
         self.nodes = nodes or {}
@@ -28,7 +28,7 @@ class _DummyWorkspace:
 async def test_replace_preview_returns_masked_values(authenticated_client, monkeypatch):
     frame = pl.DataFrame({"Body": ["Invoice 123", "Order 987"]})
     node = _DummyNode(frame)
-    workspace_id = "ws-alpha"
+    workspace_id = "00000000-0000-0000-0000-000000000201"
     dummy_ws = _DummyWorkspace({"count": 0}, nodes={"node-123": node})
 
     monkeypatch.setattr(
@@ -43,7 +43,7 @@ async def test_replace_preview_returns_masked_values(authenticated_client, monke
     )
 
     response = await authenticated_client.post(
-        "/api/workspaces/nodes/node-123/replace/preview",
+        f"/api/workspaces/{workspace_id}/nodes/node-123/replace/preview",
         json={
             "source_column": "Body",
             "pattern": r"\d+",
@@ -64,7 +64,7 @@ async def test_replace_preview_returns_masked_values(authenticated_client, monke
 async def test_replace_apply_mutates_node_data(authenticated_client, monkeypatch):
     frame = pl.DataFrame({"Body": ["Invoice 123", "Order 987"]})
     node = _DummyNode(frame)
-    workspace_id = "ws-alpha"
+    workspace_id = "00000000-0000-0000-0000-000000000201"
     persist_calls = {"count": 0}
     dummy_ws = _DummyWorkspace(persist_calls, nodes={"node-123": node})
 
@@ -95,7 +95,7 @@ async def test_replace_apply_mutates_node_data(authenticated_client, monkeypatch
     )
 
     response = await authenticated_client.post(
-        "/api/workspaces/nodes/node-123/replace",
+        f"/api/workspaces/{workspace_id}/nodes/node-123/replace",
         json={
             "source_column": "Body",
             "pattern": r"\d+",
@@ -117,7 +117,7 @@ async def test_replace_preview_returns_raw_polars_error_for_missing_source_colum
 ):
     frame = pl.DataFrame({"Body": ["Invoice 123", "Order 987"]})
     node = _DummyNode(frame)
-    workspace_id = "ws-alpha"
+    workspace_id = "00000000-0000-0000-0000-000000000201"
     dummy_ws = _DummyWorkspace({"count": 0}, nodes={"node-123": node})
 
     monkeypatch.setattr(
@@ -132,7 +132,7 @@ async def test_replace_preview_returns_raw_polars_error_for_missing_source_colum
     )
 
     response = await authenticated_client.post(
-        "/api/workspaces/nodes/node-123/replace/preview",
+        f"/api/workspaces/{workspace_id}/nodes/node-123/replace/preview",
         json={
             "source_column": "Missing",
             "pattern": r"\d+",
@@ -142,7 +142,7 @@ async def test_replace_preview_returns_raw_polars_error_for_missing_source_colum
     )
 
     assert response.status_code == 400
-    detail = response.json()["detail"]
+    detail = response.json()["message"]
     assert 'unable to find column "Missing"' in detail
     assert "Unknown column" not in detail
 
@@ -154,7 +154,7 @@ async def test_replace_apply_returns_raw_polars_error_for_non_string_column(
 ):
     frame = pl.DataFrame({"num": [1, 2]})
     node = _DummyNode(frame)
-    workspace_id = "ws-alpha"
+    workspace_id = "00000000-0000-0000-0000-000000000201"
     persist_calls = {"count": 0}
     dummy_ws = _DummyWorkspace(persist_calls, nodes={"node-123": node})
 
@@ -170,7 +170,7 @@ async def test_replace_apply_returns_raw_polars_error_for_non_string_column(
     )
 
     response = await authenticated_client.post(
-        "/api/workspaces/nodes/node-123/replace",
+        f"/api/workspaces/{workspace_id}/nodes/node-123/replace",
         json={
             "source_column": "num",
             "pattern": "1",
@@ -180,7 +180,7 @@ async def test_replace_apply_returns_raw_polars_error_for_non_string_column(
     )
 
     assert response.status_code == 400
-    detail = response.json()["detail"]
+    detail = response.json()["message"]
     assert "expected String type, got: i64" in detail
     assert "must be a string column" not in detail
     collected = node.data.collect()

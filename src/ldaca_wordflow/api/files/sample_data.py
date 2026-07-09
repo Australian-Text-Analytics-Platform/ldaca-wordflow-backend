@@ -16,7 +16,7 @@ import logging
 from pathlib import Path
 from typing import Literal
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, Query, Response
 
 from ...core.auth import get_current_user
 from ...core.exceptions import AppError, BadGatewayError, InvalidInputError, NotFoundError
@@ -35,6 +35,12 @@ from ...models import (
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+README_RESPONSE = {
+    200: {
+        "description": "README markdown text from the sample-data catalogue.",
+        "content": {"text/plain": {"schema": {"type": "string"}}},
+    }
+}
 
 SampleDataCollectionStatus = Literal[
     "bundled", "downloaded", "partial", "not_downloaded"
@@ -126,7 +132,11 @@ async def get_sample_data_catalogue(
     )
 
 
-@router.get("/sample-data/readme")
+@router.get(
+    "/sample-data/readme",
+    response_class=Response,
+    responses=README_RESPONSE,
+)
 async def get_sample_data_readme(
     path: str = Query(
         ..., description="Relative path of the README inside the sample data repo"

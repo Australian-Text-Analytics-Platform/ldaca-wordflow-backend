@@ -12,10 +12,11 @@ from __future__ import annotations
 
 import math
 import re
+import uuid
 from typing import Any, cast
 
 import polars as pl
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 
 from ...core.auth import get_current_user
 from ...models import (
@@ -24,10 +25,17 @@ from ...models import (
     ReplaceApplyResponse,
     ReplaceRequest,
 )
-from .utils import _paginated_lazy_preview, require_current_workspace, update_workspace
+from .utils import (
+    _paginated_lazy_preview,
+    require_workspace,
+    update_workspace,
+)
 from ...core.exceptions import InternalServiceError, InvalidInputError
 
-router = APIRouter(prefix="/workspaces", tags=["nodes"])
+router = APIRouter(
+    prefix="/workspaces/{workspace_id:uuid}",
+    tags=["nodes"],
+)
 
 
 def _sanitize_column_alias(label: str) -> str:
@@ -75,6 +83,7 @@ def _build_replace_expression(request: ReplaceRequest) -> tuple[str, pl.Expr]:
 
 @router.post("/nodes/{node_id}/replace/preview", response_model=FilterPreviewResponse)
 async def replace_preview(
+    workspace_id: uuid.UUID,
     node_id: str,
     request: ReplaceRequest,
     page: int = Query(1, ge=1),
@@ -83,7 +92,7 @@ async def replace_preview(
 ):
     """Preview a regex replace operation on the source node."""
     user_id = current_user["id"]
-    workspace = require_current_workspace(user_id)
+    workspace = require_workspace(user_id, str(workspace_id))
     lazy_data = workspace.nodes[node_id].data
 
     try:
@@ -104,14 +113,15 @@ async def replace_preview(
 
 @router.post("/nodes/{node_id}/replace", response_model=ReplaceApplyResponse)
 async def replace_apply(
+    workspace_id: uuid.UUID,
     node_id: str,
     request: ReplaceRequest,
     current_user: dict = Depends(get_current_user),
 ):
     """Apply a regex replace operation and persist the updated node."""
     user_id = current_user["id"]
-    workspace = require_current_workspace(user_id)
-    workspace_id = workspace.id
+    workspace_id_str = str(workspace_id)
+    workspace = require_workspace(user_id, workspace_id_str)
     node = workspace.nodes[node_id]
     dtype_str: str | None = None
 
@@ -127,7 +137,7 @@ async def replace_apply(
         raise InvalidInputError(str(exc)) from exc
     try:
         node.data = updated_data
-        update_workspace(user_id, workspace_id)
+        update_workspace(user_id, workspace_id_str, workspace)
     except Exception as exc:
         raise InternalServiceError(str(exc)) from exc
     return ReplaceApplyResponse(

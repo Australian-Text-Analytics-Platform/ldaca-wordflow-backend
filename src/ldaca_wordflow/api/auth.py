@@ -13,10 +13,10 @@ import logging
 import secrets
 from urllib.parse import urlencode
 
-import httpx
-from fastapi import APIRouter, Depends, Form, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Form, Header, Query, Request
 from google.auth.transport import requests as grequests
 from google.oauth2 import id_token
+from pydantic import BaseModel
 from starlette.responses import RedirectResponse
 
 from ..core.auth import (
@@ -24,14 +24,69 @@ from ..core.auth import (
     get_current_user,
     get_current_user_from_token,
 )
-from ..core.utils import setup_user_folders
 from ..core.auth_service import cleanup_expired_sessions, create_user_session, get_or_create_user
-from ..models import AuthInfoResponse, GoogleIn, GoogleOut, User, UserResponse
+from ..core.cilogon_auth import complete_cilogon_callback, get_cilogon_config
+from ..models import AuthInfoResponse, GoogleIn, GoogleOut, MessageResponse, User, UserResponse
 from ..settings import settings
-from ..core.exceptions import AccessDeniedError, InternalServiceError, InvalidInputError
+from ..core.exceptions import (
+    AccessDeniedError,
+    AppError,
+    InternalServiceError,
+    InvalidInputError,
+)
+from ..core.utils import setup_user_folders
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
 logger = logging.getLogger(__name__)
+
+
+class AuthStatusUser(BaseModel):
+    """Minimal authenticated-user payload for the auth status route.
+
+    Used by:
+    - ``auth_status`` because lightweight probes need identity confirmation
+      without the full auth bootstrap response.
+    """
+
+    id: str
+    email: str
+    name: str
+
+
+class AuthStatusResponse(BaseModel):
+    """Response schema for the lightweight auth status route.
+
+    Used by:
+    - ``auth_status`` and generated clients because the route previously
+      returned an untyped dict despite having a stable JSON shape.
+    """
+
+    authenticated: bool
+    user: AuthStatusUser
+    data_folder: str | None = None
+
+
+class AuthHealthEndpoints(BaseModel):
+    """Auth endpoint index included in ``AuthHealthResponse``."""
+
+    auth_info: str
+    google_auth: str
+    user_details: str
+    logout: str
+
+
+class AuthHealthResponse(BaseModel):
+    """Response schema for authentication subsystem health metadata.
+
+    Used by:
+    - ``auth_health`` and generated clients because unauthenticated health
+      checks should still expose a typed response contract.
+    """
+
+    status: str
+    mode: str
+    google_configured: bool
+    endpoints: AuthHealthEndpoints
 
 
 @router.get("/", response_model=AuthInfoResponse)
@@ -95,7 +150,7 @@ async def get_auth_info(authorization: str | None = Header(None)):
                 requires_authentication=True,
                 data_folder=str(settings.get_data_root()),
             )
-        except HTTPException:
+        except AppError:
             # Invalid token - fall through to unauthenticated response
             pass
 
@@ -191,7 +246,12 @@ async def _verify_and_create_session(credential: str) -> dict:
     return {"user": user, "session": session}
 
 
-@router.post("/google/callback")
+@router.post(
+    "/google/callback",
+    response_class=RedirectResponse,
+    status_code=303,
+    responses={303: {"description": "Redirect back to the SPA with an auth token."}},
+)
 async def google_auth_callback(
     request: Request,
     credential: str = Form(...),
@@ -223,34 +283,6 @@ async def google_auth_callback(
     return RedirectResponse(url=redirect_url, status_code=303)
 
 
-# ---------------------------------------------------------------------------
-# CILogon OIDC helpers
-# ---------------------------------------------------------------------------
-
-_cilogon_config_cache: dict | None = None
-
-
-async def _get_cilogon_config() -> dict:
-    """Fetch (and cache for the process lifetime) the CILogon discovery document.
-
-    Steps:
-    - Normalize caller input into the representation this module expects.
-    - Delegate stateful, expensive, or validating work to the owning manager/helper when needed.
-    - Return the compact value the caller uses for artifacts, validation, or response shaping.
-
-    Called by:
-    - Local helpers, route handlers, or service methods in this module because they need this unit's "Fetch (and cache for the process lifetime) the CILogon discovery document" behavior.
-    """
-    global _cilogon_config_cache
-    if _cilogon_config_cache is not None:
-        return _cilogon_config_cache
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(settings.cilogon_discovery_url, timeout=10)
-        resp.raise_for_status()
-        _cilogon_config_cache = resp.json()
-    return _cilogon_config_cache
-
-
 def _cilogon_redirect_uri(request: Request) -> str:
     """Return the registered callback URL, falling back to auto-detection.
 
@@ -270,7 +302,12 @@ def _cilogon_redirect_uri(request: Request) -> str:
 # ---------------------------------------------------------------------------
 
 
-@router.get("/cilogon/login")
+@router.get(
+    "/cilogon/login",
+    response_class=RedirectResponse,
+    status_code=302,
+    responses={302: {"description": "Redirect to the CILogon authorization URL."}},
+)
 async def cilogon_login(request: Request):
     """Redirect the browser to the CILogon authorization endpoint.
 
@@ -287,11 +324,11 @@ async def cilogon_login(request: Request):
     - Frontend and API clients through the FastAPI GET /cilogon/login route because they need this unit's "Redirect the browser to the CILogon authorization endpoint" behavior.
     """
     if not settings.multi_user:
-        raise HTTPException(400, "CILogon not available in single-user mode")
+        raise InvalidInputError("CILogon not available in single-user mode")
     if not settings.cilogon_client_id:
-        raise HTTPException(500, "CILogon not configured (missing CILOGON_CLIENT_ID)")
+        raise InternalServiceError("CILogon not configured (missing CILOGON_CLIENT_ID)")
 
-    config = await _get_cilogon_config()
+    config = await get_cilogon_config()
     state = secrets.token_urlsafe(32)
     redirect_uri = _cilogon_redirect_uri(request)
 
@@ -317,7 +354,12 @@ async def cilogon_login(request: Request):
     return response
 
 
-@router.get("/cilogon/callback")
+@router.get(
+    "/cilogon/callback",
+    response_class=RedirectResponse,
+    status_code=303,
+    responses={303: {"description": "Redirect back to the SPA with an auth token."}},
+)
 async def cilogon_callback(
     request: Request,
     code: str | None = Query(None),
@@ -348,88 +390,28 @@ async def cilogon_callback(
             error_description,
             dict(request.query_params),
         )
-        raise HTTPException(400, f"CILogon authentication failed: {detail}")
+        raise InvalidInputError(f"CILogon authentication failed: {detail}")
 
     if not code or not state:
-        raise HTTPException(400, "Missing code or state parameter")
+        raise InvalidInputError("Missing code or state parameter")
 
     # CSRF check
     stored_state = request.cookies.get("cilogon_state")
     if not stored_state or stored_state != state:
-        raise HTTPException(403, "State mismatch — possible CSRF")
+        raise AccessDeniedError("State mismatch — possible CSRF")
 
     if not settings.multi_user:
-        raise HTTPException(400, "CILogon not available in single-user mode")
+        raise InvalidInputError("CILogon not available in single-user mode")
     if not settings.cilogon_client_id:
-        raise HTTPException(500, "CILogon not configured")
+        raise InternalServiceError("CILogon not configured")
 
-    config = await _get_cilogon_config()
+    config = await get_cilogon_config()
     redirect_uri = _cilogon_redirect_uri(request)
-
-    # Exchange authorization code for tokens
-    async with httpx.AsyncClient() as client:
-        try:
-            token_resp = await client.post(
-                config["token_endpoint"],
-                data={
-                    "grant_type": "authorization_code",
-                    "code": code,
-                    "redirect_uri": redirect_uri,
-                    "client_id": settings.cilogon_client_id,
-                    "client_secret": settings.cilogon_client_secret,
-                },
-                timeout=15,
-            )
-            token_resp.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            logger.error(f"CILogon token exchange failed: {exc.response.text}")
-            raise HTTPException(502, "Token exchange with CILogon failed")
-
-        tokens = token_resp.json()
-        access_token = tokens.get("access_token")
-        if not access_token:
-            raise HTTPException(502, "No access_token in CILogon token response")
-
-        # Fetch user profile from userinfo endpoint
-        try:
-            userinfo_resp = await client.get(
-                config["userinfo_endpoint"],
-                headers={"Authorization": f"Bearer {access_token}"},
-                timeout=10,
-            )
-            userinfo_resp.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            logger.error(f"CILogon userinfo fetch failed: {exc.response.text}")
-            raise HTTPException(502, "Fetching user info from CILogon failed")
-
-    userinfo = userinfo_resp.json()
-    logger.info(f"CILogon auth successful for: {userinfo.get('email')}")
-
-    if not userinfo.get("email_verified", True):
-        raise HTTPException(400, "Email not verified by CILogon")
-
-    # Resolve display name: prefer 'name', fall back to given + family
-    name = (
-        userinfo.get("name")
-        or (
-            f"{userinfo.get('given_name', '')} {userinfo.get('family_name', '')}".strip()
-        )
-        or userinfo.get("email", "Unknown")
+    token = await complete_cilogon_callback(
+        code=code,
+        redirect_uri=redirect_uri,
+        config=config,
     )
-
-    user = await get_or_create_user(
-        email=userinfo.get("email"),
-        name=name,
-        picture=userinfo.get("picture"),
-        google_id=userinfo.get("sub"),  # reuse google_id column for OIDC sub
-    )
-    user_folders = setup_user_folders(user["id"])
-    from ..core.auth_service import update_user_folder_path
-
-    await update_user_folder_path(user["id"], str(user_folders["user_folder"]))
-
-    session = await create_user_session(user["id"])
-    token = session["access_token"]
 
     redirect_url = f"/?{urlencode({'auth_token': token})}"
     response = RedirectResponse(url=redirect_url, status_code=303)
@@ -472,7 +454,7 @@ async def get_current_user_info(current_user: dict = Depends(get_current_user)):
     }
 
 
-@router.post("/logout")
+@router.post("/logout", response_model=MessageResponse)
 async def logout(current_user: dict = Depends(get_current_user)):
     """Logout current user session (multi-user) or no-op (single-user).
 
@@ -495,7 +477,11 @@ async def logout(current_user: dict = Depends(get_current_user)):
     return {"message": f"User {current_user['email']} logged out successfully"}
 
 
-@router.get("/status")
+@router.get(
+    "/status",
+    response_model=AuthStatusResponse,
+    response_model_exclude_none=True,
+)
 async def auth_status(current_user: dict = Depends(get_current_user)):
     """Return minimal authenticated status payload.
 
@@ -526,7 +512,7 @@ async def auth_status(current_user: dict = Depends(get_current_user)):
     return response
 
 
-@router.get("/health")
+@router.get("/health", response_model=AuthHealthResponse)
 async def auth_health():
     """Return authentication subsystem readiness metadata.
 

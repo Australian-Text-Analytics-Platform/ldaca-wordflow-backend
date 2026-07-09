@@ -62,7 +62,7 @@ async def test_text_column_preference_is_set_by_node_endpoint_not_analyses(
 
     async def set_document_column(column: str) -> None:
         response = await authenticated_client.put(
-            f"/api/workspaces/nodes/{node.id}/document-column",
+            f"/api/workspaces/{workspace_id}/nodes/{node.id}/document-column",
             json={"document_column": column},
         )
         assert response.status_code == 200, response.text
@@ -73,7 +73,7 @@ async def test_text_column_preference_is_set_by_node_endpoint_not_analyses(
     await set_document_column("text_a")
 
     token_response = await authenticated_client.post(
-        "/api/workspaces/token-frequencies",
+        f"/api/workspaces/{workspace_id}/token-frequencies",
         json={
             "node_ids": [node.id],
             "node_columns": {node.id: "text_b"},
@@ -89,7 +89,7 @@ async def test_text_column_preference_is_set_by_node_endpoint_not_analyses(
     await set_document_column("text_b")
 
     concordance_response = await authenticated_client.post(
-        "/api/workspaces/concordance",
+        f"/api/workspaces/{workspace_id}/concordance",
         json={
             "node_ids": [node.id],
             "node_columns": {node.id: "text_a"},
@@ -126,7 +126,7 @@ async def test_text_column_preference_is_set_by_node_endpoint_not_analyses(
     )
 
     quotation_response = await authenticated_client.post(
-        f"/api/workspaces/nodes/{node.id}/quotation",
+        f"/api/workspaces/{workspace_id}/nodes/{node.id}/quotation",
         json={
             "column": "text_b",
         },
@@ -140,7 +140,7 @@ async def test_text_column_preference_is_set_by_node_endpoint_not_analyses(
     await set_document_column("text_b")
 
     topic_response = await authenticated_client.post(
-        "/api/workspaces/topic-modeling",
+        f"/api/workspaces/{workspace_id}/topic-modeling",
         json={
             "node_ids": [node.id],
             "node_columns": {node.id: "text_a"},

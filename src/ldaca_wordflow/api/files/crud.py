@@ -12,7 +12,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, Query, UploadFile
 
 from ...core.auth import get_current_user
 from ...core.exceptions import AccessDeniedError, FileNotFoundError, InternalServiceError, InvalidInputError, NotFoundError, ResourceConflictError
@@ -320,9 +320,12 @@ async def upload_file(file: UploadFile, current_user: dict = Depends(get_current
     }
 
 
-@router.delete("/{filename:path}", response_model=MessageResponse)
-async def delete_file(filename: str, current_user: dict = Depends(get_current_user)):
-    """Delete user's file.
+@router.delete("/", response_model=MessageResponse)
+async def delete_file(
+    path: str = Query(..., description="Path relative to the user's data directory"),
+    current_user: dict = Depends(get_current_user),
+):
+    """Delete a file or directory inside the user's data folder.
 
     Flow:
     - Resolve authentication and request parameters from FastAPI dependencies.
@@ -331,20 +334,21 @@ async def delete_file(filename: str, current_user: dict = Depends(get_current_us
     - Shape the response payload or raise the HTTP error the client should see.
 
     Used by:
-    - Frontend and API clients through the FastAPI DELETE /{filename:path} route.
+    - frontend file browser delete actions because path-bearing file operations
+      use the same query-parameter contract as raw-content reads.
     """
     user_id = current_user["id"]
     data_folder = get_user_data_folder(user_id)
-    file_path = data_folder / filename
+    file_path = data_folder / path
 
     if not validate_file_path(file_path, data_folder):
         raise AccessDeniedError("Access denied: file outside allowed directory")
     if not file_path.exists():
-        raise FileNotFoundError(f"File {filename} not found")
+        raise FileNotFoundError(f"File {path} not found")
     if file_path.is_dir():
         import shutil
         shutil.rmtree(file_path)
     else:
         file_path.unlink()
     _delete_parent_folder_if_redundant(file_path, data_folder)
-    return {"message": f"File {filename} deleted successfully"}
+    return {"message": f"File {path} deleted successfully"}

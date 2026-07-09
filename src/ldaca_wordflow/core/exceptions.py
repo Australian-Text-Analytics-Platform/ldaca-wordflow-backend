@@ -13,7 +13,8 @@ Flow:
   category (not found, forbidden, conflict, validation, internal, etc.).
 - Route handlers raise ``WorkspaceNotFoundError("my-workspace")`` instead of
   ``HTTPException(status_code=404, detail="...")``.
-- FastAPI's default HTTPException handler converts to JSON response.
+- ``main.app_error_handler`` converts all ``AppError`` subclasses to the
+  standard ``ErrorResponse`` JSON envelope.
 """
 
 from __future__ import annotations

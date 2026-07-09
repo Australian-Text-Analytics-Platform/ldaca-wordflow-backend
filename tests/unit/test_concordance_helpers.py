@@ -1,5 +1,8 @@
+from types import SimpleNamespace
+
 import polars as pl
 import pytest
+from ldaca_wordflow.api.workspaces.analyses import concordance_core
 from ldaca_wordflow.api.workspaces.analyses.concordance_core import (
     _serialize_materialized_rows,
     build_concordance_search_pattern,
@@ -117,6 +120,48 @@ def test_compute_concordance_page_groups_matches_by_source_row():
     assert all(hit["speaker"] == "A" for hit in grouped_row)
     assert all(hit["__source_node"] == "node-a" for hit in grouped_row)
     assert [hit["CONC_matched_text"] for hit in grouped_row] == ["alpha", "alpha"]
+
+
+def test_resolve_node_sources_uses_explicit_workspace_resolver(monkeypatch):
+    source = pl.DataFrame({"text": ["alpha"]}).lazy()
+    node = SimpleNamespace(name="Node A", data=source)
+    workspace = SimpleNamespace(nodes={"node-1": node})
+    resolver_calls: list[tuple[str, str]] = []
+
+    def require_workspace(user_id: str, workspace_id: str):
+        resolver_calls.append((user_id, workspace_id))
+        return workspace
+
+    class HiddenCurrentWorkspace:
+        def get_current_workspace_id(self, _user_id: str):
+            raise AssertionError("hidden current workspace id should not be read")
+
+        def get_current_workspace(self, _user_id: str):
+            raise AssertionError("hidden current workspace should not be read")
+
+        def set_current_workspace(self, _user_id: str, _workspace_id: str):
+            raise AssertionError("hidden current workspace should not be mutated")
+
+    monkeypatch.setattr(concordance_core, "require_workspace", require_workspace, raising=False)
+    monkeypatch.setattr(
+        concordance_core,
+        "workspace_manager",
+        HiddenCurrentWorkspace(),
+        raising=False,
+    )
+
+    sources, label_to_node_map, node_labels, error = concordance_core.resolve_node_sources(
+        "user-1",
+        "workspace-1",
+        {"node_ids": ["node-1"], "node_columns": {"node-1": "text"}},
+    )
+
+    assert error is None
+    assert resolver_calls == [("user-1", "workspace-1")]
+    assert sources["node-1"]["lf"] is source
+    assert sources["node-1"]["column"] == "text"
+    assert label_to_node_map == {"Node A": "node-1"}
+    assert node_labels == {"node-1": "Node A"}
 
 
 def test_compute_concordance_page_whole_word_ignores_partial_matches():

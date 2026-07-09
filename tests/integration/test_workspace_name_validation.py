@@ -9,7 +9,8 @@ async def test_create_workspace_rejects_invalid_name(test_client):
     )
     assert resp.status_code == 400
     payload = resp.json()
-    assert "Invalid workspace name" in str(payload.get("detail"))
+    assert payload["error"] == "invalid_input"
+    assert "Invalid workspace name" in payload["message"]
 
 
 @pytest.mark.anyio
@@ -21,10 +22,11 @@ async def test_rename_workspace_rejects_invalid_name(test_client):
     assert create.status_code == 200
     workspace_id = create.json()["id"]
 
-    resp = await test_client.put(
-        "/api/workspaces/name",
-        params={"new_name": "Bad/Name"},
+    resp = await test_client.patch(
+        f"/api/workspaces/{workspace_id}",
+        json={"name": "Bad/Name"},
     )
     assert resp.status_code == 400
     payload = resp.json()
-    assert "Invalid workspace name" in str(payload.get("detail"))
+    assert payload["error"] == "invalid_input"
+    assert "Invalid workspace name" in payload["message"]

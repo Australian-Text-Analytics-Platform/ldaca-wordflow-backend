@@ -1,8 +1,33 @@
 import polars as pl
 import pytest
+from ldaca_wordflow.analysis.implementations.concordance import (
+    ConcordanceRequest as AnalysisConcordanceRequest,
+)
+from ldaca_wordflow.analysis.manager import get_task_manager
+from ldaca_wordflow.analysis.models import AnalysisStatus, AnalysisTask
 from ldaca_wordflow.core.workspace import workspace_manager
 
 from docworkspace import Node
+
+
+def _save_parent_concordance_task(workspace_id: str, node_id: str) -> str:
+    """Create the parent task required by shared analysis-task action routes."""
+
+    task_id = f"concordance-{node_id}"
+    get_task_manager("test").save_task(
+        AnalysisTask(
+            task_id=task_id,
+            user_id="test",
+            workspace_id=workspace_id,
+            request=AnalysisConcordanceRequest(
+                node_ids=[node_id],
+                node_columns={node_id: "text"},
+                search_word="alpha",
+            ),
+            status=AnalysisStatus.COMPLETED,
+        )
+    )
+    return task_id
 
 
 @pytest.mark.anyio
@@ -21,10 +46,11 @@ async def test_concordance_detach_starts_task(authenticated_client, workspace_id
     )
     workspace.add_node(node)
     assert node is not None
+    task_id = _save_parent_concordance_task(workspace_id, node.id)
 
     # Act: call detach endpoint
     resp = await authenticated_client.post(
-        f"/api/workspaces/nodes/{node.id}/concordance/detach",
+        f"/api/workspaces/{workspace_id}/analysis-tasks/{task_id}/detachments",
         json={
             "node_id": node.id,
             "column": "text",
@@ -33,6 +59,7 @@ async def test_concordance_detach_starts_task(authenticated_client, workspace_id
             "num_right_tokens": 2,
             "regex": False,
             "case_sensitive": False,
+            "selected_columns": ["text", "CONC_left_context"],
         },
     )
 
@@ -72,9 +99,10 @@ async def test_concordance_detach_accepts_generated_columns(
         parents=[],
     )
     workspace.add_node(node)
+    task_id = _save_parent_concordance_task(workspace_id, node.id)
 
     resp = await authenticated_client.post(
-        f"/api/workspaces/nodes/{node.id}/concordance/detach",
+        f"/api/workspaces/{workspace_id}/analysis-tasks/{task_id}/detachments",
         json={
             "node_id": node.id,
             "column": "text",
@@ -126,10 +154,11 @@ async def test_concordance_detach_options_include_mandatory_and_optional_columns
         parents=[],
     )
     workspace.add_node(node)
+    task_id = _save_parent_concordance_task(workspace_id, node.id)
 
     resp = await authenticated_client.get(
-        f"/api/workspaces/nodes/{node.id}/concordance/detach-options",
-        params={"column": "text"},
+        f"/api/workspaces/{workspace_id}/analysis-tasks/{task_id}/detach-options",
+        params={"node_id": node.id, "column": "text"},
     )
 
     assert resp.status_code == 200, resp.text
@@ -197,10 +226,11 @@ async def test_concordance_detach_options_ignore_token_metadata(
             "params": {"lowercase": True, "remove_punct": True},
         },
     )
+    task_id = _save_parent_concordance_task(workspace_id, node.id)
 
     resp = await authenticated_client.get(
-        f"/api/workspaces/nodes/{node.id}/concordance/detach-options",
-        params={"column": "text"},
+        f"/api/workspaces/{workspace_id}/analysis-tasks/{task_id}/detach-options",
+        params={"node_id": node.id, "column": "text"},
     )
 
     assert resp.status_code == 200, resp.text

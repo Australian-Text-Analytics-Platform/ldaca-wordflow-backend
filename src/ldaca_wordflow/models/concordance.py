@@ -71,8 +71,9 @@ class ConcordanceDetachRequest(BaseModel):
     whole_word: bool = False
     case_sensitive: bool = False
     new_node_name: str | None = None  # If not provided, will be auto-generated
-    selected_columns: list[str] | None = None
+    selected_columns: list[str] = Field(min_length=1)
     materialized_path: str | None = None  # Reuse existing flattened parquet
+    model_config = ConfigDict(extra="forbid")
 
 
 class ConcordanceDispersionDetachRequest(BaseModel):
@@ -94,6 +95,7 @@ class ConcordanceDispersionDetachRequest(BaseModel):
         responses in the shape expected by frontend clients and tests.
     """
 
+    node_id: str
     column: str
     search_word: str
     num_left_tokens: int = 10
@@ -102,14 +104,13 @@ class ConcordanceDispersionDetachRequest(BaseModel):
     whole_word: bool = False
     case_sensitive: bool = False
     new_node_name: str | None = None
-    selected_columns: list[str] | None = None
+    selected_columns: list[str] = Field(min_length=1)
     materialized_path: str | None = None
     # When the slow path runs (no materialized_path), the worker also writes
     # the materialised flat parquet so the user doesn't have to click "Process
-    # All" separately before iterating on bin selections. The parent analysis
-    # task id + this node's id are needed to publish the standard
-    # `analysis_materialized` event back to the frontend.
-    parent_task_id: str | None = None
+    # All" separately before iterating on bin selections. The shared
+    # analysis-task route provides the parent task id for the standard
+    # `analysis_materialized` event.
     selected_bins: list[int] | None = None
     total_bins: int | None = None
     # When the chart legend is filtered, the detach should aggregate only over
@@ -119,6 +120,7 @@ class ConcordanceDispersionDetachRequest(BaseModel):
     # comparison so the filter agrees with the legend grouping.
     selected_matched_texts: list[str] | None = None
     match_case_insensitive: bool = False
+    model_config = ConfigDict(extra="forbid")
 
 
 class ConcordanceMaterializeRequest(BaseModel):
@@ -132,6 +134,7 @@ class ConcordanceMaterializeRequest(BaseModel):
         responses in the shape expected by frontend clients and tests.
     """
 
+    node_id: str
     column: str
     search_word: str
     num_left_tokens: int = 10
@@ -143,7 +146,7 @@ class ConcordanceMaterializeRequest(BaseModel):
     # engine the user actually searched with. Defaults to ``"regex"`` so
     # existing English flows are byte-identical.
     search_mode: Literal["regex", "tokens"] = "regex"
-    parent_task_id: str
+    model_config = ConfigDict(extra="forbid")
 
 
 class ConcordanceDetachOptionsResponse(BaseModel):

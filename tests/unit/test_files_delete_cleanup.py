@@ -14,7 +14,7 @@ async def test_delete_file_removes_parent_folder_when_only_readme_remains(
     readme_file.write_text("# Corpus info", encoding="utf-8")
 
     response = await authenticated_client.delete(
-        "/api/files/LDaCA/Corpus_Name/Corpus_Name.parquet"
+        "/api/files/", params={"path": "LDaCA/Corpus_Name/Corpus_Name.parquet"}
     )
 
     assert response.status_code == 200
@@ -38,7 +38,7 @@ async def test_delete_file_keeps_parent_folder_when_other_files_remain(
     sibling_file.write_text("text\nhello", encoding="utf-8")
 
     response = await authenticated_client.delete(
-        "/api/files/LDaCA/Corpus_Name/Corpus_Name.parquet"
+        "/api/files/", params={"path": "LDaCA/Corpus_Name/Corpus_Name.parquet"}
     )
 
     assert response.status_code == 200
@@ -61,7 +61,7 @@ async def test_delete_directory_recursively(
     readme_file.write_text("# Corpus info", encoding="utf-8")
 
     response = await authenticated_client.delete(
-        "/api/files/LDaCA/Corpus_Name"
+        "/api/files/", params={"path": "LDaCA/Corpus_Name"}
     )
 
     assert response.status_code == 200

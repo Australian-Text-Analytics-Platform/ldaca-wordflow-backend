@@ -8,7 +8,8 @@ Used by:
 
 Flow:
 - FastAPI mounts these routes through the workspace package router.
-- Route handlers resolve the current workspace/node and keep business logic in DocWorkspace or helpers.
+- Route handlers resolve and persist the workspace selected by the path
+  `workspace_id`.
 - Export and mutation endpoints materialize only at artifact or response boundaries.
 - Responses return node metadata, files, exports, or HTTP errors for invalid workspace state.
 """
@@ -17,267 +18,87 @@ import importlib
 import importlib.util
 import logging
 import os
-import shutil
-import tempfile
-from datetime import datetime
-from pathlib import Path
+import uuid
 from typing import cast
 
 import polars as pl
-from fastapi import APIRouter, Depends, HTTPException, Query
-
-from docworkspace import Node
+from fastapi import APIRouter, Depends, Query
+from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
 
 from ...core.auth import get_current_user
+from ...core.node_casting import cast_lazyframe_column
 
 # Note: DocWorkspace API helpers are not used directly in this HTTP layer
-from ...core.utils import get_user_data_folder, load_data_file, normalize_dtypes
-from ...core.workspace import workspace_manager
 from ...models import (
     CastNodeRequest,
     CastNodeResponse,
     RenameColumnRequest,
     WorkspaceNodeInfo,
 )
-from .schema_filter import frontend_node_info, project_visible
-from .utils import stage_dataframe_as_lazy, update_workspace
-from ...core.exceptions import InternalServiceError, InvalidInputError, NoActiveWorkspaceError, NotFoundError, WorkspaceNotFoundError
+from .schema_filter import frontend_node_info
+from .node_creation import create_workspace_node_from_file
+from .node_export import export_workspace_nodes_response
+from .utils import require_workspace, stage_dataframe_as_lazy, update_workspace
+from ...core.exceptions import (
+    InternalServiceError,
+    InvalidInputError,
+    NotFoundError,
+    WorkspaceNotFoundError,
+)
 
-router = APIRouter(prefix="/workspaces", tags=["workspace"])
+router = APIRouter(
+    prefix="/workspaces/{workspace_id:uuid}",
+    tags=["workspace"],
+)
 
 logger = logging.getLogger(__name__)
-
-EXPORT_FORMAT_SPECS: dict[str, dict[str, str | None]] = {
-    "csv": {
-        "extension": "csv",
-        "media_type": "text/csv; charset=utf-8",
-        "sink_method": "sink_csv",
-    },
-    "json": {
-        "extension": "json",
-        "media_type": "application/json",
-        "sink_method": None,
-    },
-    "parquet": {
-        "extension": "parquet",
-        "media_type": "application/octet-stream",
-        "sink_method": "sink_parquet",
-    },
-    "ipc": {
-        "extension": "arrow",
-        "media_type": "application/vnd.apache.arrow.file",
-        "sink_method": "sink_ipc",
-    },
-    "ndjson": {
-        "extension": "ndjson",
-        "media_type": "application/x-ndjson",
-        "sink_method": "sink_ndjson",
-    },
-    "xlsx": {
-        # Polars writes Excel via DataFrame.write_excel (no LazyFrame sink).
-        # Native dtypes (Int*, Float*, Date, Datetime, Boolean, etc.) are
-        # preserved as their Excel-native equivalents — see _export_node_artifact.
-        "extension": "xlsx",
-        "media_type": (
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+BINARY_RESPONSE_SCHEMA = {"schema": {"type": "string", "format": "binary"}}
+EXPORT_NODES_RESPONSES = {
+    200: {
+        "description": (
+            "Node export download. Single-node exports use the requested format; "
+            "multi-node exports are returned as a ZIP archive."
         ),
-        "sink_method": None,
-    },
+        "content": {
+            "text/csv": BINARY_RESPONSE_SCHEMA,
+            "application/json": BINARY_RESPONSE_SCHEMA,
+            "application/octet-stream": BINARY_RESPONSE_SCHEMA,
+            "application/vnd.apache.arrow.file": BINARY_RESPONSE_SCHEMA,
+            "application/x-ndjson": BINARY_RESPONSE_SCHEMA,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": BINARY_RESPONSE_SCHEMA,
+            "application/zip": BINARY_RESPONSE_SCHEMA,
+        },
+    }
 }
 
 
-def _stringify_value_for_csv(value: object) -> str | None:
-    """Support workspace base routes with a stringify value for csv helper.
+class WorkspaceNodeCreateRequest(BaseModel):
+    """Request body for creating a workspace node from a user data file.
 
-    Called by:
-    - Local helpers, route handlers, or service methods in this module because they need this unit's "Support workspace base routes with a stringify value for csv helper" behavior.
+    Used by:
+    - `add_node_to_workspace` because node creation changes workspace state and
+      should carry creation inputs in a JSON body rather than query parameters.
     """
 
-    if isinstance(value, pl.Series):
-        return str(value.to_list())
-    return None if value is None else str(value)
-
-
-def _stringify_lazyframe_for_csv(data: pl.LazyFrame) -> pl.LazyFrame:
-    """Convert every column to string for CSV exports only.
-
-    Called by:
-    - Local helpers, route handlers, or service methods in this module because they need this unit's "Convert every column to string for CSV exports only" behavior.
-    """
-    return data.select(
-        pl.col(column_name)
-        .map_elements(_stringify_value_for_csv, return_dtype=pl.String)
-        .alias(column_name)
-        for column_name in data.collect_schema().names()
+    filename: str = Field(min_length=1)
+    sheet_name: str | None = Field(
+        default=None,
+        description="Optional Excel sheet name to load when the source file is a workbook.",
     )
-
-
-def _prepare_dataframe_for_excel(data: pl.DataFrame) -> pl.DataFrame:
-    """Drop timezone metadata from datetime columns because Excel cannot store it.
-
-    Steps:
-    - Inspect collected DataFrame schema for timezone-aware datetime columns.
-    - Build replacement expressions that preserve values while removing timezone metadata.
-    - Return the original DataFrame unchanged when no Excel-incompatible columns exist.
-
-    Called by:
-    - Local helpers, route handlers, or service methods in this module because they need this unit's "Drop timezone metadata from datetime columns because Excel cannot store it" behavior.
-    """
-    timezone_aware_datetime_columns = [
-        pl.col(column_name).dt.replace_time_zone(None).alias(column_name)
-        for column_name, dtype in data.schema.items()
-        if dtype.base_type() == pl.Datetime
-        and getattr(dtype, "time_zone", None) is not None
-    ]
-    if not timezone_aware_datetime_columns:
-        return data
-    return data.with_columns(timezone_aware_datetime_columns)
-
-
-def _sanitize_export_label(value: str | None, fallback: str) -> str:
-    """Support workspace base routes with a sanitize export label helper.
-
-    Called by:
-    - Local helpers, route handlers, or service methods in this module because they need this unit's "Support workspace base routes with a sanitize export label helper" behavior.
-    """
-
-    cleaned = "".join(
-        "_" if (ord(ch) < 32 or ch in '<>:"/\\|?*') else ch
-        for ch in (value or fallback).strip()
-    ).strip()
-    return cleaned or fallback
-
-
-def _allocate_export_path(export_dir: Path, stem: str, extension: str) -> Path:
-    """Support workspace base routes with an allocate export path helper.
-
-    Called by:
-    - Local helpers, route handlers, or service methods in this module because they need this unit's "Support workspace base routes with an allocate export path helper" behavior.
-    """
-
-    candidate = export_dir / f"{stem}.{extension}"
-    suffix = 1
-    while candidate.exists():
-        candidate = export_dir / f"{stem}_{suffix}.{extension}"
-        suffix += 1
-    return candidate
-
-
-def _cleanup_export_dir(export_dir: Path) -> None:
-    """Support workspace base routes with a cleanup export dir helper.
-
-    Steps:
-    - Normalize caller input into the representation this module expects.
-    - Delegate stateful, expensive, or validating work to the owning manager/helper when needed.
-    - Return the compact value the caller uses for artifacts, validation, or response shaping.
-
-    Called by:
-    - Local helpers, route handlers, or service methods in this module because they need this unit's "Support workspace base routes with a cleanup export dir helper" behavior.
-    """
-
-    try:
-        shutil.rmtree(export_dir)
-    except OSError as exc:
-        logger.debug(
-            "Best-effort export temp dir cleanup failed for %s: %s", export_dir, exc
-        )
-
-
-def _export_node_artifact(
-    node: Node,
-    node_id: str,
-    export_dir: Path,
-    fmt: str,
-) -> tuple[str, Path]:
-    # Token columns are hydrated only inside analysis paths. Export the node's
-    # physical data unchanged.
-    """Support workspace base routes with an export node artifact helper.
-
-    Steps:
-    - Normalize caller input into the representation this module expects.
-    - Delegate stateful, expensive, or validating work to the owning manager/helper when needed.
-    - Return the compact value the caller uses for artifacts, validation, or response shaping.
-
-    Called by:
-    - Local helpers, route handlers, or service methods in this module because they need this unit's "Support workspace base routes with an export node artifact helper" behavior.
-    """
-
-    data = project_visible(node.data)
-
-    spec = EXPORT_FORMAT_SPECS[fmt]
-    stem = _sanitize_export_label(getattr(node, "name", None), node_id)
-    archive_name = f"{stem}.{spec['extension']}"
-    output_path = _allocate_export_path(export_dir, stem, str(spec["extension"]))
-    export_data = _stringify_lazyframe_for_csv(data) if fmt == "csv" else data
-
-    try:
-        sink_method_name = spec["sink_method"]
-        if sink_method_name is not None:
-            sink_method = getattr(export_data, sink_method_name, None)
-            if sink_method is None:
-                raise HTTPException(
-                    status_code=500,
-                    detail=(
-                        f"LazyFrame export method '{sink_method_name}' is not "
-                        f"available for format '{fmt}'"
-                    ),
-                )
-            sink_method(output_path)
-        elif fmt == "xlsx":
-            # Polars has no LazyFrame.sink_excel; collect once at the boundary.
-            # write_excel (via xlsxwriter) preserves Polars dtypes as native
-            # Excel types: integers stay numeric, Date/Datetime are written
-            # with appropriate Excel date/time formats, booleans round-trip,
-            # etc. Setting reasonable defaults for date/datetime so cells are
-            # recognised as dates rather than displayed as numbers.
-            collected_data = _prepare_dataframe_for_excel(
-                cast(pl.DataFrame, export_data.collect())
-            )
-            # Excel sheet names: max 31 chars, must not contain []:*?/\\.
-            # _sanitize_export_label already strips most of these, but it
-            # permits [] which Excel forbids — strip them here too.
-            sheet_name = (
-                "".join("_" if ch in "[]" else ch for ch in stem)[:31] or "Sheet1"
-            )
-            # Construct the xlsxwriter workbook ourselves so we can disable
-            # `strings_to_urls`. xlsxwriter's default auto-detects URL-like
-            # strings (http://, file://, mailto:, etc.) and writes them as
-            # hyperlinks — but Excel caps hyperlinks at 65,530 per sheet, so
-            # any export with >65,530 URL-shaped cells emits a flood of
-            # warnings, drops cells past the cap, and produces a workbook
-            # Excel reports as damaged. Tabular exports don't need clickable
-            # hyperlinks, and turning detection off both fixes the corruption
-            # and shrinks the output.
-            import xlsxwriter
-
-            workbook = xlsxwriter.Workbook(str(output_path), {"strings_to_urls": False})
-            try:
-                collected_data.write_excel(
-                    workbook=workbook,
-                    worksheet=sheet_name,
-                    dtype_formats={
-                        pl.Date: "yyyy-mm-dd",
-                        pl.Datetime: "yyyy-mm-dd hh:mm:ss",
-                        pl.Time: "hh:mm:ss",
-                    },
-                    autofit=True,
-                )
-            finally:
-                workbook.close()
-        else:
-            # Polars does not currently expose LazyFrame.sink_json, so JSON
-            # remains the single explicit eager export path.
-            collected_data = cast(pl.DataFrame, export_data.collect())
-            collected_data.write_json(output_path)
-    except Exception as exc:
-        raise InternalServiceError(f"Failed to export node '{node_id}' as {fmt}: {exc}",) from exc
-    return archive_name, output_path
-
+    mode: str = Field(
+        default="LazyFrame",
+        description=(
+            "How to treat the file: currently only 'LazyFrame' is supported; "
+            "files are staged as parquet and reloaded lazily."
+        ),
+    )
 
 @router.delete(
     "/nodes/{node_id}/columns/{column_name}", response_model=WorkspaceNodeInfo
 )
 async def delete_node_column(
+    workspace_id: uuid.UUID,
     node_id: str,
     column_name: str,
     current_user: dict = Depends(get_current_user),
@@ -294,21 +115,20 @@ async def delete_node_column(
     """
 
     user_id = current_user["id"]
-    workspace_id = workspace_manager.get_current_workspace_id(user_id)
-    ws = workspace_manager.get_current_workspace(user_id)
-    if not workspace_id or ws is None:
-        raise NoActiveWorkspaceError("No active workspace selected")
+    workspace_id_str = str(workspace_id)
+    ws = require_workspace(user_id, workspace_id_str)
     node = ws.nodes[node_id]
 
     node.data = node.data.drop(column_name)
     if node.document == column_name:
         node.document = None
-    update_workspace(user_id, workspace_id, best_effort=True)
+    update_workspace(user_id, workspace_id_str, ws, best_effort=True)
     return frontend_node_info(node)
 
 
 @router.put("/nodes/{node_id}/columns/{column_name}", response_model=WorkspaceNodeInfo)
 async def rename_node_column(
+    workspace_id: uuid.UUID,
     node_id: str,
     column_name: str,
     payload: RenameColumnRequest,
@@ -326,23 +146,22 @@ async def rename_node_column(
     """
 
     user_id = current_user["id"]
+    workspace_id_str = str(workspace_id)
     new_name = payload.new_name
 
-    workspace_id = workspace_manager.get_current_workspace_id(user_id)
-    ws = workspace_manager.get_current_workspace(user_id)
-    if not workspace_id or ws is None:
-        raise NoActiveWorkspaceError("No active workspace selected")
+    ws = require_workspace(user_id, workspace_id_str)
     node = ws.nodes[node_id]
 
     trimmed_name = new_name.strip()
 
     node.rename({column_name: trimmed_name})
-    update_workspace(user_id, workspace_id, best_effort=True)
+    update_workspace(user_id, workspace_id_str, ws, best_effort=True)
     return frontend_node_info(node)
 
 
 @router.post("/nodes/{node_id}/undo", response_model=WorkspaceNodeInfo)
 async def undo_node_operation(
+    workspace_id: uuid.UUID,
     node_id: str,
     current_user: dict = Depends(get_current_user),
 ):
@@ -358,22 +177,21 @@ async def undo_node_operation(
     """
 
     user_id = current_user["id"]
-    workspace_id = workspace_manager.get_current_workspace_id(user_id)
-    ws = workspace_manager.get_current_workspace(user_id)
-    if not workspace_id or ws is None:
-        raise NoActiveWorkspaceError("No active workspace selected")
+    workspace_id_str = str(workspace_id)
+    ws = require_workspace(user_id, workspace_id_str)
     node = ws.nodes[node_id]
 
     try:
         node.undo()
     except ValueError as exc:
         raise InvalidInputError(str(exc)) from exc
-    update_workspace(user_id, workspace_id, best_effort=True)
+    update_workspace(user_id, workspace_id_str, ws, best_effort=True)
     return frontend_node_info(node)
 
 
 @router.post("/nodes/{node_id}/redo", response_model=WorkspaceNodeInfo)
 async def redo_node_operation(
+    workspace_id: uuid.UUID,
     node_id: str,
     current_user: dict = Depends(get_current_user),
 ):
@@ -389,17 +207,15 @@ async def redo_node_operation(
     """
 
     user_id = current_user["id"]
-    workspace_id = workspace_manager.get_current_workspace_id(user_id)
-    ws = workspace_manager.get_current_workspace(user_id)
-    if not workspace_id or ws is None:
-        raise NoActiveWorkspaceError("No active workspace selected")
+    workspace_id_str = str(workspace_id)
+    ws = require_workspace(user_id, workspace_id_str)
     node = ws.nodes[node_id]
 
     try:
         node.redo()
     except ValueError as exc:
         raise InvalidInputError(str(exc)) from exc
-    update_workspace(user_id, workspace_id, best_effort=True)
+    update_workspace(user_id, workspace_id_str, ws, best_effort=True)
     return frontend_node_info(node)
 
 
@@ -490,17 +306,8 @@ _configure_numba_threading()
 
 @router.post("/nodes", response_model=WorkspaceNodeInfo)
 async def add_node_to_workspace(
-    filename: str,
-    sheet_name: str | None = Query(
-        None,
-        description="Optional Excel sheet name to load when the source file is a workbook.",
-    ),
-    mode: str = Query(
-        "LazyFrame",
-        description=(
-            "How to treat the file: currently only 'LazyFrame' is supported; files are staged as parquet and reloaded lazily."
-        ),
-    ),
+    workspace_id: uuid.UUID,
+    request: WorkspaceNodeCreateRequest,
     current_user: dict = Depends(get_current_user),
 ):
     """Add a data file as a new node to workspace.
@@ -510,7 +317,7 @@ async def add_node_to_workspace(
     lazy processing semantics.
 
     Flow:
-    - Resolve authentication and request parameters from FastAPI dependencies.
+    - Resolve authentication and request body from FastAPI dependencies.
     - Delegate validation, manager calls, artifacts, or state changes to the owning helper.
     - Shape the response payload or raise the HTTP error the client should see.
 
@@ -518,279 +325,76 @@ async def add_node_to_workspace(
     - Frontend and API clients through the FastAPI POST /nodes route because they need this unit's "Add a data file as a new node to workspace" behavior.
     """
     user_id = current_user["id"]
-    workspace_id = workspace_manager.get_current_workspace_id(user_id)
-    if not workspace_id:
-        raise NoActiveWorkspaceError("No active workspace selected")
-    # Load data file
-    user_data_folder = get_user_data_folder(user_id)
-    file_path = user_data_folder / filename
-
-    if not file_path.exists():
-        raise InvalidInputError(f"Data file not found: {filename}")
-    # Load the data
-    data = load_data_file(file_path, sheet_name=sheet_name)
-
-    # Validate requested mode (lazy-only workflow)
-    valid_modes = {"LazyFrame"}
-    if mode not in valid_modes:
-        raise InvalidInputError(f"Invalid mode '{mode}'. Expected one of {sorted(list(valid_modes))}",)
-    # Normalize to an eager Polars DataFrame
-    if isinstance(data, pl.LazyFrame):
-        eager_data: pl.DataFrame = cast(pl.DataFrame, data.collect())
-    elif isinstance(data, pl.DataFrame):
-        eager_data = data
-    else:
-        raise InvalidInputError(f"Expected Polars DataFrame/LazyFrame from loader, got {type(data).__name__}",)
-    eager_data, dtype_changes = normalize_dtypes(eager_data)
-
-    # Resolve workspace folder and stage parquet copy
-    workspace_dir = workspace_manager.get_workspace_dir(user_id, workspace_id)
-    if workspace_dir is None:
-        raise NotFoundError(f"Workspace folder not found for workspace {workspace_id}",)
-    node_name = filename
-    for ext in [
-        ".csv",
-        ".tsv",
-        ".xlsx",
-        ".json",
-        ".jsonl",
-        ".parquet",
-    ]:
-        if node_name.endswith(ext):
-            node_name = node_name[: -len(ext)]
-            break
-
-    # Use only the immediate parent folder + file stem as the data block name.
-    # Example: "sample_data/Hansard/housing_agenda" -> "Hansard/housing_agenda".
-    # Files at the root of the data folder keep just the stem.
-    normalized = node_name.replace("\\", "/")
-    parts = [part for part in normalized.split("/") if part]
-    if len(parts) >= 2:
-        node_name = "/".join(parts[-2:])
-    elif parts:
-        node_name = parts[-1]
-
-    lazy_data = stage_dataframe_as_lazy(
-        eager_data,
-        workspace_dir,
-        node_name=node_name,
-        document_column=None,
+    workspace_id_str = str(workspace_id)
+    return create_workspace_node_from_file(
+        user_id=user_id,
+        workspace_id=workspace_id_str,
+        filename=request.filename,
+        sheet_name=request.sheet_name,
+        mode=request.mode,
     )
-
-    if workspace_manager.get_current_workspace_id(user_id) != workspace_id:
-        if not workspace_manager.set_current_workspace(user_id, workspace_id):
-            raise WorkspaceNotFoundError("Workspace not found")
-    workspace = workspace_manager.get_current_workspace(user_id)
-    if workspace is None:
-        raise WorkspaceNotFoundError("Workspace not found")
-    node = Node(
-        data=lazy_data,
-        name=node_name,
-        workspace=workspace,
-        operation="manual_add",
-    )
-    workspace.add_node(node)
-    update_workspace(user_id, workspace_id, workspace)
-
-    info = frontend_node_info(node)
-    if dtype_changes:
-        info["dtype_normalization"] = dtype_changes
-    return info
 
 
 @router.post("/nodes/{node_id}/cast", response_model=CastNodeResponse)
 async def cast_node(
+    workspace_id: uuid.UUID,
     node_id: str,
     cast_data: CastNodeRequest,
     current_user: dict = Depends(get_current_user),
 ):
-    """Cast a single column data type in a node using Polars casting methods (in-place operation).
-
-    Args:
-        workspace_id: The workspace identifier
-        node_id: The node identifier to cast
-        cast_data: Dictionary with casting specifications:
-            - column: str - name of the column to cast
-            - target_type: str - target data type (e.g., "integer", "float", "string", "datetime", "boolean", "categorical")
-            - format: str (optional) - datetime format string for string to datetime conversion
-            Example: {"column": "date_col", "target_type": "datetime", "format": "%Y-%m-%d"}
-
-    Returns:
-        Dictionary with the updated node information after casting
-
-    Flow:
-    - Resolve authentication and request parameters from FastAPI dependencies.
-    - Delegate validation, manager calls, artifacts, or state changes to the owning helper.
-    - Shape the response payload or raise the HTTP error the client should see.
+    """Cast a single node column in place.
 
     Used by:
-    - Frontend and API clients through the FastAPI POST /nodes/{node_id}/cast route because they need this unit's "Cast a single column data type in a node using Polars casting methods (in-place operation)" behavior.
+    - frontend preprocessing/data-table cast actions because the HTTP route
+      owns workspace resolution and persistence while ``core.node_casting`` owns
+      the Polars expression workflow.
+
+    Flow:
+    - Resolve the workspace and target node from the path ids.
+    - Delegate cast validation and lazy-plan construction to
+      ``cast_lazyframe_column``.
+    - Persist the mutated workspace and return the existing cast response shape.
     """
     user_id = current_user["id"]
-    workspace_id = workspace_manager.get_current_workspace_id(user_id)
-    ws = workspace_manager.get_current_workspace(user_id)
-    if not workspace_id or ws is None:
-        raise NoActiveWorkspaceError("No active workspace selected")
-    column_name = cast_data.column
-    target_type = cast_data.target_type
-    datetime_format = cast_data.format
-    # Optional strict flag (Polars defaults to strict=True). We default to False to avoid
-    # hard failures on a few malformed rows (frontend previously succeeded with strict=False).
-    strict_flag = (
-        cast_data.strict if cast_data.strict is not None else False
-    )  # default lenient
-
+    workspace_id_str = str(workspace_id)
+    ws = require_workspace(user_id, workspace_id_str)
     node = ws.nodes[node_id]
-    lazyframe = node.data
+    result = cast_lazyframe_column(
+        node.data,
+        column_name=cast_data.column,
+        target_type=cast_data.target_type,
+        datetime_format=cast_data.format,
+        strict=cast_data.strict,
+    )
 
-    schema = lazyframe.collect_schema()
-    original_dtype = schema[column_name]
-    original_type = str(original_dtype)
-
-    # Determine operation based on target type
-    target_lower = target_type.lower()
-    orig_lower = (original_type or "").lower()
-
-    # Perform the casting using .with_columns() and expressions
-    try:
-        if target_lower == "datetime":
-            # Simplified: single to_datetime call mirroring notebook usage
-            # Default strict=False so rows that don't match become null instead of failing entire cast
-            try:
-                # If the source is already Datetime, skip parsing and only
-                # adjust timezone (the previous unconditional `.str.to_datetime`
-                # call raised "expected `String`, got `datetime[...]`").
-                if orig_lower.startswith("datetime"):
-                    parsed = pl.col(column_name)
-                elif datetime_format:
-                    parsed = pl.col(column_name).str.to_datetime(
-                        format=datetime_format, strict=bool(strict_flag)
-                    )
-                else:
-                    parsed = pl.col(column_name).str.to_datetime(
-                        strict=bool(strict_flag)
-                    )
-
-                # Ensure timezone-aware UTC.
-                # If the format includes a timezone specifier (%z, %:z, %#z),
-                # str.to_datetime already returns a tz-aware Datetime and
-                # replace_time_zone would fail.  In that case we only need
-                # convert_time_zone.  For naive results we set the timezone.
-                _tz_tokens = ("%z", "%:z", "%#z")
-                _format_has_tz = datetime_format and any(
-                    tok in datetime_format for tok in _tz_tokens
-                )
-                # An existing Datetime column may already carry a timezone
-                # (e.g. "datetime[μs, UTC]"); replace_time_zone would fail on
-                # those, so use convert_time_zone instead.
-                _source_has_tz = orig_lower.startswith("datetime") and "," in orig_lower
-                if _format_has_tz or _source_has_tz:
-                    cast_expr = parsed.dt.convert_time_zone("UTC").alias(column_name)
-                else:
-                    cast_expr = parsed.dt.replace_time_zone("UTC").alias(column_name)
-            except Exception as e:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"Error casting column '{column_name}' to {target_type}: {e}. "
-                        "This often occurs when some rows don't match the supplied format. "
-                        "Note your notebook example used .head() (sampling) which may hide later malformed rows. "
-                        "Either clean inconsistent rows or keep strict=False (default) to set them null."
-                    ),
-                )
-        elif target_lower in ("string", "utf8", "str", "text"):
-            # Datetime -> string (optionally with format) or no-op if already string
-            # Detect current dtype (best effort)
-            col_dtype = original_type
-
-            if str(col_dtype).startswith("Datetime"):
-                if datetime_format:
-                    # Use chrono-compatible formatting tokens
-                    cast_expr = (
-                        pl.col(column_name)
-                        .dt.strftime(datetime_format)
-                        .alias(column_name)
-                    )
-                else:
-                    # Fallback: cast to Utf8 (ISO rendering)
-                    cast_expr = pl.col(column_name).cast(pl.Utf8).alias(column_name)
-            else:
-                # Already string or unknown -> ensure Utf8
-                cast_expr = pl.col(column_name).cast(pl.Utf8).alias(column_name)
-            # For string target we treat provided format as format_used if any
-        elif target_lower == "integer":
-            col_expr = pl.col(column_name)
-            cast_expr = col_expr.cast(pl.Int64, strict=False).alias(column_name)
-        elif target_lower == "float":
-            # String -> number (float) conversion
-            cast_expr = pl.col(column_name).cast(pl.Float64).alias(column_name)
-        elif target_lower == "categorical":
-            col_expr = pl.col(column_name)
-            if any(
-                tok in orig_lower for tok in ["utf8", "string", "str", "categorical"]
-            ):
-                cast_expr = col_expr.cast(pl.Categorical, strict=False).alias(
-                    column_name
-                )
-            else:
-                cast_expr = (
-                    col_expr.cast(pl.Utf8, strict=False)
-                    .cast(pl.Categorical, strict=False)
-                    .alias(column_name)
-                )
-        else:
-            raise InvalidInputError(f"Casting to '{target_type}' is not yet supported. Supported: string, integer, float, datetime, categorical.",)
-        # Perform a small head() sample validation to surface conversion errors early
-        try:
-            sample_plan = lazyframe.head(50).with_columns(cast_expr)
-            sample_plan.collect()
-        except Exception as sample_err:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Sample validation failed when casting column '{column_name}' to {target_type}: {sample_err}"
-                ),
-            )
-
-        # Apply the casting with .with_columns(); preserve original frame type after validation
-        casted_lazy = lazyframe.with_columns(cast_expr)
-        node.data = casted_lazy
-
-        # Save workspace to disk
-        # Ensure current workspace is persisted after casting
-        update_workspace(user_id, workspace_id)
-        # Get new data type for response
-        new_schema = casted_lazy.collect_schema()
-        new_type = str(new_schema[column_name])
-        return {
-            "state": "successful",
-            "node_id": node_id,
-            "cast_info": {
-                "column": column_name,
-                "original_type": original_type,
-                "new_type": new_type,
-                "target_type": target_type,
-                "format_used": datetime_format if datetime_format else None,
-                "strict_used": bool(strict_flag)
-                if target_lower == "datetime"
-                else None,
-            },
-            "message": (
-                f"Successfully cast column '{column_name}' from {original_type} to {new_type}"
-                + (" (UTC timezone applied)" if target_lower == "datetime" else "")
-            ),
-        }
-
-    except Exception as cast_error:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Error casting column '{column_name}' to {target_type}: {str(cast_error)}. "
-            f"Check that the target data type is valid and the data can be converted.",
-        )
+    node.data = result.lazyframe
+    update_workspace(user_id, workspace_id_str, ws)
+    return {
+        "state": "successful",
+        "node_id": node_id,
+        "cast_info": {
+            "column": cast_data.column,
+            "original_type": result.original_type,
+            "new_type": result.new_type,
+            "target_type": result.target_type,
+            "format_used": result.format_used,
+            "strict_used": result.strict_used,
+        },
+        "message": (
+            f"Successfully cast column '{cast_data.column}' "
+            f"from {result.original_type} to {result.new_type}"
+            + (" (UTC timezone applied)" if result.strict_used is not None else "")
+        ),
+    }
 
 
-@router.get("/export")
+@router.get(
+    "/export",
+    response_class=FileResponse,
+    responses=EXPORT_NODES_RESPONSES,
+)
 async def export_nodes(
+    workspace_id: uuid.UUID,
     node_ids: str,  # comma separated list
     format: str = "csv",
     current_user: dict = Depends(get_current_user),
@@ -808,89 +412,12 @@ async def export_nodes(
     Used by:
     - Frontend and API clients through the FastAPI GET /export route because they need this unit's "Export one or more workspace nodes as downloadable file(s)" behavior.
     """
-    import zipfile
-
-    from fastapi.responses import FileResponse
-    from starlette.background import BackgroundTask
-
     user_id = current_user["id"]
-    workspace_id = workspace_manager.get_current_workspace_id(user_id)
-    ws = workspace_manager.get_current_workspace(user_id)
-    if not workspace_id or ws is None:
-        raise NoActiveWorkspaceError("No active workspace selected")
-    fmt = format.lower()
-    spec = EXPORT_FORMAT_SPECS.get(fmt)
-    if spec is None:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Unsupported format '{format}'. Supported: "
-                f"{sorted(EXPORT_FORMAT_SPECS)}"
-            ),
-        )
-
-    ids = [nid.strip() for nid in node_ids.split(",") if nid.strip()]
-    if not ids:
-        raise InvalidInputError("No node_ids provided")
-    def build_timestamp_fragment() -> str:
-        """Build timestamp fragment values used by workspace base routes.
-
-        Called by:
-        - The `export_nodes` local workflow in this module because they need this unit's "Build timestamp fragment values used by workspace base routes" behavior.
-        """
-
-        now = datetime.now()
-        return (
-            f"{now.month:02d}-{now.day:02d}_"
-            f"{now.hour:02d}-{now.minute:02d}-{now.second:02d}"
-        )
-
-    export_dir = Path(tempfile.mkdtemp(prefix=f"workspace_export_{workspace_id}_"))
-    cleanup_on_return = True
-    try:
-        exported: list[tuple[str, Path]] = []
-
-        for nid in ids:
-            node = ws.nodes[nid]
-            exported.append(
-                _export_node_artifact(
-                    node=node,
-                    node_id=nid,
-                    export_dir=export_dir,
-                    fmt=fmt,
-                )
-            )
-
-        # Use FileResponse so the response includes a Content-Length header.
-        # Tauri's WebView2 on Windows fails ("Failed to fetch") on cross-origin
-        # responses delivered with Transfer-Encoding: chunked when the body is
-        # large enough — replacing the previous StreamingResponse with a sized
-        # FileResponse fixes >10MB exports without sacrificing on-disk streaming.
-        if len(exported) == 1:
-            filename, artifact_path = exported[0]
-            cleanup_on_return = False
-            return FileResponse(
-                path=str(artifact_path),
-                media_type=str(spec["media_type"]),
-                filename=filename,
-                background=BackgroundTask(_cleanup_export_dir, export_dir),
-            )
-
-        zip_filename = (
-            f"{build_timestamp_fragment()}_"
-            f"{_sanitize_export_label(getattr(ws, 'name', None), workspace_id)}.zip"
-        )
-        zip_path = _allocate_export_path(export_dir, "_workspace_export", "zip")
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            for archive_name, artifact_path in exported:
-                zf.write(artifact_path, arcname=archive_name)
-        cleanup_on_return = False
-        return FileResponse(
-            path=str(zip_path),
-            media_type="application/zip",
-            filename=zip_filename,
-            background=BackgroundTask(_cleanup_export_dir, export_dir),
-        )
-    finally:
-        if cleanup_on_return:
-            _cleanup_export_dir(export_dir)
+    workspace_id_str = str(workspace_id)
+    ws = require_workspace(user_id, workspace_id_str)
+    return export_workspace_nodes_response(
+        workspace=ws,
+        workspace_id=workspace_id_str,
+        node_ids=node_ids,
+        export_format=format,
+    )

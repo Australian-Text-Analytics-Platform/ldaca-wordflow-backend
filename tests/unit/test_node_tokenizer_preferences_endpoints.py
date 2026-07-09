@@ -16,42 +16,48 @@ async def test_tokenizer_models_endpoint_returns_polars_text_inventory(
 
 
 async def test_set_node_document_column_persists_node_metadata(
-    authenticated_client, tiny_node_id
+    authenticated_client, workspace_id, tiny_node_id
 ):
     response = await authenticated_client.put(
-        f"/api/workspaces/nodes/{tiny_node_id}/document-column",
+        f"/api/workspaces/{workspace_id}/nodes/{tiny_node_id}/document-column",
         json={"document_column": "document"},
     )
 
     assert response.status_code == 200
     assert response.json()["document"] == "document"
 
-    info_response = await authenticated_client.get(
-        f"/api/workspaces/nodes/{tiny_node_id}"
+    info_response = await authenticated_client.post(
+        f"/api/workspaces/{workspace_id}/nodes:batchGet",
+        json={"nodes": [tiny_node_id]},
     )
     assert info_response.status_code == 200
-    assert info_response.json()["document"] == "document"
+    assert info_response.json()["nodes"][0]["document"] == "document"
 
 
-async def test_set_node_color_persists_node_metadata(authenticated_client, tiny_node_id):
+async def test_set_node_color_persists_node_metadata(
+    authenticated_client, workspace_id, tiny_node_id
+):
     response = await authenticated_client.post(
-        f"/api/workspaces/nodes/{tiny_node_id}/color",
+        f"/api/workspaces/{workspace_id}/nodes/{tiny_node_id}/color",
         json={"color": "#2563eb"},
     )
 
     assert response.status_code == 200
     assert response.json()["color"] == "#2563eb"
 
-    info_response = await authenticated_client.get(
-        f"/api/workspaces/nodes/{tiny_node_id}"
+    info_response = await authenticated_client.post(
+        f"/api/workspaces/{workspace_id}/nodes:batchGet",
+        json={"nodes": [tiny_node_id]},
     )
     assert info_response.status_code == 200
-    assert info_response.json()["color"] == "#2563eb"
+    assert info_response.json()["nodes"][0]["color"] == "#2563eb"
 
 
-async def test_set_node_color_rejects_invalid_hex(authenticated_client, tiny_node_id):
+async def test_set_node_color_rejects_invalid_hex(
+    authenticated_client, workspace_id, tiny_node_id
+):
     response = await authenticated_client.post(
-        f"/api/workspaces/nodes/{tiny_node_id}/color",
+        f"/api/workspaces/{workspace_id}/nodes/{tiny_node_id}/color",
         json={"color": "blue"},
     )
 
@@ -59,10 +65,10 @@ async def test_set_node_color_rejects_invalid_hex(authenticated_client, tiny_nod
 
 
 async def test_set_node_tokenization_preference_persists_column_metadata(
-    authenticated_client, tiny_node_id
+    authenticated_client, workspace_id, tiny_node_id
 ):
     response = await authenticated_client.put(
-        f"/api/workspaces/nodes/{tiny_node_id}/tokenization-preference",
+        f"/api/workspaces/{workspace_id}/nodes/{tiny_node_id}/tokenization-preference",
         json={
             "source_column": "document",
             "model": "native:plain_words_en",
@@ -74,20 +80,22 @@ async def test_set_node_tokenization_preference_persists_column_metadata(
     tokenizer_models = response.json()["tokenizer_models"]
     assert tokenizer_models["document"] == "native:plain_words_en"
 
-    info_response = await authenticated_client.get(
-        f"/api/workspaces/nodes/{tiny_node_id}"
+    info_response = await authenticated_client.post(
+        f"/api/workspaces/{workspace_id}/nodes:batchGet",
+        json={"nodes": [tiny_node_id]},
     )
     assert info_response.status_code == 200
     assert (
-        info_response.json()["tokenizer_models"]["document"] == "native:plain_words_en"
+        info_response.json()["nodes"][0]["tokenizer_models"]["document"]
+        == "native:plain_words_en"
     )
 
 
 async def test_set_node_tokenization_preference_can_clear_column_metadata(
-    authenticated_client, tiny_node_id
+    authenticated_client, workspace_id, tiny_node_id
 ):
     set_response = await authenticated_client.put(
-        f"/api/workspaces/nodes/{tiny_node_id}/tokenization-preference",
+        f"/api/workspaces/{workspace_id}/nodes/{tiny_node_id}/tokenization-preference",
         json={
             "source_column": "document",
             "model": "native:plain_words_en",
@@ -98,7 +106,7 @@ async def test_set_node_tokenization_preference_can_clear_column_metadata(
     assert "document" in set_response.json()["tokenizer_models"]
 
     clear_response = await authenticated_client.put(
-        f"/api/workspaces/nodes/{tiny_node_id}/tokenization-preference",
+        f"/api/workspaces/{workspace_id}/nodes/{tiny_node_id}/tokenization-preference",
         json={"source_column": "document", "model": None},
     )
 

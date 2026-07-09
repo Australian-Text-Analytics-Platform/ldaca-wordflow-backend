@@ -13,7 +13,7 @@ from ldaca_wordflow.core.workspace import workspace_manager
 from ldaca_wordflow.models import QuotationEngineConfig
 
 USER_ID = "test"
-WORKSPACE_ID = "test-workspace"
+WORKSPACE_ID = "00000000-0000-0000-0000-000000000301"
 TASK = "quotation"
 
 
@@ -166,8 +166,8 @@ async def test_update_context_length_persists_preference(
     authenticated_client, seeded_quotation_analysis
 ):
     task_id = seeded_quotation_analysis
-    response = await authenticated_client.post(
-        f"/api/workspaces/quotation/tasks/{task_id}/result",
+    response = await authenticated_client.patch(
+        f"/api/workspaces/{WORKSPACE_ID}/analysis-tasks/{task_id}/preferences",
         json={"context_length": 42},
     )
     assert response.status_code == 200
@@ -187,15 +187,15 @@ async def test_update_context_length_clamps_bounds(
 ):
     task_id = seeded_quotation_analysis
 
-    high_response = await authenticated_client.post(
-        f"/api/workspaces/quotation/tasks/{task_id}/result",
+    high_response = await authenticated_client.patch(
+        f"/api/workspaces/{WORKSPACE_ID}/analysis-tasks/{task_id}/preferences",
         json={"context_length": 99999},
     )
     assert high_response.status_code == 200
     assert high_response.json()["data"]["context_length"] == 2000
 
-    low_response = await authenticated_client.post(
-        f"/api/workspaces/quotation/tasks/{task_id}/result",
+    low_response = await authenticated_client.patch(
+        f"/api/workspaces/{WORKSPACE_ID}/analysis-tasks/{task_id}/preferences",
         json={"context_length": -5},
     )
     assert low_response.status_code == 200
@@ -231,10 +231,12 @@ async def test_quotation_current_result_respects_page_params(
             {"alpha": [{"quote": "alpha"}], "beta": [{"quote": "beta"}]}
         ),
     )
-    response = await getattr(authenticated_client, method)(
-        f"/api/workspaces/quotation/tasks/{task_id}/result",
-        **request_kwargs,
+    url = (
+        f"/api/workspaces/{WORKSPACE_ID}/analysis-tasks/{task_id}/result"
+        if method == "get"
+        else f"/api/workspaces/{WORKSPACE_ID}/analysis-tasks/{task_id}/result-query"
     )
+    response = await getattr(authenticated_client, method)(url, **request_kwargs)
     assert response.status_code == 200
     _assert_quotation_page_payload(response.json(), page=2, quote="beta")
 
@@ -260,7 +262,7 @@ async def test_quotation_current_result_returns_all_quotes_for_document_page(
     )
 
     response = await authenticated_client.get(
-        f"/api/workspaces/quotation/tasks/{task_id}/result",
+        f"/api/workspaces/{WORKSPACE_ID}/analysis-tasks/{task_id}/result",
         params={"page": 1, "page_size": 1},
     )
     assert response.status_code == 200
@@ -315,7 +317,7 @@ async def test_quotation_endpoint_submits_without_recomputing_on_demand(
     )
 
     response = await authenticated_client.post(
-        "/api/workspaces/nodes/node-1/quotation",
+        f"/api/workspaces/{WORKSPACE_ID}/nodes/node-1/quotation",
         json={"column": "text", "page": 2, "page_size": 1},
     )
 

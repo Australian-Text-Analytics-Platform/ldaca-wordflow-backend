@@ -44,7 +44,9 @@ def _stub_worker_task_manager(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_clear_topic_modeling_results_success(authenticated_client, workspace_id):
-    response = await authenticated_client.delete("/api/workspaces/topic-modeling")
+    response = await authenticated_client.delete(
+        f"/api/workspaces/{workspace_id}/topic-modeling"
+    )
 
     assert response.status_code == 200
     assert response.json() == {
@@ -94,7 +96,7 @@ async def test_topic_modeling_result_returns_payload(
     )
 
     response = await authenticated_client.get(
-        f"/api/workspaces/topic-modeling/tasks/{task_id}/result"
+        f"/api/workspaces/{workspace_id}/analysis-tasks/{task_id}/result"
     )
 
     assert response.status_code == 200
@@ -134,7 +136,7 @@ async def test_topic_modeling_request_persists_random_seed_and_word_count(
     workspace.add_node(node)
 
     response = await authenticated_client.post(
-        "/api/workspaces/topic-modeling",
+        f"/api/workspaces/{workspace_id}/topic-modeling",
         json={
             "node_ids": [node.id],
             "node_columns": {node.id: "document"},
@@ -262,7 +264,7 @@ async def test_topic_modeling_detach_keeps_topic_meaning_only_on_support_node(
     )
 
     detach_response = await authenticated_client.post(
-        f"/api/workspaces/topic-modeling/tasks/{task_id}/detach",
+        f"/api/workspaces/{workspace_id}/analysis-tasks/{task_id}/detachments",
         json={
             "node_ids": [source_node.id],
             # The topic column is now an explicit, default-selected choice.
@@ -292,26 +294,25 @@ async def test_topic_modeling_detach_keeps_topic_meaning_only_on_support_node(
     assert detached_df["document"].to_list() == ["beta gamma", "delta epsilon"]
     assert detached_df["TOPIC_top1"].to_list() == [0, 1]
 
-    graph_response = await authenticated_client.get("/api/workspaces/graph")
+    graph_response = await authenticated_client.get(f"/api/workspaces/{workspace_id}/graph")
     assert graph_response.status_code == 200, graph_response.text
     nodes = graph_response.json().get("nodes", [])
     detached_node = next(node for node in nodes if node.get("id") == detached_node_id)
     support_node = next(
         node for node in nodes if node.get("id") == topic_meanings_node_id
     )
+    assert "schema" not in detached_node
+    assert "schema" not in support_node
 
-    detached_raw_schema = detached_node.get("schema", [])
-    detached_schema = (
-        {column["name"]: column["js_type"] for column in detached_raw_schema}
-        if isinstance(detached_raw_schema, list)
-        else detached_raw_schema
+    info_response = await authenticated_client.post(
+        f"/api/workspaces/{workspace_id}/nodes:batchGet",
+        json={"nodes": [detached_node_id, topic_meanings_node_id]},
     )
-    support_raw_schema = support_node.get("schema", [])
-    support_schema = (
-        {column["name"]: column["js_type"] for column in support_raw_schema}
-        if isinstance(support_raw_schema, list)
-        else support_raw_schema
-    )
+    assert info_response.status_code == 200, info_response.text
+
+    detached_info, support_info = info_response.json()["nodes"]
+    detached_schema = detached_info.get("schema", {})
+    support_schema = support_info.get("schema", {})
 
     assert "TOPIC_topic_meaning" not in detached_schema
     assert support_schema["TOPIC_topic_meaning"] in {"list[string]", "List(String)"}
@@ -420,7 +421,7 @@ async def test_topic_modeling_detach_survives_artifact_cleanup(
     )
 
     detach_response = await authenticated_client.post(
-        f"/api/workspaces/topic-modeling/tasks/{task_id}/detach",
+        f"/api/workspaces/{workspace_id}/analysis-tasks/{task_id}/detachments",
         json={
             "node_ids": [source_node.id],
             # The topic column is now an explicit, default-selected choice.
@@ -547,7 +548,7 @@ async def test_topic_modeling_detach_with_meanings_override_replaces_meanings(
     )
 
     detach_response = await authenticated_client.post(
-        f"/api/workspaces/topic-modeling/tasks/{task_id}/detach",
+        f"/api/workspaces/{workspace_id}/analysis-tasks/{task_id}/detachments",
         json={
             "node_ids": [source_node.id],
             "selected_columns": {source_node.id: ["document"]},
@@ -718,7 +719,7 @@ async def test_topic_modeling_detach_emits_top1_and_distribution_columns(
     )
 
     response = await authenticated_client.post(
-        f"/api/workspaces/topic-modeling/tasks/{task_id}/detach",
+        f"/api/workspaces/{workspace_id}/analysis-tasks/{task_id}/detachments",
         json={
             "node_ids": [source_node.id],
             "selected_columns": {

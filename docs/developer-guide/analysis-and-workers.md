@@ -26,10 +26,22 @@ Tabbed analysis tasks are equal, independent records. The backend must not treat
 one task as the current task for an analysis type, and submitting a task in one
 tab must not delete or replace another tab's task. The frontend persists the
 tab-to-task relationship in `tabs.json` (`tab_id -> task_id`) and should fetch
-request/result payloads by explicit `task_id`. Analysis request/result APIs do
-not accept frontend `tab_id`; tab identity stays in the frontend tab sidecar.
-The same sidecar also stores tab-owned node selectors: legacy `inputs` for the
-default source selector and `input_sets` for additional named selectors.
+request/result payloads by explicit `task_id` through
+`GET /api/workspaces/{workspace_id}/analysis-tasks/{task_id}/request` and
+`GET /api/workspaces/{workspace_id}/analysis-tasks/{task_id}/result`. Analysis
+request/result APIs do not accept frontend `tab_id`; tab identity stays in the
+frontend tab sidecar. The same sidecar also stores tab-owned node selectors:
+legacy `inputs` for the default source selector and `input_sets` for additional
+named selectors.
+
+Task follow-up actions use the same shared namespace. Detach-option reads and
+detach submissions go through
+`/api/workspaces/{workspace_id}/analysis-tasks/{task_id}/detach-options` and
+`/detachments`; concordance-specific dispersion actions use
+`/dispersion-bins` and `/dispersion-detachments`; concordance and quotation
+materialization use `/materializations`. Node identity for node-scoped task
+actions belongs in the request body or query (`node_id`), while the parent task
+identity belongs in the URL.
 
 ## Worker Registry
 
@@ -110,14 +122,16 @@ The analysis routes live under `api/workspaces/analyses/`.
 - Token frequencies submit independent worker jobs, store result artifacts,
   support explicit task request/result endpoints, and expose update/clear flows.
 - Concordance submits worker-backed regex or token-mode jobs, then supports
-  result paging, dispersion bins, detach, dispersion detach, and materialization.
+  result paging, dispersion bins, detach, dispersion detach, and materialization
+  through the shared analysis-task routes.
 - Quotation submits worker-backed local-extractor or remote-service jobs, then
-  pages, detaches, or materializes quote results.
+  pages, detaches, or materializes quote results through the shared
+  analysis-task routes.
 - Sequential analysis submits a worker-backed task. The route snapshots the
   selected node plan and returns a running task id; the worker collects and
   aggregates the time or numeric buckets, then persists the result for the
-  task-specific request/result endpoints. Selected-period detach remains a
-  follow-up route over a completed result.
+  shared analysis-task request/result endpoints. Selected-period detach is a
+  follow-up action over a completed result through the shared detachment route.
 - Topic modeling runs entirely through the Rust `polars-text` pipeline. The
   worker builds a single-column frame of sampled documents and calls
   `pl.col(...).text.topic_modeling(...)`, which chunks text by paragraph,
@@ -130,20 +144,20 @@ The analysis routes live under `api/workspaces/analyses/`.
   content-hash cache, so there is no Python-side embedding cache for topic
   modeling.
 - Annotation currently exposes workspace helper routes for setup/editing data:
-  `POST /api/workspaces/annotation/class-descriptions` creates an empty
+  `POST /api/workspaces/{workspace_id}/annotation/class-descriptions` creates an empty
   `class`/`description` data block, while
-  `GET /api/workspaces/annotation/class-descriptions/{node_id}` and
-  `PUT /api/workspaces/annotation/class-descriptions/{node_id}` round-trip
+  `GET /api/workspaces/{workspace_id}/annotation/class-descriptions/{node_id}` and
+  `PUT /api/workspaces/{workspace_id}/annotation/class-descriptions/{node_id}` round-trip
   the selected class/description columns for the frontend editor.
-  `POST /api/workspaces/annotation/source/{node_id}/annotation-column` adds an
+  `POST /api/workspaces/{workspace_id}/annotation/source/{node_id}/annotation-column` adds an
   empty string annotation column to a source node, and
-  `PUT /api/workspaces/annotation/source/{node_id}/annotation-cell` writes one
+  `PUT /api/workspaces/{workspace_id}/annotation/source/{node_id}/annotation-cell` writes one
   cell of that column (`column_name`, absolute `row_index`, nullable `value`)
   using a Polars `pl.when(int_range == row_index)` rewrite restaged via
   `stage_dataframe_as_lazy`; blank/whitespace values are stored as null.
   AI-assisted annotation runs entirely server-side under
-  `POST /api/workspaces/annotation/ai/{models,preview,preview/state,preview/clear,annotate-all,detach-previewed}`
-  plus `PUT .../annotation/ai/preview/override`,
+  `POST /api/workspaces/{workspace_id}/annotation/ai/{models,preview,preview/state,preview/clear,annotate-all,detach-previewed}`
+  plus `PUT .../{workspace_id}/annotation/ai/preview/override`,
   backed by the provider-dispatch engine in `core/annotation_ai.py`. The browser
   never calls a model provider: it posts the provider id, optional custom base URL,
   API key, model, and instruction to these routes, and the engine dispatches the
@@ -216,9 +230,9 @@ The analysis routes live under `api/workspaces/analyses/`.
   available from `GET /api/workspaces/tokenizer-models`; it is sourced from
   `polars-text` and carries model IDs, display labels, and supported ISO 639-1
   language codes without backend recommendation policy. Node selectors persist
-  document columns through `PUT /api/workspaces/nodes/{node_id}/document-column`.
+  document columns through `PUT /api/workspaces/{workspace_id}/nodes/{node_id}/document-column`.
   Token frequency and concordance store per-column preferences through
-  `PUT /api/workspaces/nodes/{node_id}/tokenization-preference`, then derive the
+  `PUT /api/workspaces/{workspace_id}/nodes/{node_id}/tokenization-preference`, then derive the
   model from `Node.tokenization` when submitting worker jobs. Token-frequency
   requests still include `node_tokenizer_models` as task/snapshot settings and
   as a short-lived fallback while a preference write is in flight.

@@ -11,10 +11,11 @@ Flow:
 from __future__ import annotations
 
 import math
+import uuid
 from typing import Any, cast
 
 import polars as pl
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 
 from ...core.auth import get_current_user
 from ...models import (
@@ -24,24 +25,24 @@ from ...models import (
     WorkspaceNodeInfo,
 )
 from .schema_filter import frontend_node_info
-from ...core.exceptions import InternalServiceError, InvalidInputError
+from ...core.exceptions import AppError, InternalServiceError, InvalidInputError
 from .utils import (
     Node,
     _create_and_persist_child_node,
     _extract_lazy_schema,
-    _propagated_tokenization,
-    require_current_workspace,
-    update_workspace,
+    require_workspace,
 )
 
-router = APIRouter(prefix="/workspaces", tags=["nodes"])
+router = APIRouter(
+    prefix="/workspaces/{workspace_id:uuid}",
+    tags=["nodes"],
+)
 
 
-def _get_concat_nodes(user_id: str, node_ids: list[str]) -> list[Node]:
+def _get_concat_nodes(workspace, node_ids: list[str]) -> list[Node]:
     """Resolve node IDs to workspace Node objects, validating count and duplicates."""
     if not node_ids:
         raise InvalidInputError("At least two node IDs are required")
-    ws = require_current_workspace(user_id)
     nodes: list[Node] = []
     seen: set[str] = set()
     for raw_node_id in node_ids:
@@ -50,7 +51,7 @@ def _get_concat_nodes(user_id: str, node_ids: list[str]) -> list[Node]:
             continue
         if node_id in seen:
             raise InvalidInputError(f"Duplicate node id '{node_id}' provided",)
-        node = ws.nodes[node_id]
+        node = workspace.nodes[node_id]
         nodes.append(node)
         seen.add(node_id)
     if len(nodes) < 2:
@@ -135,6 +136,7 @@ def _derive_concat_node_name(nodes: list[Node], desired_name: str | None) -> str
 
 @router.post("/nodes/concat/preview", response_model=FilterPreviewResponse)
 async def concat_nodes_preview(
+    workspace_id: uuid.UUID,
     request: ConcatPreviewRequest,
     page: int = Query(1, ge=1),
     page_size: int = Query(10, ge=1, le=500),
@@ -142,8 +144,9 @@ async def concat_nodes_preview(
 ):
     """Preview the result of concatenating multiple nodes vertically."""
     user_id = current_user["id"]
+    workspace = require_workspace(user_id, str(workspace_id))
     try:
-        nodes = _get_concat_nodes(user_id, request.node_ids)
+        nodes = _get_concat_nodes(workspace, request.node_ids)
         aligned_frames, columns, dtypes = _validate_and_align_concat_nodes(nodes)
         concat_lazy = pl.concat(aligned_frames, how="vertical")
         if request.deduplicate:
@@ -197,19 +200,22 @@ async def concat_nodes_preview(
             "dtypes": dtypes,
             "pagination": pagination,
         }
-    except HTTPException:
+    except AppError:
         raise
     except Exception as exc:
         raise InternalServiceError(str(exc)) from exc
 @router.post("/nodes/concat", response_model=WorkspaceNodeInfo)
 async def concat_nodes(
+    workspace_id: uuid.UUID,
     request: ConcatRequest,
     current_user: dict = Depends(get_current_user),
 ):
     """Create a new child node by concatenating multiple nodes vertically."""
     user_id = current_user["id"]
+    workspace_id_str = str(workspace_id)
+    workspace = require_workspace(user_id, workspace_id_str)
     try:
-        nodes = _get_concat_nodes(user_id, request.node_ids)
+        nodes = _get_concat_nodes(workspace, request.node_ids)
         aligned_frames, _, _ = _validate_and_align_concat_nodes(nodes)
         concat_lazy = pl.concat(aligned_frames, how="vertical")
         if request.deduplicate:
@@ -223,8 +229,6 @@ async def concat_nodes(
             operation_args = ", ".join(labels)
         op_name = "concat_unique" if request.deduplicate else "concat"
         operation_label = f"{op_name}({operation_args})"
-        workspace = require_current_workspace(user_id)
-        workspace_id = workspace.id
         new_node = _create_and_persist_child_node(
             workspace=workspace,
             data=concat_lazy,
@@ -232,10 +236,10 @@ async def concat_nodes(
             operation=operation_label,
             parents=parent_nodes,
             user_id=user_id,
-            workspace_id=workspace_id,
+            workspace_id=workspace_id_str,
         )
         return frontend_node_info(new_node)
-    except HTTPException:
+    except AppError:
         raise
     except Exception as exc:
         raise InternalServiceError(str(exc)) from exc

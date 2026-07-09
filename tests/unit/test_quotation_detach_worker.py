@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import polars as pl
+from ldaca_wordflow.api.workspaces.analyses.generated_columns import QUOTE_COLUMN_NAMES
 from ldaca_wordflow.core.worker_tasks_quotation import run_quotation_detach_task
 
 
@@ -57,6 +58,7 @@ def test_quotation_detach_task_writes_node_payload_without_internal_source_colum
         engine_config={},
         new_node_name="detached_quotation",
         include_document_column=True,
+        selected_generated_columns=list(QUOTE_COLUMN_NAMES),
         extra_columns_data={"speaker_label": ["narrator"]},
         progress_callback=lambda progress, message: progress_updates.append(
             (

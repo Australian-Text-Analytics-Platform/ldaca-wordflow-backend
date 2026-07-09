@@ -2,7 +2,7 @@
 
 Exposes updated paths:
     POST /workspaces/{workspace_id}/nodes/{node_id}/sequential-analysis
-    POST /workspaces/{workspace_id}/sequential-analysis/tasks/{task_id}/result
+    PATCH /workspaces/{workspace_id}/analysis-tasks/{task_id}/preferences
 
 Used by:
 - FastAPI workspace analysis routers, frontend analysis features, and backend tests because they need this unit's "Sequential Analysis endpoints extracted from monolithic base module" behavior.
@@ -19,17 +19,14 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime
 from typing import Any, Optional, cast
-from uuid import uuid4
+from uuid import UUID
 
 import polars as pl
-from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, Query
+from pydantic import BaseModel, ConfigDict
 
 from docworkspace import Node
 
-from ....analysis.implementations.sequential_analysis import (
-    SequentialAnalysisRequest as AnalysisSequentialAnalysisRequest,
-)
 from ....analysis.manager import get_task_manager
 from ....analysis.models import AnalysisStatus, AnalysisTask
 from ....analysis.results import GenericAnalysisResult
@@ -37,12 +34,10 @@ from ....core.auth import get_current_user
 from ....core.exceptions import (
     InternalServiceError,
     InvalidInputError,
-    NoActiveWorkspaceError,
     NotFoundError,
     ResourceConflictError,
     TaskNotFoundError,
 )
-from ....core.worker_input_snapshots import create_worker_input_snapshot
 from ....core.workspace import workspace_manager
 from ....models import (
     SequentialAnalysisDetachResponse,
@@ -52,16 +47,18 @@ from ....models import (
     SequentialAnalysisRequest,
     SequentialAnalysisResponse,
 )
-from ..utils import ensure_task_synced, update_workspace
+from ..utils import ensure_task_synced, require_workspace, update_workspace
+from .sequential_analysis_submission import submit_sequential_analysis
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/workspaces")
+router = APIRouter(
+    prefix="/workspaces/{workspace_id:uuid}",
+)
 
 
 VALID_CHART_TYPES = {"line", "bar", "area"}
 DEFAULT_CHART_TYPE = "line"
-SEQUENTIAL_TASK = "sequential_analysis"
 
 # Polars duration suffix and strftime format for each custom-interval unit.
 # Keys must match the Literal in `SequentialAnalysisRequest.custom_interval_unit`.
@@ -105,6 +102,7 @@ class SequentialAnalysisDetachRequest(BaseModel):
     selected_periods: list[SelectedPeriod]
     visible_groups: list[VisibleGroupSelection] | None = None
     new_node_name: str
+    model_config = ConfigDict(extra="forbid")
 
 
 def _coerce_period_bound(value: Any, *, column_type: str, time_dtype: Any) -> Any:
@@ -196,8 +194,8 @@ def _build_group_filter_expression(
     return group_expr
 
 
-def _get_active_workspace(user_id: str) -> tuple[str, Any]:
-    """Return active workspace data used by sequential-analysis routes.
+def _get_path_workspace(user_id: str, workspace_id: UUID) -> tuple[str, Any]:
+    """Return the workspace selected by the explicit route path.
 
     Steps:
     - Normalize caller input into the representation this module expects.
@@ -205,14 +203,13 @@ def _get_active_workspace(user_id: str) -> tuple[str, Any]:
     - Return the compact value the caller uses for artifacts, validation, or response shaping.
 
     Called by:
-    - Local helpers, route handlers, or service methods in this module because they need this unit's "Return active workspace data used by sequential-analysis routes" behavior.
+    - Sequential-analysis route handlers that need the workspace selected by
+      the URL path.
     """
 
-    workspace_id = workspace_manager.get_current_workspace_id(user_id)
-    ws = workspace_manager.get_current_workspace(user_id)
-    if not workspace_id or ws is None:
-        raise NoActiveWorkspaceError("No active workspace selected")
-    return workspace_id, ws
+    workspace_id_str = str(workspace_id)
+    ws = require_workspace(user_id, workspace_id_str)
+    return workspace_id_str, ws
 
 
 def _normalize_type_name(value: object | None) -> str | None:
@@ -514,6 +511,7 @@ def _run_sequential_analysis(
     response_model=SequentialAnalysisPreviewResponse,
 )
 async def preview_sequential_analysis(
+    workspace_id: UUID,
     node_id: str,
     request: SequentialAnalysisRequest,
     include_data: bool = Query(
@@ -542,7 +540,7 @@ async def preview_sequential_analysis(
         of that machinery is wrong for a pure preview query.
     """
     user_id = current_user["id"]
-    _workspace_id, ws = _get_active_workspace(user_id)
+    _workspace_id, ws = _get_path_workspace(user_id, workspace_id)
 
     try:
         node = ws.nodes[node_id]
@@ -592,6 +590,7 @@ async def preview_sequential_analysis(
     response_model=SequentialAnalysisResponse,
 )
 async def run_sequential_analysis(
+    workspace_id: UUID,
     node_id: str,
     request: SequentialAnalysisRequest,
     current_user: dict = Depends(get_current_user),
@@ -610,126 +609,18 @@ async def run_sequential_analysis(
     - Produces aggregated time-series counts and stores them under an explicit task id.
     """
     user_id = current_user["id"]
-    workspace_id, ws = _get_active_workspace(user_id)
-
-    try:
-        if node_id not in ws.nodes:
-            raise NotFoundError(f"Node {node_id} not found")
-
-        if request.group_by_columns:
-            if len(request.group_by_columns) > 3:
-                raise InvalidInputError("Maximum 3 group by columns allowed")
-
-        valid_frequencies = [
-            "hourly",
-            "daily",
-            "weekly",
-            "monthly",
-            "quarterly",
-            "yearly",
-            "custom",
-        ]
-        if (
-            request.column_type == "datetime"
-            and request.frequency not in valid_frequencies
-        ):
-            raise InvalidInputError(
-                f"Invalid frequency '{request.frequency}'. Valid options: {valid_frequencies}",
-            )
-
-        req_dict = request.model_dump()
-        req_dict["node_id"] = node_id
-        req_model = AnalysisSequentialAnalysisRequest(**req_dict)
-        task_id = str(uuid4())
-        artifact_dir = workspace_manager.ensure_workspace_artifacts_dir(
-            user_id, workspace_id
-        )
-        if artifact_dir is None:
-            raise InternalServiceError("Workspace artifacts directory is unavailable")
-        input_snapshot_dir = create_worker_input_snapshot(
-            user_id=user_id,
-            workspace_id=workspace_id,
-            task_id=task_id,
-            node_ids=[node_id],
-            workspace=ws,
-            artifact_dir=artifact_dir,
-        )
-
-        task_manager = get_task_manager(user_id)
-        task_manager.save_task(
-            AnalysisTask(
-                task_id=task_id,
-                user_id=user_id,
-                workspace_id=workspace_id,
-                request=req_model,
-                status=AnalysisStatus.RUNNING,
-            )
-        )
-
-        worker_task_manager = workspace_manager.get_task_manager(user_id)
-        worker_task = await worker_task_manager.submit_task(
-            user_id=user_id,
-            workspace_id=workspace_id,
-            task_type=SEQUENTIAL_TASK,
-            task_id=task_id,
-            task_args={
-                "input_snapshot_dir": str(input_snapshot_dir),
-                "node_id": node_id,
-                "request_payload": req_dict,
-            },
-            task_name="Sequential Analysis",
-        )
-        return {
-            "state": "running",
-            "data": None,
-            "columns": None,
-            "total_records": None,
-            "chart_type": None,
-            "metadata": {"task_id": task_id},
-        }
-
-    except (InvalidInputError, NotFoundError):
-        raise
-    except Exception as e:  # pragma: no cover
-        logger.error("Unexpected sequential analysis error: %s", e, exc_info=True)
-        raise InternalServiceError(f"Internal server error: {e}")
+    workspace_id_str, ws = _get_path_workspace(user_id, workspace_id)
+    return await submit_sequential_analysis(
+        user_id=user_id,
+        workspace_id=workspace_id_str,
+        workspace=ws,
+        node_id=node_id,
+        request=request,
+    )
 
 
-@router.get(
-    "/sequential-analysis/tasks/{task_id}/request",
-    response_model=AnalysisSequentialAnalysisRequest,
-)
-async def sequential_analysis_task_request(
-    task_id: str,
-    current_user: dict = Depends(get_current_user),
-):
-    """Return stored request payload for a sequential-analysis task.
-
-    Flow:
-    - Resolve authentication and request parameters from FastAPI dependencies.
-    - Delegate validation, manager calls, artifacts, or state changes to the owning helper.
-    - Shape the response payload or raise the HTTP error the client should see.
-
-    Used by:
-    - Frontend and API clients through the FastAPI GET /sequential-analysis/tasks/{task_id}/request route because they need this unit's "Return stored request payload for a sequential-analysis task" behavior.
-    """
-    user_id = current_user["id"]
-    workspace_id = workspace_manager.get_current_workspace_id(user_id)
-    if not workspace_id:
-        raise NoActiveWorkspaceError("No active workspace selected")
-    task_manager = get_task_manager(user_id)
-    task = task_manager.get_task(task_id)
-    if task is None:
-        raise TaskNotFoundError("Task not found")
-    request = task.request
-    return request.model_dump()
-
-
-@router.get(
-    "/sequential-analysis/tasks/{task_id}/result",
-    response_model=SequentialAnalysisResponse,
-)
 async def sequential_analysis_task_result(
+    workspace_id: str,
     task_id: str,
     current_user: dict = Depends(get_current_user),
 ):
@@ -741,12 +632,10 @@ async def sequential_analysis_task_result(
     - Shape the response payload or raise the HTTP error the client should see.
 
     Used by:
-    - Frontend and API clients through the FastAPI GET /sequential-analysis/tasks/{task_id}/result route because they need this unit's "Return stored result payload for a sequential-analysis task" behavior.
+    - shared analysis-task result route because sequential-analysis results
+      need the existing worker-sync and pending-state normalization.
     """
     user_id = current_user["id"]
-    workspace_id = workspace_manager.get_current_workspace_id(user_id)
-    if not workspace_id:
-        raise NoActiveWorkspaceError("No active workspace selected")
     task_manager = get_task_manager(user_id)
 
     task = await ensure_task_synced(user_id, workspace_id, task_id, task_manager)
@@ -759,11 +648,8 @@ async def sequential_analysis_task_result(
     return result.to_json()
 
 
-@router.post(
-    "/sequential-analysis/tasks/{task_id}/result",
-    response_model=SequentialAnalysisPreferenceUpdateResponse,
-)
 async def update_sequential_analysis_task_result(
+    workspace_id: str,
     task_id: str,
     updates: SequentialAnalysisPreferenceUpdateRequest | None,
     current_user: dict = Depends(get_current_user),
@@ -776,7 +662,8 @@ async def update_sequential_analysis_task_result(
     - Shape the response payload or raise the HTTP error the client should see.
 
     Used by:
-    - frontend chart-type preference updates because they need this unit's "Persist display-only sequential analysis options on a saved task" behavior.
+    - shared analysis-task preferences route because chart-type changes are
+      presentation-only task preferences.
 
     Why:
     - Avoids recomputation when only chart presentation changes.
@@ -786,9 +673,6 @@ async def update_sequential_analysis_task_result(
         task-preferences helper could reduce duplication.
     """
     user_id = current_user["id"]
-    workspace_id = workspace_manager.get_current_workspace_id(user_id)
-    if not workspace_id:
-        raise NoActiveWorkspaceError("No active workspace selected")
     task_manager = get_task_manager(user_id)
     task = task_manager.get_task(task_id)
     if not task or not task.result:
@@ -822,11 +706,8 @@ async def update_sequential_analysis_task_result(
     }
 
 
-@router.post(
-    "/sequential-analysis/tasks/{task_id}/detach",
-    response_model=SequentialAnalysisDetachResponse,
-)
 async def detach_sequential_analysis_task(
+    workspace_id: UUID,
     task_id: str,
     request: SequentialAnalysisDetachRequest,
     current_user: dict = Depends(get_current_user),
@@ -839,10 +720,11 @@ async def detach_sequential_analysis_task(
     - Shape the response payload or raise the HTTP error the client should see.
 
     Used by:
-    - Frontend and API clients through the FastAPI POST /sequential-analysis/tasks/{task_id}/detach route because they need this unit's "Create a filtered child node from selected sequential-analysis periods" behavior.
+    - shared analysis-task detachment route because selected
+      sequential-analysis periods should be detached through the task resource.
     """
     user_id = current_user["id"]
-    workspace_id, ws = _get_active_workspace(user_id)
+    workspace_id_str, ws = _get_path_workspace(user_id, workspace_id)
 
     if not request.selected_periods:
         raise InvalidInputError("At least one selected period is required")
@@ -912,7 +794,7 @@ async def detach_sequential_analysis_task(
     ws.add_node(new_node)
     # Smart insertion: keep the detached node directly below its source node.
     ws.place_node_after_parent(new_node)
-    update_workspace(user_id, workspace_id, best_effort=True)
+    update_workspace(user_id, workspace_id_str, best_effort=True)
 
     return {
         "new_node_id": getattr(new_node, "id", None),

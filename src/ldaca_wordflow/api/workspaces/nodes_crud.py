@@ -11,11 +11,12 @@ Flow:
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import datetime, timezone
 from typing import Any, cast
 
 import polars as pl
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 from polars_text.models import PREDEFINED_MODELS, predefined_model_records
 
 from ...core.auth import get_current_user
@@ -43,6 +44,8 @@ from ...models import (
     NodeTokenizationPreferenceRequest,
     TokenizerModelsResponse,
     WorkspaceNodeInfo,
+    WorkspaceNodeInfoRequest,
+    WorkspaceNodeInfoResponse,
 )
 from .schema_filter import frontend_node_info, project_visible
 from .utils import (
@@ -51,14 +54,18 @@ from .utils import (
     _propagated_tokenization,
     _serialize_column_scalar,
     _validate_existing_column,
-    require_current_workspace,
-    require_current_workspace_id,
+    require_workspace,
     update_workspace,
 )
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/workspaces", tags=["nodes"])
+router = APIRouter()
+tokenizer_router = APIRouter(prefix="/workspaces", tags=["nodes"])
+scoped_router = APIRouter(
+    prefix="/workspaces/{workspace_id:uuid}",
+    tags=["nodes"],
+)
 
 
 def _normalise_iso6391_language_code(code: str | None) -> str | None:
@@ -81,7 +88,7 @@ def _normalise_iso6391_language_code(code: str | None) -> str | None:
 # ── Tokenizer models ────────────────────────────────────────────────────
 
 
-@router.get("/tokenizer-models", response_model=TokenizerModelsResponse)
+@tokenizer_router.get("/tokenizer-models", response_model=TokenizerModelsResponse)
 async def get_tokenizer_models(
     _current_user: dict = Depends(get_current_user),
 ):
@@ -92,32 +99,49 @@ async def get_tokenizer_models(
 # ── Node CRUD ───────────────────────────────────────────────────────────
 
 
-@router.get("/nodes/{node_id}", response_model=WorkspaceNodeInfo)
-async def get_node_info(
-    node_id: str,
-    current_user: dict = Depends(get_current_user),
-):
-    """Return workspace node metadata."""
-    user_id = current_user["id"]
-    ws = require_current_workspace(user_id)
-    return frontend_node_info(ws.nodes[node_id])
+def _workspace_nodes_info_response(
+    workspace,
+    request: WorkspaceNodeInfoRequest,
+) -> WorkspaceNodeInfoResponse:
+    """Build full node-info metadata for requested ids in one workspace.
+
+    Used by:
+    - current and explicit workspace node-info routes because both routes share
+      the same collection contract and differ only in workspace resolution.
+
+    Flow: resolve each requested node in caller order, serialize full frontend
+        node metadata, and fail fast when any requested id is absent.
+    """
+    nodes = []
+    for node_id in request.nodes:
+        node = workspace.nodes.get(node_id)
+        if node is None:
+            raise NodeNotFoundError(f"Node not found: {node_id}")
+        nodes.append(frontend_node_info(node))
+    return WorkspaceNodeInfoResponse(nodes=nodes)
 
 
-@router.get("/nodes/{node_id}/data", response_model=NodeDataResponse)
-async def get_node_data(
+def _node_data_response(
+    workspace,
     node_id: str,
-    page: int = 1,
-    page_size: int = 20,
-    sort_by: str | None = None,
-    descending: bool = False,
-    filter_column: str | None = None,
-    filter_value: str | None = None,
-    filter_op: str = "contains",
-    current_user: dict = Depends(get_current_user),
-):
-    """Return paginated node data rows."""
-    user_id = current_user["id"]
-    lf = project_visible(require_current_workspace(user_id).nodes[node_id].data)
+    page: int,
+    page_size: int,
+    sort_by: str | None,
+    descending: bool,
+    filter_column: str | None,
+    filter_value: str | None,
+    filter_op: str,
+) -> dict[str, object]:
+    """Build paginated node rows for one resolved workspace.
+
+    Used by:
+    - current and explicit workspace node-data routes because table reads should
+      share sorting/filtering/pagination semantics regardless of route shape.
+
+    Flow: project visible columns, optionally filter/sort, collect the requested
+        page at the HTTP boundary, and return row data plus table metadata.
+    """
+    lf = project_visible(workspace.nodes[node_id].data)
     schema = {col: str(dtype) for col, dtype in lf.collect_schema().items()}
     columns = list(schema.keys())
 
@@ -172,43 +196,105 @@ async def get_node_data(
     }
 
 
-@router.get("/nodes/{node_id}/shape", response_model=NodeShapeResponse)
+@scoped_router.post("/nodes:batchGet", response_model=WorkspaceNodeInfoResponse)
+async def get_workspace_nodes_info_by_id(
+    workspace_id: uuid.UUID,
+    request: WorkspaceNodeInfoRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """Return node metadata for requested nodes in an explicit workspace.
+
+    Used by:
+    - generated frontend clients and API callers whose cache keys already carry
+      workspace id and should send the same id across the HTTP boundary.
+
+    Flow: accept a body-based batch-get request, load the path workspace id,
+        then reuse the collection node-info response builder.
+    """
+    user_id = current_user["id"]
+    ws = require_workspace(user_id, str(workspace_id))
+    return _workspace_nodes_info_response(ws, request)
+
+
+@scoped_router.get("/nodes/{node_id}/data", response_model=NodeDataResponse)
+async def get_node_data_by_workspace_id(
+    workspace_id: uuid.UUID,
+    node_id: str,
+    page: int = 1,
+    page_size: int = 20,
+    sort_by: str | None = None,
+    descending: bool = False,
+    filter_column: str | None = None,
+    filter_value: str | None = None,
+    filter_op: str = "contains",
+    current_user: dict = Depends(get_current_user),
+):
+    """Return paginated node rows from an explicit workspace.
+
+    Used by:
+    - frontend table, annotation preview, and sampling reads because callers
+      already have workspace id in selection state and cache keys.
+
+    Flow: let the UUID path converter reject static route names, load the path
+        workspace id, then reuse the shared node-data response builder.
+    """
+    user_id = current_user["id"]
+    return _node_data_response(
+        require_workspace(user_id, str(workspace_id)),
+        node_id,
+        page,
+        page_size,
+        sort_by,
+        descending,
+        filter_column,
+        filter_value,
+        filter_op,
+    )
+
+
+@scoped_router.get("/nodes/{node_id}/shape", response_model=NodeShapeResponse)
 async def get_node_shape(
+    workspace_id: uuid.UUID,
     node_id: str,
     current_user: dict = Depends(get_current_user),
 ):
     """Return the row x column shape of a workspace node."""
     user_id = current_user["id"]
-    return {"shape": require_current_workspace(user_id).nodes[node_id].shape}
+    return {"shape": require_workspace(user_id, str(workspace_id)).nodes[node_id].shape}
 
 
-@router.delete("/nodes/{node_id}", response_model=NodeActionResponse)
-async def delete_node(node_id: str, current_user: dict = Depends(get_current_user)):
+@scoped_router.delete("/nodes/{node_id}", response_model=NodeActionResponse)
+async def delete_node(
+    workspace_id: uuid.UUID,
+    node_id: str,
+    current_user: dict = Depends(get_current_user),
+):
     """Delete a node from the workspace."""
     user_id = current_user["id"]
-    workspace = require_current_workspace(user_id)
-    workspace_id = workspace.id
+    workspace_id_str = str(workspace_id)
+    workspace = require_workspace(user_id, workspace_id_str)
     success = workspace.remove_node(node_id)
     if success:
-        update_workspace(user_id, workspace_id)
+        update_workspace(user_id, workspace_id_str, workspace)
     if not success:
         raise NodeNotFoundError("Node not found")
     return {"state": "successful", "message": "Node deleted successfully"}
 
 
-@router.put("/nodes/{node_id}/name", response_model=WorkspaceNodeInfo)
+@scoped_router.put("/nodes/{node_id}/name", response_model=WorkspaceNodeInfo)
 async def update_node_name(
+    workspace_id: uuid.UUID,
     node_id: str,
     new_name: str,
     current_user: dict = Depends(get_current_user),
 ):
     """Rename a workspace node."""
     user_id = current_user["id"]
-    workspace = require_current_workspace(user_id)
-    workspace_id = workspace.id
+    workspace_id_str = str(workspace_id)
+    workspace = require_workspace(user_id, workspace_id_str)
     node = workspace.nodes[node_id]
     node.name = new_name
-    update_workspace(user_id, workspace_id, best_effort=True)
+    update_workspace(user_id, workspace_id_str, workspace, best_effort=True)
     try:
         return frontend_node_info(node)
     except Exception:
@@ -216,15 +302,16 @@ async def update_node_name(
         return {"id": getattr(node, "id", node_id), "name": new_name}
 
 
-@router.post("/nodes/{node_id}/clone", response_model=WorkspaceNodeInfo)
+@scoped_router.post("/nodes/{node_id}/clone", response_model=WorkspaceNodeInfo)
 async def clone_node(
+    workspace_id: uuid.UUID,
     node_id: str,
     current_user: dict = Depends(get_current_user),
 ):
     """Clone a workspace node (deep-copy its LazyFrame)."""
     user_id = current_user["id"]
-    workspace = require_current_workspace(user_id)
-    workspace_id = workspace.id
+    workspace_id_str = str(workspace_id)
+    workspace = require_workspace(user_id, workspace_id_str)
     node = workspace.nodes[node_id]
 
     def _unique_clone_name(original: str) -> str:
@@ -254,7 +341,7 @@ async def clone_node(
         # Smart insertion: place the clone right below its source node so the list
         # view keeps the clone next to the node it was derived from.
         workspace.place_node_after_parent(new_node)
-        update_workspace(user_id, workspace_id)
+        update_workspace(user_id, workspace_id_str, workspace)
         try:
             return frontend_node_info(new_node)
         except Exception:
@@ -264,16 +351,17 @@ async def clone_node(
         raise InternalServiceError(str(exc)) from exc
 
 
-@router.put("/nodes/{node_id}/document-column", response_model=WorkspaceNodeInfo)
+@scoped_router.put("/nodes/{node_id}/document-column", response_model=WorkspaceNodeInfo)
 async def set_node_document_column(
+    workspace_id: uuid.UUID,
     node_id: str,
     request: NodeDocumentColumnUpdateRequest,
     current_user: dict = Depends(get_current_user),
 ):
     """Set or clear the document column on a workspace node."""
     user_id = current_user["id"]
-    workspace_id = require_current_workspace_id(user_id)
-    ws = require_current_workspace(user_id)
+    workspace_id_str = str(workspace_id)
+    ws = require_workspace(user_id, workspace_id_str)
     node = ws.nodes[node_id]
     document_column = (request.document_column or "").strip()
 
@@ -283,38 +371,40 @@ async def set_node_document_column(
     else:
         node.document = None
 
-    update_workspace(user_id, workspace_id, best_effort=True)
+    update_workspace(user_id, workspace_id_str, ws, best_effort=True)
     return frontend_node_info(node)
 
 
-@router.post("/nodes/{node_id}/color", response_model=WorkspaceNodeInfo)
+@scoped_router.post("/nodes/{node_id}/color", response_model=WorkspaceNodeInfo)
 async def set_node_color(
+    workspace_id: uuid.UUID,
     node_id: str,
     request: NodeColorUpdateRequest,
     current_user: dict = Depends(get_current_user),
 ):
     """Set the persistent visualization colour on a workspace node."""
     user_id = current_user["id"]
-    workspace_id = require_current_workspace_id(user_id)
-    ws = require_current_workspace(user_id)
+    workspace_id_str = str(workspace_id)
+    ws = require_workspace(user_id, workspace_id_str)
     node = ws.nodes[node_id]
     node.color = request.color.lower()
-    update_workspace(user_id, workspace_id, best_effort=True)
+    update_workspace(user_id, workspace_id_str, ws, best_effort=True)
     return frontend_node_info(node)
 
 
-@router.put(
+@scoped_router.put(
     "/nodes/{node_id}/tokenization-preference", response_model=WorkspaceNodeInfo
 )
 async def set_node_tokenization_preference(
+    workspace_id: uuid.UUID,
     node_id: str,
     request: NodeTokenizationPreferenceRequest,
     current_user: dict = Depends(get_current_user),
 ):
     """Set or clear a tokenization preference on a workspace node."""
     user_id = current_user["id"]
-    workspace_id = require_current_workspace_id(user_id)
-    ws = require_current_workspace(user_id)
+    workspace_id_str = str(workspace_id)
+    ws = require_workspace(user_id, workspace_id_str)
     node = ws.nodes[node_id]
     source_column = request.source_column.strip()
     model = (request.model or "").strip()
@@ -324,7 +414,7 @@ async def set_node_tokenization_preference(
     if not model:
         _validate_existing_column(node, source_column)
         node.unregister_tokenization(source_column)
-        update_workspace(user_id, workspace_id, best_effort=True)
+        update_workspace(user_id, workspace_id_str, ws, best_effort=True)
         return frontend_node_info(node)
     if model not in PREDEFINED_MODELS:
         raise InvalidInputError(f"Unknown tokenizer model: {model}")
@@ -338,18 +428,19 @@ async def set_node_tokenization_preference(
         )
     except KeyError as exc:
         raise InvalidInputError(str(exc)) from exc
-    update_workspace(user_id, workspace_id, best_effort=True)
+    update_workspace(user_id, workspace_id_str, ws, best_effort=True)
     return frontend_node_info(node)
 
 
-@router.get("/nodes/{node_id}/query-plan", response_model=NodeQueryPlanResponse)
+@scoped_router.get("/nodes/{node_id}/query-plan", response_model=NodeQueryPlanResponse)
 async def get_node_query_plan(
+    workspace_id: uuid.UUID,
     node_id: str,
     current_user: dict = Depends(get_current_user),
 ):
     """Return the Polars query plan for a workspace node."""
     user_id = current_user["id"]
-    ws = require_current_workspace(user_id)
+    ws = require_workspace(user_id, str(workspace_id))
     lazyframe = ws.nodes[node_id].data
     plan = lazyframe.explain(format="tree")
     return {"plan": plan}
@@ -358,11 +449,12 @@ async def get_node_query_plan(
 # ── Column operations ───────────────────────────────────────────────────
 
 
-@router.get(
+@scoped_router.get(
     "/nodes/{node_id}/columns/{column_name}/unique",
     response_model=ColumnUniqueValuesResponse,
 )
 async def get_column_unique_values(
+    workspace_id: uuid.UUID,
     node_id: str,
     column_name: str,
     current_user: dict = Depends(get_current_user),
@@ -370,7 +462,7 @@ async def get_column_unique_values(
     """Return unique values for a column."""
     user_id = current_user["id"]
     try:
-        lazyframe = require_current_workspace(user_id).nodes[node_id].data
+        lazyframe = require_workspace(user_id, str(workspace_id)).nodes[node_id].data
         schema = lazyframe.collect_schema()
         schema_map: dict[str, Any] = dict(schema.items())
         if schema_map.get(column_name) == TM_DISTRIBUTION_POLARS_DTYPE:
@@ -439,11 +531,12 @@ async def get_column_unique_values(
         raise InternalServiceError(str(exc)) from exc
 
 
-@router.get(
+@scoped_router.get(
     "/nodes/{node_id}/columns/{column_name}/describe",
     response_model=ColumnDescribeResponse,
 )
 async def describe_column(
+    workspace_id: uuid.UUID,
     node_id: str,
     column_name: str,
     current_user: dict = Depends(get_current_user),
@@ -452,7 +545,7 @@ async def describe_column(
     user_id = current_user["id"]
 
     try:
-        lazyframe = require_current_workspace(user_id).nodes[node_id].data
+        lazyframe = require_workspace(user_id, str(workspace_id)).nodes[node_id].data
         df = cast(pl.DataFrame, lazyframe.collect())
 
         column_dtype = df.schema[column_name]
@@ -509,21 +602,26 @@ async def describe_column(
         raise InternalServiceError(str(exc)) from exc
 
 
-@router.get(
+@scoped_router.get(
     "/nodes/{node_id}/columns/{column_name}/operations",
     response_model=ColumnOperationsResponse,
 )
 async def column_operations(
+    workspace_id: uuid.UUID,
     node_id: str,
     column_name: str,
     current_user: dict = Depends(get_current_user),
 ):
     """Return available no-arg Polars operations for a column, filtered by dtype."""
     user_id = current_user["id"]
-    ws = require_current_workspace(user_id)
+    ws = require_workspace(user_id, str(workspace_id))
     node = ws.nodes[node_id]
     schema = dict(node.data.collect_schema().items())
     dtype = schema.get(column_name)
     if dtype is None:
         raise NotFoundError(f"Column '{column_name}' not found")
     return {"operations": get_operations_for_dtype(dtype)}
+
+
+router.include_router(tokenizer_router)
+router.include_router(scoped_router)

@@ -11,9 +11,10 @@ Flow: open the configured database/session boundary, normalize user or token rec
 
 import logging
 
-from fastapi import Header, HTTPException
+from fastapi import Header
 
 from ..core.auth_service import validate_access_token
+from ..core.exceptions import UnauthenticatedError
 from ..settings import settings
 
 logger = logging.getLogger(__name__)
@@ -50,13 +51,13 @@ async def get_current_user(authorization: str | None = Header(None)):
 
     # Multi-user mode - require authentication
     if not authorization:
-        raise HTTPException(status_code=401, detail="Authorization header required")
+        raise UnauthenticatedError("Authorization header required")
 
     # Accept raw token or "Bearer <token>"
     token = authorization[7:] if authorization.startswith("Bearer ") else authorization
     user = await validate_access_token(token)
     if not user:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
+        raise UnauthenticatedError("Invalid or expired token")
     return user
 
 
@@ -74,7 +75,7 @@ async def get_current_user_from_token(token: str) -> dict:
     """
     user = await validate_access_token(token)
     if not user:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
+        raise UnauthenticatedError("Invalid or expired token")
     return user
 
 

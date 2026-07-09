@@ -20,10 +20,12 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import Any, cast
+from uuid import UUID
 
 import polars as pl
 import pytest
 from ldaca_wordflow.api.workspaces.analyses import concordance as concordance_api
+from ldaca_wordflow.api.workspaces import utils as workspace_utils
 from ldaca_wordflow.api.workspaces.analyses.generated_columns import (
     CONC_END_IDX_COLUMN,
     CONC_EXTRACTION_COLUMN,
@@ -224,6 +226,7 @@ async def test_tokens_materialize_route_selects_tokenization_column_once(
     )
 
     captured_task_args: dict[str, Any] = {}
+    workspace_id = UUID("00000000-0000-0000-0000-000000000001")
 
     class TaskManager:
         async def submit_task(self, **kwargs: Any):
@@ -239,7 +242,7 @@ async def test_tokens_materialize_route_selects_tokenization_column_once(
 
     class WorkspaceManager:
         def get_current_workspace_id(self, _user_id: str) -> str:
-            return "workspace-1"
+            return str(workspace_id)
 
         def get_current_workspace(self, _user_id: str) -> Workspace:
             return Workspace()
@@ -255,22 +258,26 @@ async def test_tokens_materialize_route_selects_tokenization_column_once(
             artifact_dir.mkdir(exist_ok=True)
             return artifact_dir
 
-    monkeypatch.setattr(concordance_api, "workspace_manager", WorkspaceManager())
+    workspace_manager = WorkspaceManager()
+    monkeypatch.setattr(concordance_api, "workspace_manager", workspace_manager)
+    monkeypatch.setattr(workspace_utils, "workspace_manager", workspace_manager)
     monkeypatch.setattr(
         concordance_api, "get_task_manager", lambda _user_id: LinkManager()
     )
 
     response = await concordance_api.materialize_concordance(
+        workspace_id,
         node.id,
         ConcordanceMaterializeRequest(
+            node_id=node.id,
             column="text",
-            parent_task_id="parent-task",
             search_word="hello",
             num_left_tokens=1,
             num_right_tokens=1,
             search_mode="tokens",
         ),
         current_user={"id": "user"},
+        parent_task_id="parent-task",
     )
 
     assert response["state"] == "running"

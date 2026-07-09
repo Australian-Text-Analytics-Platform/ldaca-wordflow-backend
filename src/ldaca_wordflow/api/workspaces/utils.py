@@ -314,12 +314,33 @@ def require_current_workspace(user_id: str) -> Workspace:
     return workspace
 
 
-def require_current_workspace_id(user_id: str) -> str:
-    """Resolve required current workspace id, raising 404 if absent."""
-    workspace_id = workspace_manager.get_current_workspace_id(user_id)
-    if not workspace_id:
+def require_workspace(user_id: str, workspace_id: str) -> Workspace:
+    """Resolve a workspace by explicit id, loading it when needed.
+
+    Used by:
+    - explicit workspace-scoped routes because the target workspace should come
+      from the request path instead of the user's hidden current-workspace
+      pointer.
+
+    Flow: reject blank ids, reuse the loaded workspace when it already matches,
+        otherwise ask the manager to load the requested id and raise the
+        standard workspace not-found error when it cannot be resolved.
+    """
+    if not workspace_id.strip():
         raise WorkspaceNotFoundError("Workspace not found")
-    return workspace_id
+
+    current_workspace_id = workspace_manager.get_current_workspace_id(user_id)
+    current_workspace = workspace_manager.get_current_workspace(user_id)
+    if current_workspace_id == workspace_id and current_workspace is not None:
+        return current_workspace
+
+    if not workspace_manager.set_current_workspace(user_id, workspace_id):
+        raise WorkspaceNotFoundError("Workspace not found")
+
+    workspace = workspace_manager.get_current_workspace(user_id)
+    if workspace is None:
+        raise WorkspaceNotFoundError("Workspace not found")
+    return workspace
 
 
 def _parse_temporal(value: Any) -> Any:
@@ -497,7 +518,7 @@ def _create_and_persist_child_node(
     # Smart insertion: keep the list view and connector arrows tidy by placing the
     # derived node directly below its mother node instead of at the end of the list.
     workspace.place_node_after_parent(new_node)
-    update_workspace(user_id, workspace_id)
+    update_workspace(user_id, workspace_id, workspace)
     return new_node
 
 
@@ -518,7 +539,7 @@ __all__ = [
     "_validate_existing_column",
     "ensure_task_synced",
     "require_current_workspace",
-    "require_current_workspace_id",
+    "require_workspace",
     "stage_dataframe_as_lazy",
     "stage_parquet_artifact_as_lazy",
     "update_workspace",

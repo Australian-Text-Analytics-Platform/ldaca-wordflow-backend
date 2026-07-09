@@ -11,10 +11,11 @@ Flow:
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import cast
 
 import polars as pl
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 
 from ...core.auth import get_current_user
 from ...core.polars_expr_validator import (
@@ -33,13 +34,16 @@ from ...models import (
 from .utils import (
     _create_and_persist_child_node,
     _paginated_lazy_preview,
-    require_current_workspace,
+    require_workspace,
     update_workspace,
 )
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/workspaces", tags=["nodes"])
+router = APIRouter(
+    prefix="/workspaces/{workspace_id:uuid}",
+    tags=["nodes"],
+)
 
 
 def _split_top_level_commas(code: str) -> list[str]:
@@ -170,6 +174,7 @@ def _apply_expression_context(
     raise InvalidInputError(f"Unknown context: {context}")
 @router.post("/nodes/{node_id}/expression/preview")
 async def polars_expression_preview(
+    workspace_id: uuid.UUID,
     node_id: str,
     request: PolarsExpressionRequest,
     page: int = Query(1, ge=1),
@@ -178,7 +183,7 @@ async def polars_expression_preview(
 ) -> FilterPreviewResponse:
     """Preview a Polars expression applied to the source node."""
     user_id = current_user["id"]
-    workspace = require_current_workspace(user_id)
+    workspace = require_workspace(user_id, str(workspace_id))
     lazy_data = workspace.nodes[node_id].data
 
     try:
@@ -202,14 +207,15 @@ async def polars_expression_preview(
 
 @router.post("/nodes/{node_id}/expression/apply")
 async def polars_expression_apply(
+    workspace_id: uuid.UUID,
     node_id: str,
     request: PolarsExpressionRequest,
     current_user: dict = Depends(get_current_user),
 ) -> PolarsExpressionApplyResponse:
     """Apply a Polars expression and persist the result."""
     user_id = current_user["id"]
-    workspace = require_current_workspace(user_id)
-    workspace_id = workspace.id
+    workspace_id_str = str(workspace_id)
+    workspace = require_workspace(user_id, workspace_id_str)
     node = workspace.nodes[node_id]
 
     try:
@@ -223,7 +229,7 @@ async def polars_expression_apply(
         and not request.new_node_name
     ):
         node.data = result_lazy
-        update_workspace(user_id, workspace_id)
+        update_workspace(user_id, workspace_id_str, workspace)
         return PolarsExpressionApplyResponse(node_id=node_id, node_name=node.name)
 
     new_node_name = request.new_node_name or f"{node.name}_{request.context}"
@@ -234,6 +240,6 @@ async def polars_expression_apply(
         operation=f"expression({request.context}, {node.name})",
         parents=[node],
         user_id=user_id,
-        workspace_id=workspace_id,
+        workspace_id=workspace_id_str,
     )
     return PolarsExpressionApplyResponse(node_id=new_node.id, node_name=new_node.name)

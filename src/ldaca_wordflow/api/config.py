@@ -1,101 +1,101 @@
-"""Runtime configuration routes used by the frontend settings flow.
+"""Read-only runtime bootstrap configuration routes.
 
 Used by:
-- FastAPI router registration, frontend API clients, and backend tests because they need this unit's "Runtime configuration routes used by the frontend settings flow" behavior.
+- FastAPI router registration, frontend API clients, and backend tests because
+  they need public bootstrap metadata without exposing mutable settings.
 
 Flow:
-- FastAPI mounts these endpoints under the config API prefix.
-- Route handlers read or update runtime settings through the shared settings module.
-- Responses return generated config models so clients can refresh their runtime assumptions.
+- FastAPI mounts this router under the API prefix.
+- Route handlers read current settings through the shared settings accessor.
+- Responses return generated runtime-config models for auth and OAuth bootstrap.
 """
 
-import logging
-import os
-from pathlib import Path
-
 from fastapi import APIRouter
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from ..settings import reload_settings, settings
+from ..settings import get_settings
 
-logger = logging.getLogger(__name__)
-
-router = APIRouter(prefix="/config", tags=["configuration"])
+router = APIRouter(tags=["configuration"])
 
 
-class ConfigResponse(BaseModel):
-    """Response schema used by config routes and generated API clients.
+class RuntimeConfigResponse(BaseModel):
+    """Public response schema for frontend runtime bootstrap.
 
     Used by:
-    - backend API routes because they need this unit's "Response schema used by config routes and generated API clients" behavior.
+    - `get_runtime_config`, frontend auth bootstrap, and generated API clients
+      because callers need auth-mode and OAuth-provider metadata before login.
     """
 
-    data_root: str
     multi_user_mode: bool
     google_client_id: str = ""
 
 
-class ConfigUpdate(BaseModel):
-    """Request schema used when the frontend updates runtime data-root settings.
+class AdminConfigResponse(RuntimeConfigResponse):
+    """Admin-only runtime configuration response.
 
     Used by:
-    - backend API routes because they need this unit's "Request schema used when the frontend updates runtime data-root settings" behavior.
+    - admin config mutation routes and generated API clients because changing
+      process-local configuration should return the newly effective storage root.
     """
 
     data_root: str
 
 
-@router.get("/", response_model=ConfigResponse)
-async def get_config():
-    """Return currently effective runtime configuration values.
-
-    Flow:
-    - Resolve authentication and request parameters from FastAPI dependencies.
-    - Delegate validation, manager calls, artifacts, or state changes to the owning helper.
-    - Shape the response payload or raise the HTTP error the client should see.
+class AdminConfigUpdate(BaseModel):
+    """Request schema for admin-only process-local runtime config updates.
 
     Used by:
-    - frontend settings/config panels and OAuth client bootstrap because they need this unit's "Return currently effective runtime configuration values" behavior.
+    - admin config mutation routes because the frontend settings form only needs
+      to change the data root.
+    """
+
+    data_root: str = Field(min_length=1)
+
+
+def build_runtime_config_response() -> RuntimeConfigResponse:
+    """Build the public runtime-config payload from current settings.
 
     Why:
-    - Exposes backend mode, storage root, and Google OAuth client ID so the
-      frontend can initialize the login provider at runtime.
+    - Keeps the read-only route and admin response construction aligned without
+      exposing admin-only fields on the public endpoint.
+
+    Called by:
+    - `get_runtime_config` and admin config helpers because both need one source
+      for auth-mode and OAuth-provider metadata.
     """
-    return ConfigResponse(
-        data_root=str(settings.get_data_root()),
-        multi_user_mode=settings.multi_user,
-        google_client_id=settings.google_client_id or "",
+    current_settings = get_settings()
+    return RuntimeConfigResponse(
+        multi_user_mode=current_settings.multi_user,
+        google_client_id=current_settings.google_client_id or "",
     )
 
 
-@router.post("/", response_model=ConfigResponse)
-async def update_config(config: ConfigUpdate):
-    """Update in-memory runtime configuration values.
+def build_admin_config_response() -> AdminConfigResponse:
+    """Build the admin runtime-config payload from current settings.
 
-    Flow:
-    - Resolve authentication and request parameters from FastAPI dependencies.
-    - Delegate validation, manager calls, artifacts, or state changes to the owning helper.
-    - Shape the response payload or raise the HTTP error the client should see.
+    Called by:
+    - admin config mutation routes because callers need confirmation of the
+      process-local data root after settings reload.
+    """
+    current_settings = get_settings()
+    return AdminConfigResponse(
+        data_root=str(current_settings.get_data_root()),
+        multi_user_mode=current_settings.multi_user,
+        google_client_id=current_settings.google_client_id or "",
+    )
+
+
+@router.get("/runtime-config", response_model=RuntimeConfigResponse)
+async def get_runtime_config():
+    """Return public frontend bootstrap configuration.
 
     Used by:
-    - frontend config edit flow because they need this unit's "Update in-memory runtime configuration values" behavior.
+    - frontend auth bootstrap and generated API clients because the app needs
+      auth mode and Google client metadata before user authentication.
 
-    Why:
-    - Allows runtime overrides without process restart.
-
-    Refactor note:
-    - Current update is in-memory only; persist-or-reload strategy may be needed
-        for multi-process or restart-stable configuration behavior.
+    Flow:
+    - Read the current process settings.
+    - Return only public runtime fields; mutable and filesystem settings stay
+      behind admin routes.
     """
-    new_path = Path(config.data_root)
-
-    logger.info("Updating data_root to %s", new_path)
-    # Write to env var and reload so the singleton stays in sync
-    os.environ["DATA_ROOT"] = str(new_path)
-    updated = reload_settings()
-
-    return ConfigResponse(
-        data_root=str(updated.get_data_root()),
-        multi_user_mode=updated.multi_user,
-        google_client_id=updated.google_client_id or "",
-    )
+    return build_runtime_config_response()

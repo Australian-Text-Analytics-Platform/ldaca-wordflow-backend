@@ -34,6 +34,7 @@ from . import (
     tabs,
 )
 from .analyses import (
+    analysis_tasks,
     concordance,
     quotation,
     sequential_analysis,
@@ -52,6 +53,7 @@ router.include_router(nodes_expression.router)
 router.include_router(nodes_crud.router)
 router.include_router(base.router)
 router.include_router(annotation.router)
+router.include_router(analysis_tasks.router)
 router.include_router(token_frequencies.router)
 router.include_router(sequential_analysis.router)
 router.include_router(quotation.router)

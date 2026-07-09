@@ -10,18 +10,14 @@ Flow:
 - Responses return workspace graphs, summaries, streamed archives, or lifecycle task handles.
 """
 
-import io
 import json
 import logging
 import re
-import shutil
-import tempfile
 import uuid
-import zipfile
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 from docworkspace.workspace.core import Workspace
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, UploadFile
 from fastapi.responses import StreamingResponse
 
 from ...core.auth import get_current_user
@@ -34,30 +30,36 @@ from ...core.exceptions import (
     WorkspaceNotFoundError,
 )
 from ...core.utils import validate_workspace_name
+from ...core.workspace_archive_import import import_workspace_zip
 from ...core.workspace import workspace_manager
 from ...models import (
-    CurrentWorkspaceResponse,
-    SetCurrentWorkspaceResponse,
     WorkspaceActionResponse,
     WorkspaceCreateRequest,
     WorkspaceGraphResponse,
     WorkspaceInfo,
     WorkspaceNodeReorderRequest,
-    WorkspaceNodesResponse,
     WorkspaceSummary,
     WorkspaceTaskStartResponse,
+    WorkspaceUpdateRequest,
     WorkspaceUploadResponse,
 )
-from .schema_filter import frontend_node_info
 from .utils import (
     require_current_workspace,
-    require_current_workspace_id,
+    require_workspace,
     update_workspace,
 )
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/workspaces", tags=["lifecycle"])
+WORKSPACE_ARTIFACT_RESPONSES = {
+    200: {
+        "description": "Workspace ZIP artifact download.",
+        "content": {
+            "application/zip": {"schema": {"type": "string", "format": "binary"}}
+        },
+    }
+}
 
 
 def _safe_download_name(name: str) -> str:
@@ -71,24 +73,73 @@ def _safe_download_name(name: str) -> str:
     return cleaned or "workspace"
 
 
-def _safe_member_path(name: str) -> PurePosixPath:
-    """Create safe member path values for workspace lifecycle routes.
+def _workspace_name_from_dir(workspace_dir: Path, fallback: str) -> str:
+    """Read a persisted workspace display name without loading the workspace.
 
-    Steps:
-    - Normalize caller input into the representation this module expects.
-    - Delegate stateful, expensive, or validating work to the owning manager/helper when needed.
-    - Return the compact value the caller uses for artifacts, validation, or response shaping.
+    Used by:
+    - ``start_workspace_download`` because inactive workspace downloads should
+      package the requested workspace directory without switching the user's
+      active workspace just to name the background task.
 
-    Called by:
-    - Local helpers, route handlers, or service methods in this module because they need this unit's "Create safe member path values for workspace lifecycle routes" behavior.
+    Flow: inspect ``metadata.json`` when it exists, return a non-empty
+        ``workspace_metadata.name`` value, and fall back to the path workspace id
+        when metadata is missing or malformed.
+    """
+    metadata_file = workspace_dir / "metadata.json"
+    try:
+        with metadata_file.open("r", encoding="utf-8") as f:
+            metadata = json.load(f)
+    except Exception:
+        return fallback
+
+    workspace_name = metadata.get("workspace_metadata", {}).get("name")
+    if isinstance(workspace_name, str) and workspace_name.strip():
+        return workspace_name
+    return fallback
+
+
+def workspace_graph_payload(workspace: Workspace) -> dict[str, object]:
+    """Build the lightweight graph/topology response for the current workspace.
+
+    Used by:
+    - ``get_workspace_graph`` and ``reorder_workspace_nodes`` because graph
+      refreshes should return only topology plus display/action fields. Full
+      node metadata, including schema and columns, is served by the collection
+      node-info route.
+
+    Flow: walk nodes in workspace order, copy graph-facing node attributes
+        without calling ``Node.info()``, then derive edges from child links.
     """
 
-    path = PurePosixPath(name)
-    if path.is_absolute() or ".." in path.parts:
-        raise InvalidInputError("Invalid zip entry path")
-    if any(part in {"", "."} for part in path.parts):
-        raise InvalidInputError("Invalid zip entry path")
-    return path
+    def linked_node_id(linked_node: object) -> str:
+        """Return the id for DocWorkspace links stored as nodes or ids."""
+
+        if isinstance(linked_node, str):
+            return linked_node
+        return str(getattr(linked_node, "id"))
+
+    nodes_payload: list[dict[str, object | None]] = []
+    edges_payload: list[dict[str, str]] = []
+
+    for node in workspace.nodes.values():
+        node_id = node.id
+        nodes_payload.append(
+            {
+                "id": node_id,
+                "name": node.name,
+                "operation": node.operation,
+                "parent_ids": [linked_node_id(parent) for parent in node.parents],
+                "child_ids": [linked_node_id(child) for child in node.children],
+                "document": node.document,
+                "color": node.color,
+                "can_undo": node.can_undo,
+                "can_redo": node.can_redo,
+            }
+        )
+        for child in node.children:
+            edges_payload.append({"source": node_id, "target": linked_node_id(child)})
+
+    return {"nodes": nodes_payload, "edges": edges_payload}
 
 
 @router.get("/", response_model=list[WorkspaceSummary])
@@ -109,48 +160,6 @@ async def list_workspaces(current_user: dict = Depends(get_current_user)):
     user_id = current_user["id"]
     summaries = workspace_manager.list_user_workspaces_summaries(user_id)
     return summaries
-
-
-@router.get("/current", response_model=CurrentWorkspaceResponse)
-async def get_current_workspace(current_user: dict = Depends(get_current_user)):
-    """Return get current workspace API requests for workspace lifecycle routes.
-
-    Flow:
-    - Resolve authentication and request parameters from FastAPI dependencies.
-    - Delegate validation, manager calls, artifacts, or state changes to the owning helper.
-    - Shape the response payload or raise the HTTP error the client should see.
-
-    Used by:
-    - Frontend and API clients through the FastAPI GET /current route because they need this unit's "Return get current workspace API requests for workspace lifecycle routes" behavior.
-    """
-
-    user_id = current_user["id"]
-    current_workspace_id = workspace_manager.get_current_workspace_id(user_id)
-    return {"id": current_workspace_id}
-
-
-@router.post("/current", response_model=SetCurrentWorkspaceResponse)
-async def set_current_workspace(
-    workspace_id: str | None = None, current_user: dict = Depends(get_current_user)
-):
-    """Set or clear the current in-memory workspace for the user.
-
-    Flow:
-    - Resolve authentication and request parameters from FastAPI dependencies.
-    - Delegate validation, manager calls, artifacts, or state changes to the owning helper.
-    - Shape the response payload or raise the HTTP error the client should see.
-
-    Used by:
-    - frontend workspace selection flow because they need this unit's "Set or clear the current in-memory workspace for the user" behavior.
-
-    Why:
-    - Ensures subsequent node/analysis operations target the intended workspace.
-    """
-    user_id = current_user["id"]
-    success = workspace_manager.set_current_workspace(user_id, workspace_id)
-    if not success and workspace_id is not None:
-        raise WorkspaceNotFoundError("Workspace not found")
-    return {"state": "successful", "id": workspace_id}
 
 
 @router.post("/", response_model=WorkspaceInfo)
@@ -186,173 +195,74 @@ async def create_workspace(
     return WorkspaceInfo(**workspace_info)
 
 
-@router.delete("/delete", response_model=WorkspaceActionResponse)
-async def delete_workspace(
-    workspace_id: str,
-    current_user: dict = Depends(get_current_user),
-):
-    """Delete delete workspace API requests for workspace lifecycle routes.
-
-    Flow:
-    - Resolve authentication and request parameters from FastAPI dependencies.
-    - Delegate validation, manager calls, artifacts, or state changes to the owning helper.
-    - Shape the response payload or raise the HTTP error the client should see.
-
-    Used by:
-    - Frontend and API clients through the FastAPI DELETE /delete route because they need this unit's "Delete delete workspace API requests for workspace lifecycle routes" behavior.
-    """
-
-    user_id = current_user["id"]
-    if not workspace_id.strip():
-        raise InvalidInputError("workspace_id is required")
-    success = workspace_manager.delete_workspace(user_id, workspace_id)
-    if not success:
-        raise WorkspaceNotFoundError("Workspace not found")
-    return {
-        "state": "successful",
-        "message": f"Workspace {workspace_id} deleted successfully",
-        "id": workspace_id,
-    }
-
-
-@router.post("/unload", response_model=WorkspaceActionResponse)
+@router.post("/{workspace_id:uuid}/unload", response_model=WorkspaceActionResponse)
 async def unload_workspace(
+    workspace_id: uuid.UUID,
     save: bool = True,
     current_user: dict = Depends(get_current_user),
 ):
-    """Handle unload workspace API requests for workspace lifecycle routes.
-
-    Flow:
-    - Resolve authentication and request parameters from FastAPI dependencies.
-    - Delegate validation, manager calls, artifacts, or state changes to the owning helper.
-    - Shape the response payload or raise the HTTP error the client should see.
+    """Unload the explicit workspace id in the path.
 
     Used by:
-    - Frontend and API clients through the FastAPI POST /unload route because they need this unit's "Handle unload workspace API requests for workspace lifecycle routes" behavior.
+    - workspace manager clients that want to unload the active workspace while
+      keeping the target visible in the URL.
+
+    Flow: resolve the authenticated user, pass the path workspace id to the
+        manager unload operation, and return the standard action response or
+        a not-found error when that workspace is not currently loaded.
     """
 
     user_id = current_user["id"]
-    workspace_id = workspace_manager.get_current_workspace_id(user_id)
-    existed = workspace_manager.unload_workspace(user_id, workspace_id, save=save)
+    workspace_id_str = str(workspace_id)
+    existed = workspace_manager.unload_workspace(user_id, workspace_id_str, save=save)
     if not existed:
         raise WorkspaceNotFoundError("Workspace not found")
     return {
         "state": "successful",
-        "message": f"Workspace {workspace_id} unloaded",
-        "id": workspace_id,
+        "message": f"Workspace {workspace_id_str} unloaded",
+        "id": workspace_id_str,
     }
 
 
-@router.put("/name", response_model=WorkspaceInfo)
-async def rename_workspace(
-    new_name: str,
-    current_user: dict = Depends(get_current_user),
-):
-    """Update rename workspace API requests for workspace lifecycle routes.
-
-    Flow:
-    - Resolve authentication and request parameters from FastAPI dependencies.
-    - Delegate validation, manager calls, artifacts, or state changes to the owning helper.
-    - Shape the response payload or raise the HTTP error the client should see.
-
-    Used by:
-    - Frontend and API clients through the FastAPI PUT /name route because they need this unit's "Update rename workspace API requests for workspace lifecycle routes" behavior.
-    """
-
-    user_id = current_user["id"]
-    workspace_id = require_current_workspace_id(user_id)
-    workspace = require_current_workspace(user_id)
-    is_valid, reason = validate_workspace_name(new_name)
-    if not is_valid:
-        raise InvalidInputError(f"Invalid workspace name: {reason}")
-    workspace.name = new_name
-    update_workspace(user_id, workspace_id, workspace)
-    return workspace.info_json()
-
-
-@router.put("/description", response_model=WorkspaceInfo)
-async def update_workspace_description(
-    description: str = "",
-    current_user: dict = Depends(get_current_user),
-):
-    """Update update workspace description API requests for workspace lifecycle routes.
-
-    Flow:
-    - Resolve authentication and request parameters from FastAPI dependencies.
-    - Delegate validation, manager calls, artifacts, or state changes to the owning helper.
-    - Shape the response payload or raise the HTTP error the client should see.
-
-    Used by:
-    - Frontend and API clients through the FastAPI PUT /description route because they need this unit's "Update update workspace description API requests for workspace lifecycle routes" behavior.
-    """
-
-    user_id = current_user["id"]
-    workspace_id = require_current_workspace_id(user_id)
-    workspace = require_current_workspace(user_id)
-    workspace.description = description.strip()
-    update_workspace(user_id, workspace_id, workspace)
-    return workspace.info_json()
-
-
-@router.post("/save", response_model=WorkspaceActionResponse)
-async def save_workspace(
-    current_user: dict = Depends(get_current_user),
-):
-    """Handle save workspace API requests for workspace lifecycle routes.
-
-    Flow:
-    - Resolve authentication and request parameters from FastAPI dependencies.
-    - Delegate validation, manager calls, artifacts, or state changes to the owning helper.
-    - Shape the response payload or raise the HTTP error the client should see.
-
-    Used by:
-    - Frontend and API clients through the FastAPI POST /save route because they need this unit's "Handle save workspace API requests for workspace lifecycle routes" behavior.
-    """
-
-    user_id = current_user["id"]
-    workspace_id = require_current_workspace_id(user_id)
-    ws = require_current_workspace(user_id)
-    update_workspace(user_id, workspace_id, ws)
-    return {"state": "successful", "message": "Workspace saved"}
-
-
-@router.post("/download", response_model=WorkspaceTaskStartResponse)
+@router.post("/{workspace_id:uuid}/download", response_model=WorkspaceTaskStartResponse)
 async def start_workspace_download(
+    workspace_id: uuid.UUID,
     current_user: dict = Depends(get_current_user),
 ):
-    """Start a background task to package the workspace as a ZIP archive.
-
-    Flow:
-    - Resolve authentication and request parameters from FastAPI dependencies.
-    - Delegate validation, manager calls, artifacts, or state changes to the owning helper.
-    - Shape the response payload or raise the HTTP error the client should see.
+    """Start a background task to package the explicit workspace as a ZIP.
 
     Used by:
-    - frontend Download button in Workspace Manager because they need this unit's "Start a background task to package the workspace as a ZIP archive" behavior.
+    - frontend Download button in Workspace Manager because each row can start
+      a download for its own workspace, independent of active selection.
 
     Why:
     - Moves potentially slow ZIP compression into the Task Center so users can
       track progress and the UI stays responsive.
+
+    Flow: resolve the target workspace directory from the path id, persist the
+        latest in-memory state only when that workspace is already active,
+        submit the packaging task with explicit workspace metadata, and return
+        the task id to the caller.
     """
     user_id = current_user["id"]
-    workspace_id = require_current_workspace_id(user_id)
-    ws = require_current_workspace(user_id)
+    workspace_id_str = str(workspace_id)
 
-    # Persist latest state if this is the current in-memory workspace
-    if workspace_manager.get_current_workspace_id(user_id) == workspace_id:
-        update_workspace(user_id, workspace_id, ws)
-
-    # Verify workspace directory exists before submitting
-    workspace_dir = workspace_manager.get_workspace_dir(user_id, workspace_id)
+    workspace_dir = workspace_manager.get_workspace_dir(user_id, workspace_id_str)
     if workspace_dir is None or not workspace_dir.exists():
         raise WorkspaceNotFoundError("Workspace not found")
-    # Resolve a human-readable name for the task centre label
-    ws_name = ws.name if ws else workspace_id
+
+    current_workspace_id = workspace_manager.get_current_workspace_id(user_id)
+    if current_workspace_id == workspace_id_str:
+        ws = require_current_workspace(user_id)
+        update_workspace(user_id, workspace_id_str, ws)
+        ws_name = ws.name
+    else:
+        ws_name = _workspace_name_from_dir(workspace_dir, workspace_id_str)
 
     tm = workspace_manager.get_task_manager(user_id)
     task_info = await tm.submit_task(
         user_id=user_id,
-        workspace_id=workspace_id,
+        workspace_id=workspace_id_str,
         task_type="workspace_download",
         task_args={
             "target_workspace_dir": str(workspace_dir),
@@ -369,34 +279,38 @@ async def start_workspace_download(
     }
 
 
-@router.get("/download/tasks/{task_id}/artifact")
+@router.get(
+    "/{workspace_id:uuid}/download/tasks/{task_id}/artifact",
+    response_class=StreamingResponse,
+    responses=WORKSPACE_ARTIFACT_RESPONSES,
+)
 async def download_workspace_artifact(
+    workspace_id: uuid.UUID,
     task_id: str,
     current_user: dict = Depends(get_current_user),
 ):
     """Stream a completed workspace ZIP artifact and delete it after download.
 
-    Flow:
-    - Resolve authentication and request parameters from FastAPI dependencies.
-    - Delegate validation, manager calls, artifacts, or state changes to the owning helper.
-    - Shape the response payload or raise the HTTP error the client should see.
-
     Used by:
-    - frontend auto-download on task completion because they need this unit's "Stream a completed workspace ZIP artifact and delete it after download" behavior.
+    - frontend auto-download on task completion because the artifact task must
+      still be checked against the workspace row that started the download.
 
     Why:
     - One-time artifact policy: the ZIP is deleted after the first successful
       download to avoid unbounded disk usage.
+
+    Flow: resolve the path workspace id, fetch the task, reject task/workspace
+        mismatches, stream a successful ZIP artifact, and remove it afterwards.
     """
     user_id = current_user["id"]
-    workspace_id = require_current_workspace_id(user_id)
+    workspace_id_str = str(workspace_id)
 
     tm = workspace_manager.get_task_manager(user_id)
     task_info = await tm.get_task(task_id)
     if task_info is None:
         raise TaskNotFoundError("Task not found")
     # Verify the task belongs to this workspace
-    if task_info.workspace_id != workspace_id:
+    if task_info.workspace_id != workspace_id_str:
         raise AccessDeniedError("Task does not belong to this workspace")
     if task_info.task_type != "workspace_download":
         raise InvalidInputError("Task is not a workspace download")
@@ -412,7 +326,7 @@ async def download_workspace_artifact(
     artifact_path = Path(result["artifact_path"])
     if not artifact_path.exists():
         raise ResourceGoneError("Artifact already downloaded or deleted")
-    filename = result.get("filename", f"{workspace_id}.zip")
+    filename = result.get("filename", f"{workspace_id_str}.zip")
 
     def _stream_and_delete():
         """Yield ZIP content then delete the artifact file.
@@ -462,220 +376,152 @@ async def upload_workspace_zip(
     """
     user_id = current_user["id"]
 
-    filename = file.filename or "workspace.zip"
-    if not filename.lower().endswith(".zip"):
-        raise InvalidInputError("Only .zip files are supported")
-    file_bytes = await file.read()
-    if not file_bytes:
-        raise InvalidInputError("Uploaded file is empty")
-    existing_ids = {
-        item.get("id")
-        for item in workspace_manager.list_user_workspaces_summaries(user_id)
-        if item.get("id")
-    }
-
-    try:
-        with tempfile.TemporaryDirectory(prefix="workspace_zip_") as temp_dir:
-            extraction_dir = tempfile.mkdtemp(prefix="extracted_", dir=temp_dir)
-
-            with zipfile.ZipFile(io.BytesIO(file_bytes), "r") as zf:
-                members = [m for m in zf.infolist() if not m.is_dir()]
-                if not members:
-                    raise InvalidInputError("ZIP archive is empty")
-                safe_paths = [_safe_member_path(m.filename) for m in members]
-                metadata_candidates = [
-                    p
-                    for p in safe_paths
-                    if p.name == "metadata.json" and "__MACOSX" not in p.parts
-                ]
-                if not metadata_candidates:
-                    raise InvalidInputError(
-                        "ZIP must contain workspace metadata.json",
-                    )
-                metadata_path_in_zip = min(
-                    metadata_candidates, key=lambda p: len(p.parts)
-                )
-                root_prefix = metadata_path_in_zip.parts[:-1]
-
-                for member, safe_path in zip(members, safe_paths):
-                    if "__MACOSX" in safe_path.parts:
-                        continue
-                    if (
-                        root_prefix
-                        and safe_path.parts[: len(root_prefix)] != root_prefix
-                    ):
-                        continue
-
-                    relative_parts = (
-                        safe_path.parts[len(root_prefix) :]
-                        if root_prefix
-                        else safe_path.parts
-                    )
-                    if not relative_parts:
-                        continue
-
-                    relative_path = PurePosixPath(*relative_parts)
-                    if relative_path.name in {".DS_Store"}:
-                        continue
-
-                    destination = Path(extraction_dir) / Path(*relative_path.parts)
-                    destination.parent.mkdir(parents=True, exist_ok=True)
-                    with zf.open(member, "r") as src, destination.open("wb") as dst:
-                        shutil.copyfileobj(src, dst)
-
-            extracted_root = Path(extraction_dir)
-            metadata_file = extracted_root / "metadata.json"
-            if not metadata_file.exists():
-                raise InvalidInputError(
-                    "ZIP missing required metadata.json at workspace root",
-                )
-            with metadata_file.open("r", encoding="utf-8") as f:
-                metadata = json.load(f)
-
-            workspace_metadata = metadata.setdefault("workspace_metadata", {})
-            incoming_id = workspace_metadata.get("id")
-            incoming_name = workspace_metadata.get("name")
-
-            if (
-                isinstance(incoming_id, str)
-                and incoming_id
-                and incoming_id not in existing_ids
-            ):
-                workspace_id = incoming_id
-            else:
-                workspace_id = str(uuid.uuid4())
-
-            workspace_name = (
-                incoming_name
-                if isinstance(incoming_name, str) and incoming_name.strip()
-                else filename.rsplit(".zip", 1)[0]
-            )
-
-            workspace_metadata["id"] = workspace_id
-            workspace_metadata["name"] = workspace_name
-            with metadata_file.open("w", encoding="utf-8") as f:
-                json.dump(metadata, f)
-
-            target_dir = workspace_manager._resolve_workspace_dir(
-                user_id=user_id,
-                workspace_id=workspace_id,
-                workspace_name=workspace_name,
-            )
-            if target_dir.exists():
-                shutil.rmtree(target_dir, ignore_errors=True)
-            shutil.copytree(extracted_root, target_dir)
-
-            workspace_manager._refresh_user_workspace_paths(user_id)
-
-        summary = next(
-            (
-                item
-                for item in workspace_manager.list_user_workspaces_summaries(user_id)
-                if item.get("id") == workspace_id
-            ),
-            {
-                "id": workspace_id,
-                "name": workspace_name,
-            },
-        )
-        return {"state": "successful", "workspace": summary}
-    except zipfile.BadZipFile as exc:
-        raise InvalidInputError(f"Invalid ZIP file: {exc}")
+    summary = import_workspace_zip(
+        user_id=user_id,
+        filename=file.filename or "workspace.zip",
+        file_bytes=await file.read(),
+    )
+    return {"state": "successful", "workspace": summary}
 
 
-@router.get("/info", response_model=WorkspaceInfo)
-async def get_workspace_info(
+@router.get("/{workspace_id:uuid}", response_model=WorkspaceInfo)
+async def get_workspace_by_id(
+    workspace_id: uuid.UUID,
     current_user: dict = Depends(get_current_user),
 ):
-    """Return get workspace info API requests for workspace lifecycle routes.
-
-    Flow:
-    - Resolve authentication and request parameters from FastAPI dependencies.
-    - Delegate validation, manager calls, artifacts, or state changes to the owning helper.
-    - Shape the response payload or raise the HTTP error the client should see.
+    """Return workspace metadata for the explicit workspace id in the path.
 
     Used by:
-    - Frontend and API clients through the FastAPI GET /info route because they need this unit's "Return get workspace info API requests for workspace lifecycle routes" behavior.
-    """
+    - frontend workspace-detail reads because callers already know the selected
+      workspace id and should not depend on hidden current-workspace state.
 
+    Flow: resolve the authenticated user, load the requested workspace id, and
+        serialize the standard ``WorkspaceInfo`` payload for that explicit
+        workspace.
+    """
     user_id = current_user["id"]
-    workspace = require_current_workspace(user_id)
+    workspace = require_workspace(user_id, str(workspace_id))
     return workspace.info_json()
 
 
-@router.get("/graph", response_model=WorkspaceGraphResponse)
-async def get_workspace_graph(
+@router.patch("/{workspace_id:uuid}", response_model=WorkspaceInfo)
+async def update_workspace_by_id(
+    workspace_id: uuid.UUID,
+    request: WorkspaceUpdateRequest,
     current_user: dict = Depends(get_current_user),
 ):
-    """Return workspace graph payload.
-
-    Flow:
-    - Resolve authentication and request parameters from FastAPI dependencies.
-    - Delegate validation, manager calls, artifacts, or state changes to the owning helper.
-    - Shape the response payload or raise the HTTP error the client should see.
+    """Update metadata for the explicit workspace id in the path.
 
     Used by:
-    - frontend graph canvas initialization and refresh because they need this unit's "Return workspace graph payload" behavior.
+    - frontend workspace manager and header rename flows because workspace
+      mutations should name their target resource directly.
+
+    Flow: load the requested workspace, validate any submitted name, apply only
+        supplied metadata fields, persist through the shared workspace saver,
+        and return refreshed workspace metadata.
     """
     user_id = current_user["id"]
-    workspace = require_current_workspace(user_id)
-    graph = workspace.graph_json()
-    graph["nodes"] = [
-        frontend_node_info(workspace.nodes[entry["id"]])
-        for entry in graph.get("nodes", [])
-        if entry.get("id") in workspace.nodes
-    ]
-    return graph
+    workspace_id_str = str(workspace_id)
+    workspace = require_workspace(user_id, workspace_id_str)
+
+    if request.name is not None:
+        is_valid, reason = validate_workspace_name(request.name)
+        if not is_valid:
+            raise InvalidInputError(f"Invalid workspace name: {reason}")
+        workspace.name = request.name
+
+    if request.description is not None:
+        workspace.description = request.description.strip()
+
+    update_workspace(user_id, workspace_id_str, workspace)
+    return workspace.info_json()
 
 
-@router.put("/nodes/order", response_model=WorkspaceGraphResponse)
-async def reorder_workspace_nodes(
+@router.delete("/{workspace_id:uuid}", response_model=WorkspaceActionResponse)
+async def delete_workspace_by_id(
+    workspace_id: uuid.UUID,
+    current_user: dict = Depends(get_current_user),
+):
+    """Delete the explicit workspace id in the path.
+
+    Used by:
+    - frontend workspace manager delete actions and test cleanup because deletion
+      should not depend on the backend-selected current workspace.
+
+    Flow: let the UUID path converter reject static route names, delegate
+        deletion to the manager, and return the
+        same action response shape as the legacy query-parameter route.
+    """
+    user_id = current_user["id"]
+    workspace_id_str = str(workspace_id)
+    success = workspace_manager.delete_workspace(user_id, workspace_id_str)
+    if not success:
+        raise WorkspaceNotFoundError("Workspace not found")
+    return {
+        "state": "successful",
+        "message": f"Workspace {workspace_id_str} deleted successfully",
+        "id": workspace_id_str,
+    }
+
+
+@router.post("/{workspace_id:uuid}/save", response_model=WorkspaceActionResponse)
+async def save_workspace_by_id(
+    workspace_id: uuid.UUID,
+    current_user: dict = Depends(get_current_user),
+):
+    """Persist the explicit workspace id in the path.
+
+    Used by:
+    - frontend workspace manager save actions because the target workspace is
+      already known by selection state.
+
+    Flow: load the requested workspace id, persist it through the shared saver,
+        and return the standard workspace action response.
+    """
+    user_id = current_user["id"]
+    workspace_id_str = str(workspace_id)
+    workspace = require_workspace(user_id, workspace_id_str)
+    update_workspace(user_id, workspace_id_str, workspace)
+    return {"state": "successful", "message": "Workspace saved", "id": workspace_id_str}
+
+
+@router.get("/{workspace_id:uuid}/graph", response_model=WorkspaceGraphResponse)
+async def get_workspace_graph_by_id(
+    workspace_id: uuid.UUID,
+    current_user: dict = Depends(get_current_user),
+):
+    """Return graph topology for the explicit workspace id in the path.
+
+    Used by:
+    - frontend graph and sidebar queries because cache keys are already scoped by
+      workspace id and should fetch the same id over the API boundary.
+
+    Flow: load the requested workspace and serialize its lightweight graph
+        topology without duplicating full node metadata.
+    """
+    user_id = current_user["id"]
+    workspace = require_workspace(user_id, str(workspace_id))
+    return workspace_graph_payload(workspace)
+
+
+@router.put("/{workspace_id:uuid}/nodes/order", response_model=WorkspaceGraphResponse)
+async def reorder_workspace_nodes_by_id(
+    workspace_id: uuid.UUID,
     request: WorkspaceNodeReorderRequest,
     current_user: dict = Depends(get_current_user),
 ):
-    """Persist a new node order for the current workspace and return the graph.
-
-    Flow:
-    - Resolve the authenticated user's active workspace id and workspace object.
-    - Apply ``ordered_ids`` through ``Workspace.reorder_nodes`` (unknown ids are
-      ignored and any omitted node keeps its tail position, so a stale client
-      payload can never drop nodes).
-    - Persist the workspace and return the rebuilt graph in the new order.
+    """Persist node order for the explicit workspace id in the path.
 
     Used by:
-    - Frontend workspace list-view drag-to-reorder gesture because dropping a row
-      commits the full node sequence as the durable source of truth.
+    - frontend list-view drag-to-reorder because graph order mutations are
+      workspace-scoped and should not rely on hidden current-workspace state.
+
+    Flow: load the requested workspace, apply the submitted order, persist, and
+        return the rebuilt graph in the new order.
     """
     user_id = current_user["id"]
-    workspace_id = require_current_workspace_id(user_id)
-    workspace = require_current_workspace(user_id)
+    workspace_id_str = str(workspace_id)
+    workspace = require_workspace(user_id, workspace_id_str)
     workspace.reorder_nodes(request.ordered_ids)
-    update_workspace(user_id, workspace_id, workspace)
-    graph = workspace.graph_json()
-    graph["nodes"] = [
-        frontend_node_info(workspace.nodes[entry["id"]])
-        for entry in graph.get("nodes", [])
-        if entry.get("id") in workspace.nodes
-    ]
-    return graph
-
-
-@router.get("/nodes", response_model=WorkspaceNodesResponse)
-async def get_workspace_nodes(
-    current_user: dict = Depends(get_current_user),
-):
-    """Return get workspace nodes API requests for workspace lifecycle routes.
-
-    Flow:
-    - Resolve authentication and request parameters from FastAPI dependencies.
-    - Delegate validation, manager calls, artifacts, or state changes to the owning helper.
-    - Shape the response payload or raise the HTTP error the client should see.
-
-    Used by:
-    - Frontend and API clients through the FastAPI GET /nodes route because they need this unit's "Return get workspace nodes API requests for workspace lifecycle routes" behavior.
-    """
-
-    user_id = current_user["id"]
-    workspace = require_current_workspace(user_id)
-    nodes = [frontend_node_info(node) for node in workspace.nodes.values()]
-    return {"nodes": nodes}
+    update_workspace(user_id, workspace_id_str, workspace)
+    return workspace_graph_payload(workspace)

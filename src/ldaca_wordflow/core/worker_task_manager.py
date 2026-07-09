@@ -297,7 +297,7 @@ class WorkerTaskManager:
         Called by:
         - submission, completion, stop, and clear paths in this manager because every task
           lifecycle change must reach open Task Center streams.
-        - ``api.tasks.clear_tasks`` when an analysis-only task is removed because route-level
+        - ``api.tasks.clear_task`` when an analysis-only task is removed because route-level
           cleanup still needs to notify frontend state stores.
 
         Flow: find the user's subscriber queues, classify terminal task events, enqueue the
@@ -1402,7 +1402,7 @@ class WorkerTaskManager:
         """Remove a worker task plus child materialize/detach tasks.
 
         Used by:
-        - ``api.tasks.clear_tasks`` and analysis cleanup helpers so parent task removal also
+        - ``api.tasks.clear_task`` and analysis cleanup helpers so parent task removal also
           clears worker-side child artifacts because they need a backend boundary that validates
           inputs before delegating to workspace or worker state.
 

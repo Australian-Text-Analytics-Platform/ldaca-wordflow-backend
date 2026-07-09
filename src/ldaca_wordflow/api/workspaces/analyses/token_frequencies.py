@@ -17,16 +17,15 @@ Flow:
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
-from uuid import uuid4
+from uuid import UUID
 
 import polars as pl
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 
 from ....analysis.implementations.token_frequency import (
     TokenFrequencyRequest as AnalysisTokenFrequencyRequest,
@@ -37,13 +36,9 @@ from ....core.analysis_helpers import sanitize_stop_words
 from ....core.auth import get_current_user
 from ....core.exceptions import (
     InternalServiceError,
-    InvalidInputError,
-    NoActiveWorkspaceError,
     NotFoundError,
     TaskNotFoundError,
-    WorkspaceNotFoundError,
 )
-from ....core.worker_input_snapshots import create_worker_input_snapshot
 from ....core.workspace import workspace_manager
 from ....models import (
     AnalysisClearResponse,
@@ -51,33 +46,18 @@ from ....models import (
     TokenFrequencyRequest,
     TokenFrequencyResponse,
 )
-from ..utils import ensure_task_synced
+from ..utils import ensure_task_synced, require_workspace
+from .token_frequency_submission import (
+    DEFAULT_TOKEN_LIMIT,
+    MAX_SERVER_TOKEN_LIMIT,
+    SERVER_LIMIT_MULTIPLIER,
+    submit_token_frequency_analysis,
+)
 
-router = APIRouter(prefix="/workspaces")
+router = APIRouter(
+    prefix="/workspaces/{workspace_id:uuid}",
+)
 logger = logging.getLogger(__name__)
-
-_TOKEN_FREQ_SUBMISSION_LOCKS: dict[tuple[str, str], asyncio.Lock] = {}
-
-
-def _token_freq_submission_lock(user_id: str, workspace_id: str) -> asyncio.Lock:
-    """Support token-frequency routes with a token freq submission lock helper.
-
-    Called by:
-    - Local helpers, route handlers, or service methods in this module because they need this unit's "Support token-frequency routes with a token freq submission lock helper" behavior.
-    """
-
-    key = (user_id, workspace_id)
-    lock = _TOKEN_FREQ_SUBMISSION_LOCKS.get(key)
-    if lock is None:
-        lock = asyncio.Lock()
-        _TOKEN_FREQ_SUBMISSION_LOCKS[key] = lock
-    return lock
-
-
-DEFAULT_TOKEN_LIMIT = 25
-SERVER_LIMIT_MULTIPLIER = 5
-MAX_SERVER_TOKEN_LIMIT = 5000
-
 
 @dataclass(frozen=True)
 class TokenNodeArtifact:
@@ -106,13 +86,14 @@ class TokenFrequencyArtifacts:
 
 @router.delete("/token-frequencies", response_model=AnalysisClearResponse)
 async def clear_token_frequencies(
+    workspace_id: UUID,
     current_user=Depends(get_current_user),
 ):
     """Clear Token Frequency analysis state for a workspace.
 
     Legacy broad clear endpoint: removes all token-frequency task records for
     the active workspace. Tabbed clients should normally clear by explicit
-    task_id through `/api/tasks/clear` instead.
+    task_id through `DELETE /api/tasks/{task_id}` instead.
 
     Flow:
     - Resolve authentication and request parameters from FastAPI dependencies.
@@ -123,11 +104,9 @@ async def clear_token_frequencies(
     - Frontend and API clients through the FastAPI DELETE /token-frequencies route because they need this unit's "Clear Token Frequency analysis state for a workspace" behavior.
     """
     user_id = current_user["id"]
-    workspace_id = workspace_manager.get_current_workspace_id(user_id)
-    if not workspace_id:
-        raise NoActiveWorkspaceError("No active workspace selected")
+    workspace_id_str = str(workspace_id)
     task_manager = get_task_manager(user_id)
-    task_ids = _token_frequency_task_ids(user_id, workspace_id)
+    task_ids = _token_frequency_task_ids(user_id, workspace_id_str)
     for task_id in task_ids:
         task_manager.clear_task(task_id)
 
@@ -159,27 +138,6 @@ def _coerce_limit_value(value: Any) -> int:
     return candidate if candidate > 0 else DEFAULT_TOKEN_LIMIT
 
 
-def _prepare_token_artifact_target(user_id: str, workspace_id: str) -> tuple[Path, str]:
-    """Prepare token artifact target data consumed by token-frequency routes.
-
-    Steps:
-    - Normalize caller input into the representation this module expects.
-    - Delegate stateful, expensive, or validating work to the owning manager/helper when needed.
-    - Return the compact value the caller uses for artifacts, validation, or response shaping.
-
-    Called by:
-    - Local helpers, route handlers, or service methods in this module because they need this unit's "Prepare token artifact target data consumed by token-frequency routes" behavior.
-    """
-
-    workspace_artifacts_dir = workspace_manager.ensure_workspace_artifacts_dir(
-        user_id, workspace_id
-    )
-    if workspace_artifacts_dir is None:
-        raise WorkspaceNotFoundError("Workspace not found")
-    artifact_prefix = f"token_frequencies_{uuid4()}"
-    return workspace_artifacts_dir, artifact_prefix
-
-
 def _task_result_payload(task: AnalysisTask) -> dict:
     """Support token-frequency routes with a task result payload helper.
 
@@ -195,17 +153,14 @@ def _task_result_payload(task: AnalysisTask) -> dict:
     return payload
 
 
-def _invalid_artifact_manifest() -> HTTPException:
+def _invalid_artifact_manifest() -> InternalServiceError:
     """Support token-frequency routes with an invalid artifact manifest helper.
 
     Called by:
     - Local helpers, route handlers, or service methods in this module because they need this unit's "Support token-frequency routes with an invalid artifact manifest helper" behavior.
     """
 
-    return HTTPException(
-        status_code=500,
-        detail="Token-frequency artifact manifest is invalid",
-    )
+    return InternalServiceError("Token-frequency artifact manifest is invalid")
 
 
 def _node_artifact_from_entry(entry: object) -> TokenNodeArtifact:
@@ -447,41 +402,8 @@ def _rebuild_token_result(task: AnalysisTask) -> dict:
     }
 
 
-@router.get(
-    "/token-frequencies/tasks/{task_id}/request",
-    response_model=AnalysisTokenFrequencyRequest,
-)
-async def token_frequencies_task_request(
-    task_id: str,
-    current_user: dict = Depends(get_current_user),
-):
-    """Return stored request payload for a token-frequencies task.
-
-    Flow:
-    - Resolve authentication and request parameters from FastAPI dependencies.
-    - Delegate validation, manager calls, artifacts, or state changes to the owning helper.
-    - Shape the response payload or raise the HTTP error the client should see.
-
-    Used by:
-    - Frontend and API clients through the FastAPI GET /token-frequencies/tasks/{task_id}/request route because they need this unit's "Return stored request payload for a token-frequencies task" behavior.
-    """
-    user_id = current_user["id"]
-    workspace_id = workspace_manager.get_current_workspace_id(user_id)
-    if not workspace_id:
-        raise NoActiveWorkspaceError("No active workspace selected")
-    task_manager = get_task_manager(user_id)
-    task = task_manager.get_task(task_id)
-    if task is None:
-        raise TaskNotFoundError("Task not found")
-    request = task.request
-    return request.model_dump()
-
-
-@router.get(
-    "/token-frequencies/tasks/{task_id}/result",
-    response_model=TokenFrequencyResponse | None,
-)
 async def token_frequencies_task_result(
+    workspace_id: str,
     task_id: str,
     current_user: dict = Depends(get_current_user),
 ):
@@ -493,12 +415,10 @@ async def token_frequencies_task_result(
     - Shape the response payload or raise the HTTP error the client should see.
 
     Used by:
-    - Frontend and API clients through the FastAPI GET /token-frequencies/tasks/{task_id}/result route because they need this unit's "Return normalized token-frequency result payload for one task" behavior.
+    - shared analysis-task result route because token-frequency result reads
+      need the existing worker-sync and artifact rebuild behavior.
     """
     user_id = current_user["id"]
-    workspace_id = workspace_manager.get_current_workspace_id(user_id)
-    if not workspace_id:
-        raise NoActiveWorkspaceError("No active workspace selected")
     task_manager = get_task_manager(user_id)
 
     task = await ensure_task_synced(user_id, workspace_id, task_id, task_manager)
@@ -532,10 +452,8 @@ async def token_frequencies_task_result(
     return _rebuild_token_result(task)
 
 
-@router.post(
-    "/token-frequencies/tasks/{task_id}/result", response_model=AnalysisClearResponse
-)
 async def update_token_frequencies_task_result(
+    workspace_id: str,
     task_id: str,
     updates: TokenFrequencyPreferenceUpdateRequest | None,
     current_user: dict = Depends(get_current_user),
@@ -548,12 +466,10 @@ async def update_token_frequencies_task_result(
     - Shape the response payload or raise the HTTP error the client should see.
 
     Used by:
-    - Frontend and API clients through the FastAPI POST /token-frequencies/tasks/{task_id}/result route because they need this unit's "Persist token-frequency preference overrides on an existing task" behavior.
+    - shared analysis-task preferences route because token-limit and stop-word
+      changes update task presentation/request preferences.
     """
     user_id = current_user["id"]
-    workspace_id = workspace_manager.get_current_workspace_id(user_id)
-    if not workspace_id:
-        raise NoActiveWorkspaceError("No active workspace selected")
     task_manager = get_task_manager(user_id)
     task = task_manager.get_task(task_id)
     if not task:
@@ -588,6 +504,7 @@ async def update_token_frequencies_task_result(
     description="Calculate and compare token frequencies across one or two nodes using polars-text",
 )
 async def calculate_token_frequencies(
+    workspace_id: UUID,
     request: TokenFrequencyRequest,
     current_user: dict = Depends(get_current_user),
 ):
@@ -603,136 +520,11 @@ async def calculate_token_frequencies(
     """
 
     user_id = current_user["id"]
-    workspace_id = workspace_manager.get_current_workspace_id(user_id)
-    ws = workspace_manager.get_current_workspace(user_id)
-    if not workspace_id or ws is None:
-        raise NoActiveWorkspaceError("No active workspace selected")
-    tm = workspace_manager.get_task_manager(user_id)
-
-    if not request.node_ids:
-        raise InvalidInputError("At least one node ID must be provided")
-    if len(request.node_ids) > 2:
-        raise InvalidInputError("Maximum of 2 nodes can be compared")
-    requested_token_limit = getattr(request, "token_limit", None)
-    effective_limit = (
-        requested_token_limit
-        if requested_token_limit is not None and requested_token_limit > 0
-        else DEFAULT_TOKEN_LIMIT
-    )
-    if requested_token_limit is not None and requested_token_limit <= 0:
-        raise InvalidInputError("token_limit must be a positive integer")
-    tokenizer_model = (request.tokenizer_model or "").strip()
-    requested_node_tokenizer_models = {
-        node_id: model.strip()
-        for node_id, model in (request.node_tokenizer_models or {}).items()
-        if model and model.strip()
-    }
-
-    # Prepare only durable task paths and metadata in the route. The worker
-    # loads the snapshotted LazyFrame plans and performs all collect/sink/token
-    # work out-of-process so this submit endpoint stays responsive.
-    artifact_dir, artifact_prefix = _prepare_token_artifact_target(
-        user_id, workspace_id
-    )
-
-    node_tokenizer_models: dict[str, str] = {}
-    for node_id in request.node_ids:
-        node = ws.nodes.get(node_id)
-        if node is None:
-            raise NotFoundError(f"Node {node_id} not found")
-        column_name = request.node_columns.get(node_id)
-        if not column_name:
-            raise InvalidInputError(f"Missing column selection for node {node_id}")
-        tokenization_col = node.find_tokenization_column(column_name)
-        if tokenization_col is None:
-            model = requested_node_tokenizer_models.get(node_id) or tokenizer_model
-            if model:
-                node_tokenizer_models[node_id] = model
-        else:
-            tokenization_registry = getattr(node, "tokenization", {})
-            tokenization_meta = (
-                tokenization_registry.get(column_name, {})
-                if isinstance(tokenization_registry, dict)
-                else {}
-            )
-            model = (
-                tokenization_meta.get("model")
-                if isinstance(tokenization_meta, dict)
-                else None
-            )
-            if isinstance(model, str) and model.strip():
-                node_tokenizer_models[node_id] = model.strip()
-    missing_tokenizer_model_node_ids = [
-        node_id
-        for node_id in request.node_ids
-        if ws.nodes[node_id].find_tokenization_column(request.node_columns[node_id])
-        is None
-        and not node_tokenizer_models.get(node_id)
-    ]
-    if missing_tokenizer_model_node_ids:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "node_tokenizer_models must include a tokenizer model for raw-text nodes: "
-                + ", ".join(missing_tokenizer_model_node_ids)
-            ),
-        )
-
-    requested_stop_words = sanitize_stop_words(request.stop_words)
-    task_id = str(uuid4())
-    input_snapshot_dir = create_worker_input_snapshot(
+    workspace_id_str = str(workspace_id)
+    ws = require_workspace(user_id, workspace_id_str)
+    return await submit_token_frequency_analysis(
         user_id=user_id,
-        workspace_id=workspace_id,
-        task_id=task_id,
-        node_ids=request.node_ids,
+        workspace_id=workspace_id_str,
         workspace=ws,
-        artifact_dir=artifact_dir,
+        request=request,
     )
-    analysis_request = AnalysisTokenFrequencyRequest(
-        node_ids=request.node_ids,
-        node_columns=request.node_columns,
-        token_limit=effective_limit,
-        stop_words=requested_stop_words,
-        tokenizer_model=tokenizer_model,
-        node_tokenizer_models=node_tokenizer_models,
-    )
-
-    task_manager = get_task_manager(user_id)
-    task_manager.save_task(
-        AnalysisTask(
-            task_id=task_id,
-            user_id=user_id,
-            workspace_id=workspace_id,
-            request=analysis_request,
-            status=AnalysisStatus.RUNNING,
-        )
-    )
-
-    submission_lock = _token_freq_submission_lock(user_id, workspace_id)
-    async with submission_lock:
-        task_info = await tm.submit_task(
-            user_id=user_id,
-            workspace_id=workspace_id,
-            task_type="token_frequencies",
-            task_id=task_id,
-            task_args={
-                "input_snapshot_dir": str(input_snapshot_dir),
-                "node_ids": request.node_ids,
-                "node_columns": request.node_columns,
-                "artifact_dir": str(artifact_dir),
-                "artifact_prefix": artifact_prefix,
-                "token_limit": effective_limit,
-                "stop_words": requested_stop_words,
-                "tokenizer_model": tokenizer_model,
-                "node_tokenizer_models": node_tokenizer_models,
-            },
-        )
-
-    return {
-        "state": "running",
-        "message": "Token frequency analysis started",
-        "data": None,
-        "token_limit": effective_limit,
-        "stop_words": requested_stop_words,
-        "metadata": {"task_id": task_id},
-    }

@@ -26,16 +26,14 @@ async def test_task_manager_endpoints_roundtrip(authenticated_client, workspace_
     manager.update_task(task_id, {"state": "successful", "data": {}})
 
     req_resp = await authenticated_client.get(
-        f"/api/workspaces/token-frequencies/tasks/{task_id}/request"
+        f"/api/workspaces/{workspace_id}/analysis-tasks/{task_id}/request"
     )
     assert req_resp.status_code == 200
 
     # Task-specific result endpoints have analysis-specific processing;
     # result round-trip is covered by test_analysis_persistence.py with proper data.
 
-    clear_resp = await authenticated_client.post(
-        "/api/tasks/clear", params={"task_id": task_id}
-    )
+    clear_resp = await authenticated_client.delete(f"/api/tasks/{task_id}")
     assert clear_resp.status_code == 200
 
 
@@ -52,9 +50,7 @@ async def test_clear_analysis_only_task_emits_task_removed(
     queue = await worker_manager.subscribe(user_id)
 
     try:
-        clear_resp = await authenticated_client.post(
-            "/api/tasks/clear", params={"task_id": task_id}
-        )
+        clear_resp = await authenticated_client.delete(f"/api/tasks/{task_id}")
         assert clear_resp.status_code == 200
 
         event = await asyncio.wait_for(queue.get(), timeout=1)
@@ -174,9 +170,7 @@ async def test_clear_analysis_task_removes_child_worker_tasks(
     queue = await worker_manager.subscribe(user_id)
 
     try:
-        clear_resp = await authenticated_client.post(
-            "/api/tasks/clear", params={"task_id": parent_task_id}
-        )
+        clear_resp = await authenticated_client.delete(f"/api/tasks/{parent_task_id}")
         assert clear_resp.status_code == 200
         data = clear_resp.json()["data"]
         assert data["cleared_task_ids"] == [
@@ -241,15 +235,37 @@ async def test_clear_analysis_task_deletes_owned_artifacts_only(
     )
     analysis_manager.save_task(task)
 
-    clear_resp = await authenticated_client.post(
-        "/api/tasks/clear", params={"task_id": task_id}
-    )
+    clear_resp = await authenticated_client.delete(f"/api/tasks/{task_id}")
 
     assert clear_resp.status_code == 200
     assert not request_artifact.exists()
     assert not result_artifact.exists()
     assert not result_artifact_dir.exists()
     assert durable_data.exists()
+
+
+@pytest.mark.asyncio
+async def test_cancel_worker_task_uses_resource_route(authenticated_client, workspace_id):
+    """Stopping a task should address the task id in the URL, not a query string."""
+
+    user_id = "test"
+    manager = workspace_manager.get_task_manager(user_id)
+    future = Future()
+    task_info = TaskInfo(
+        id="task-worker-cancel",
+        future=future,
+        task_type="token_frequencies",
+        user_id=user_id,
+        workspace_id=workspace_id,
+    )
+
+    async with manager._lock:
+        manager._tasks[task_info.id] = task_info
+
+    response = await authenticated_client.post(f"/api/tasks/{task_info.id}/cancel")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["stopped"] is True
 
 
 @pytest.mark.asyncio

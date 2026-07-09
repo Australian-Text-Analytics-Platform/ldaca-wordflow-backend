@@ -11,11 +11,12 @@ Flow:
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import datetime
 from typing import Any, cast
 
 import polars as pl
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 
 from ...core.auth import get_current_user
 from ...core.docworkspace_data_types import TM_DISTRIBUTION_POLARS_DTYPE
@@ -28,14 +29,15 @@ from .utils import (
     _make_temporal_literal,
     _paginated_lazy_preview,
     _parse_temporal,
-    _propagated_tokenization,
-    require_current_workspace,
-    update_workspace,
+    require_workspace,
 )
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/workspaces", tags=["nodes"])
+router = APIRouter(
+    prefix="/workspaces/{workspace_id:uuid}",
+    tags=["nodes"],
+)
 
 # Comparison operators supported for the TMDist topic-proportion filter.
 _TMDIST_OPERATORS = {"gt", "gte", "lt", "lte", "eq", "ne"}
@@ -255,14 +257,15 @@ def _build_filter_expression(
 
 @router.post("/nodes/{node_id}/filter", response_model=NodeOperationResponse)
 async def filter_node(
+    workspace_id: uuid.UUID,
     node_id: str,
     request: FilterRequest,
     current_user: dict = Depends(get_current_user),
 ):
     """Create a new child node by filtering the source node's data."""
     user_id = current_user["id"]
-    workspace = require_current_workspace(user_id)
-    workspace_id = workspace.id
+    workspace_id_str = str(workspace_id)
+    workspace = require_workspace(user_id, workspace_id_str)
     node = workspace.nodes[node_id]
     lazy_data = node.data
     schema_map: dict[str, Any] = dict(lazy_data.collect_schema().items())
@@ -276,7 +279,7 @@ async def filter_node(
         operation=f"filter({node.name})",
         parents=[node],
         user_id=user_id,
-        workspace_id=workspace_id,
+        workspace_id=workspace_id_str,
     )
     return {
         "node_name": new_node.name,
@@ -286,6 +289,7 @@ async def filter_node(
 
 @router.post("/nodes/{node_id}/filter/preview")
 async def filter_preview(
+    workspace_id: uuid.UUID,
     node_id: str,
     request: FilterRequest,
     page: int = Query(1, ge=1),
@@ -294,7 +298,7 @@ async def filter_preview(
 ) -> FilterPreviewResponse:
     """Preview the result of a filter operation on the source node."""
     user_id = current_user["id"]
-    workspace = require_current_workspace(user_id)
+    workspace = require_workspace(user_id, str(workspace_id))
     lazy_data = workspace.nodes[node_id].data
 
     try:

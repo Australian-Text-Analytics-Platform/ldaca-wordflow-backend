@@ -148,6 +148,7 @@ class TopicModelingDetachRequest(BaseModel):
     topic_column_name: str | None = "TOPIC_topic"
     topic_ids: list[int] | None = None
     topic_meanings_override: list[TopicMeaningOverrideItem] | None = None
+    model_config = ConfigDict(extra="forbid")
 
 
 class TopicModelingDetachOptionsResponse(BaseModel):

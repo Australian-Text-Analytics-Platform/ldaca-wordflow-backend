@@ -2,6 +2,9 @@ from pathlib import Path
 from typing import cast
 
 import polars as pl
+from ldaca_wordflow.api.workspaces.analyses.generated_columns import (
+    MATERIALIZED_CONCORDANCE_COLUMNS,
+)
 from ldaca_wordflow.core.worker_tasks_concordance import run_concordance_detach_task
 
 
@@ -22,6 +25,7 @@ def test_concordance_detach_task_writes_node_payload_under_workspace_data(tmp_pa
         case_sensitive=False,
         new_node_name="detached_concordance",
         include_document_column=True,
+        selected_generated_columns=list(MATERIALIZED_CONCORDANCE_COLUMNS),
         progress_callback=lambda progress, message: progress_updates.append(
             (
                 progress,
@@ -53,8 +57,7 @@ def test_concordance_detach_task_writes_node_payload_under_workspace_data(tmp_pa
 
 def test_concordance_detach_includes_extraction_when_opted_in(tmp_path):
     """When `include_extraction=True`, the per-hit detach output keeps the
-    `CONC_extraction` raw-window column. Default keeps the existing
-    backward-compatible "exclude" behaviour.
+    `CONC_extraction` raw-window column.
     """
     result = run_concordance_detach_task(
         configure_worker_environment=lambda: None,
@@ -71,6 +74,7 @@ def test_concordance_detach_includes_extraction_when_opted_in(tmp_path):
         new_node_name="detached_with_extract",
         include_document_column=True,
         include_extraction=True,
+        selected_generated_columns=list(MATERIALIZED_CONCORDANCE_COLUMNS),
     )
     assert result["state"] == "successful"
     payload = result["result"]["node_payload"]

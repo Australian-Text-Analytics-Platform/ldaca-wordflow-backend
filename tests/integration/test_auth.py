@@ -68,7 +68,8 @@ class TestAuthenticationAPI:
         # Should be disabled in single-user mode
         assert response.status_code == 400
         data = response.json()
-        assert "single-user mode" in data["detail"].lower()
+        assert data["error"] == "invalid_input"
+        assert "single-user mode" in data["message"].lower()
 
 
 class TestAuthenticatedEndpoints:

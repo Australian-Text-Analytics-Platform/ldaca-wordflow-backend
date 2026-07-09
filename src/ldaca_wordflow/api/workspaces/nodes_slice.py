@@ -11,10 +11,11 @@ Flow:
 from __future__ import annotations
 
 import math
+import uuid
 from typing import cast
 
 import polars as pl
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 
 from ...core.auth import get_current_user
 from ...core.exceptions import InvalidInputError, ValidationError
@@ -28,11 +29,13 @@ from .utils import (
     _create_and_persist_child_node,
     _extract_lazy_schema,
     _paginated_lazy_preview,
-    require_current_workspace,
-    update_workspace,
+    require_workspace,
 )
 
-router = APIRouter(prefix="/workspaces", tags=["nodes"])
+router = APIRouter(
+    prefix="/workspaces/{workspace_id:uuid}",
+    tags=["nodes"],
+)
 
 
 def _build_slice_or_sample_lazy(
@@ -97,14 +100,15 @@ def _build_slice_or_sample_lazy(
 
 @router.post("/nodes/{node_id}/slice", response_model=NodeOperationResponse)
 async def slice_node(
+    workspace_id: uuid.UUID,
     node_id: str,
     request: SliceRequest,
     current_user: dict = Depends(get_current_user),
 ):
     """Create a new child node by slicing/sampling/shuffling the source."""
     user_id = current_user["id"]
-    workspace = require_current_workspace(user_id)
-    workspace_id = workspace.id
+    workspace_id_str = str(workspace_id)
+    workspace = require_workspace(user_id, workspace_id_str)
     node = workspace.nodes[node_id]
     output_data, default_node_name, operation = _build_slice_or_sample_lazy(
         node.data,
@@ -119,7 +123,7 @@ async def slice_node(
         operation=operation,
         parents=[node],
         user_id=user_id,
-        workspace_id=workspace_id,
+        workspace_id=workspace_id_str,
     )
     return {
         "node_name": new_node.name,
@@ -129,6 +133,7 @@ async def slice_node(
 
 @router.post("/nodes/{node_id}/slice/preview")
 async def slice_preview(
+    workspace_id: uuid.UUID,
     node_id: str,
     request: SliceRequest,
     page: int = Query(1, ge=1),
@@ -137,7 +142,7 @@ async def slice_preview(
 ) -> FilterPreviewResponse:
     """Preview the result of a slice/sample/shuffle on the source node."""
     user_id = current_user["id"]
-    workspace = require_current_workspace(user_id)
+    workspace = require_workspace(user_id, str(workspace_id))
 
     try:
         preview_lazy, _default_node_name, _operation = _build_slice_or_sample_lazy(

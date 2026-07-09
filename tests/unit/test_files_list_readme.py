@@ -141,7 +141,7 @@ def test_raw_file_rejects_paths_outside_user_data(client: TestClient):
     response = client.get("/api/files/raw", params={"path": "../outside.md"})
 
     assert response.status_code == 400
-    assert response.json()["detail"] == "Invalid file path"
+    assert response.json()["message"] == "Invalid file path"
 
 
 def test_create_folder_creates_root_and_nested_directories(
@@ -178,7 +178,7 @@ def test_create_folder_rejects_invalid_names(client: TestClient):
     )
 
     assert response.status_code == 400
-    assert response.json()["detail"] == "Invalid folder name: name cannot contain '..'"
+    assert response.json()["message"] == "Invalid folder name: name cannot contain '..'"
 
 
 def test_move_file_moves_into_target_directory(client: TestClient, tmp_path: Path):

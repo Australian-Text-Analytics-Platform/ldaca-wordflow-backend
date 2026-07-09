@@ -27,8 +27,8 @@ other fields:
 - Google and CILogon values enable login methods.
 
 `reload_settings()` rebuilds the settings singleton and updates the module-level
-object in place. The config router uses this after setting `DATA_ROOT` so code
-that imported `settings` sees the new values.
+object in place. `PATCH /api/admin/config` uses this after setting `DATA_ROOT`,
+so code that imported `settings` sees the new process-local value.
 
 ## Database And Sessions
 
@@ -52,6 +52,7 @@ routers do not duplicate auth checks.
 `api/auth.py` owns the login flows:
 
 - `/auth/` returns auth configuration and current-user state,
+- `/runtime-config` returns public frontend bootstrap metadata before login,
 - Google token and redirect callbacks verify identity tokens then create a
   backend session,
 - CILogon endpoints use OIDC discovery and state cookies,

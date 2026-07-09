@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import uuid
+
 import polars as pl
 import pytest
 from ldaca_wordflow.api.workspaces import nodes_slice as nodes_api
@@ -56,7 +58,7 @@ class FakeWorkspaceManager:
 
     def __init__(self, nodes: dict[str, DummyNode]) -> None:
         self.nodes = nodes
-        self.workspace_id = "ws1"
+        self.workspace_id = "00000000-0000-0000-0000-000000000001"
         self.workspace = DummyWorkspace(self.nodes, self)
         self.add_calls: list[dict[str, object]] = []
 
@@ -108,7 +110,10 @@ async def test_slice_node_with_offset_and_length(fake_workspace_manager):
     request = SliceRequest(offset=1, length=2, new_node_name="subset_rows")
 
     result = await nodes_api.slice_node(
-        "node_base", request, current_user={"id": "user"}
+        workspace_id=uuid.UUID(fake_workspace_manager.workspace_id),
+        node_id="node_base",
+        request=request,
+        current_user={"id": "user"},
     )
 
     assert result["node_name"] == "subset_rows"
@@ -128,7 +133,10 @@ async def test_slice_node_without_length_uses_tail(fake_workspace_manager):
     request = SliceRequest(offset=3)
 
     result = await nodes_api.slice_node(
-        "node_base", request, current_user={"id": "user"}
+        workspace_id=uuid.UUID(fake_workspace_manager.workspace_id),
+        node_id="node_base",
+        request=request,
+        current_user={"id": "user"},
     )
 
     assert result["node_name"] == "base_node_sliced"
@@ -147,8 +155,9 @@ async def test_slice_preview_respects_offset_and_length(fake_workspace_manager):
     request = SliceRequest(offset=1, length=3)
 
     preview = await nodes_api.slice_preview(
-        "node_base",
-        request,
+        workspace_id=uuid.UUID(fake_workspace_manager.workspace_id),
+        node_id="node_base",
+        request=request,
         page=1,
         page_size=2,
         current_user={"id": "user"},
@@ -161,8 +170,9 @@ async def test_slice_preview_respects_offset_and_length(fake_workspace_manager):
     assert [row["value"] for row in preview.data] == [2, 3]
 
     preview_page_two = await nodes_api.slice_preview(
-        "node_base",
-        request,
+        workspace_id=uuid.UUID(fake_workspace_manager.workspace_id),
+        node_id="node_base",
+        request=request,
         page=2,
         page_size=2,
         current_user={"id": "user"},
@@ -184,7 +194,10 @@ async def test_random_sample_node_uses_fraction_and_seed(fake_workspace_manager)
     )
 
     result = await nodes_api.slice_node(
-        "node_base", request, current_user={"id": "user"}
+        workspace_id=uuid.UUID(fake_workspace_manager.workspace_id),
+        node_id="node_base",
+        request=request,
+        current_user={"id": "user"},
     )
 
     assert result["node_name"] == "sample_rows"
@@ -205,8 +218,9 @@ async def test_random_sample_preview_respects_seed(fake_workspace_manager):
     request = SliceRequest(mode="random_sample", sample_size=0.4, random_seed=7)
 
     preview = await nodes_api.slice_preview(
-        "node_base",
-        request,
+        workspace_id=uuid.UUID(fake_workspace_manager.workspace_id),
+        node_id="node_base",
+        request=request,
         page=1,
         page_size=10,
         current_user={"id": "user"},
@@ -231,7 +245,10 @@ async def test_random_sample_node_uses_n_for_integer(fake_workspace_manager):
     )
 
     result = await nodes_api.slice_node(
-        "node_base", request, current_user={"id": "user"}
+        workspace_id=uuid.UUID(fake_workspace_manager.workspace_id),
+        node_id="node_base",
+        request=request,
+        current_user={"id": "user"},
     )
 
     assert result["node_name"] == "sample_n_rows"

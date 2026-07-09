@@ -7,7 +7,7 @@ async def test_create_annotation_class_descriptions_node(
     authenticated_client, workspace_id, test_user
 ):
     response = await authenticated_client.post(
-        "/api/workspaces/annotation/class-descriptions"
+        f"/api/workspaces/{workspace_id}/annotation/class-descriptions"
     )
 
     assert response.status_code == 200
@@ -27,8 +27,12 @@ async def test_create_annotation_class_descriptions_node(
 async def test_create_annotation_class_descriptions_uses_unique_names(
     authenticated_client, workspace_id
 ):
-    first = await authenticated_client.post("/api/workspaces/annotation/class-descriptions")
-    second = await authenticated_client.post("/api/workspaces/annotation/class-descriptions")
+    first = await authenticated_client.post(
+        f"/api/workspaces/{workspace_id}/annotation/class-descriptions"
+    )
+    second = await authenticated_client.post(
+        f"/api/workspaces/{workspace_id}/annotation/class-descriptions"
+    )
 
     assert first.status_code == 200
     assert second.status_code == 200
@@ -40,7 +44,7 @@ async def test_update_annotation_class_descriptions_rows(
     authenticated_client, workspace_id, test_user
 ):
     created = await authenticated_client.post(
-        "/api/workspaces/annotation/class-descriptions"
+        f"/api/workspaces/{workspace_id}/annotation/class-descriptions"
     )
     assert created.status_code == 200
     node_id = created.json()["id"]
@@ -54,7 +58,7 @@ async def test_update_annotation_class_descriptions_rows(
         ],
     }
     updated = await authenticated_client.put(
-        f"/api/workspaces/annotation/class-descriptions/{node_id}",
+        f"/api/workspaces/{workspace_id}/annotation/class-descriptions/{node_id}",
         json=payload,
     )
 
@@ -62,7 +66,7 @@ async def test_update_annotation_class_descriptions_rows(
     assert updated.json() == payload
 
     fetched = await authenticated_client.get(
-        f"/api/workspaces/annotation/class-descriptions/{node_id}",
+        f"/api/workspaces/{workspace_id}/annotation/class-descriptions/{node_id}",
         params={"class_column": "class", "description_column": "description"},
     )
     assert fetched.status_code == 200
@@ -79,13 +83,17 @@ async def test_update_annotation_class_descriptions_rows(
 async def test_set_annotation_class_parent_links_to_source(
     authenticated_client, workspace_id, test_user
 ):
-    source = await authenticated_client.post("/api/workspaces/annotation/class-descriptions")
-    classes = await authenticated_client.post("/api/workspaces/annotation/class-descriptions")
+    source = await authenticated_client.post(
+        f"/api/workspaces/{workspace_id}/annotation/class-descriptions"
+    )
+    classes = await authenticated_client.post(
+        f"/api/workspaces/{workspace_id}/annotation/class-descriptions"
+    )
     source_id = source.json()["id"]
     class_id = classes.json()["id"]
 
     response = await authenticated_client.put(
-        f"/api/workspaces/annotation/class-descriptions/{class_id}/parent",
+        f"/api/workspaces/{workspace_id}/annotation/class-descriptions/{class_id}/parent",
         json={"parent_node_id": source_id},
     )
     assert response.status_code == 200
@@ -102,17 +110,19 @@ async def test_set_annotation_class_parent_links_to_source(
 async def test_set_annotation_class_parent_rejects_self_and_missing(
     authenticated_client, workspace_id
 ):
-    created = await authenticated_client.post("/api/workspaces/annotation/class-descriptions")
+    created = await authenticated_client.post(
+        f"/api/workspaces/{workspace_id}/annotation/class-descriptions"
+    )
     node_id = created.json()["id"]
 
     same = await authenticated_client.put(
-        f"/api/workspaces/annotation/class-descriptions/{node_id}/parent",
+        f"/api/workspaces/{workspace_id}/annotation/class-descriptions/{node_id}/parent",
         json={"parent_node_id": node_id},
     )
     assert same.status_code == 400
 
     missing = await authenticated_client.put(
-        f"/api/workspaces/annotation/class-descriptions/{node_id}/parent",
+        f"/api/workspaces/{workspace_id}/annotation/class-descriptions/{node_id}/parent",
         json={"parent_node_id": "does-not-exist"},
     )
     assert missing.status_code == 404
@@ -121,11 +131,13 @@ async def test_set_annotation_class_parent_rejects_self_and_missing(
 async def test_create_annotation_column_adds_empty_string_column(
     authenticated_client, workspace_id, test_user
 ):
-    created = await authenticated_client.post("/api/workspaces/annotation/class-descriptions")
+    created = await authenticated_client.post(
+        f"/api/workspaces/{workspace_id}/annotation/class-descriptions"
+    )
     node_id = created.json()["id"]
 
     response = await authenticated_client.post(
-        f"/api/workspaces/annotation/source/{node_id}/annotation-column",
+        f"/api/workspaces/{workspace_id}/annotation/source/{node_id}/annotation-column",
         json={"column_name": "annotation"},
     )
     assert response.status_code == 200
@@ -143,17 +155,19 @@ async def test_create_annotation_column_adds_empty_string_column(
 async def test_create_annotation_column_rejects_duplicate_and_blank(
     authenticated_client, workspace_id
 ):
-    created = await authenticated_client.post("/api/workspaces/annotation/class-descriptions")
+    created = await authenticated_client.post(
+        f"/api/workspaces/{workspace_id}/annotation/class-descriptions"
+    )
     node_id = created.json()["id"]
 
     duplicate = await authenticated_client.post(
-        f"/api/workspaces/annotation/source/{node_id}/annotation-column",
+        f"/api/workspaces/{workspace_id}/annotation/source/{node_id}/annotation-column",
         json={"column_name": "class"},
     )
     assert duplicate.status_code == 400
 
     blank = await authenticated_client.post(
-        f"/api/workspaces/annotation/source/{node_id}/annotation-column",
+        f"/api/workspaces/{workspace_id}/annotation/source/{node_id}/annotation-column",
         json={"column_name": "   "},
     )
     assert blank.status_code == 400
@@ -163,22 +177,25 @@ async def test_create_annotation_column_missing_node_returns_404(
     authenticated_client, workspace_id
 ):
     response = await authenticated_client.post(
-        "/api/workspaces/annotation/source/does-not-exist/annotation-column",
+        f"/api/workspaces/{workspace_id}/annotation/source/does-not-exist/annotation-column",
         json={"column_name": "annotation"},
     )
     assert response.status_code == 404
 
-async def _make_source_with_rows(authenticated_client):
+
+async def _make_source_with_rows(authenticated_client, workspace_id: str):
     """Create a 2-row source node carrying an empty ``annotation`` column.
 
     Called by the annotation-cell tests because setting a cell needs a node that
     actually has rows; reuses the public class-description + add-column routes so
     the fixture exercises the same wiring the frontend does.
     """
-    created = await authenticated_client.post("/api/workspaces/annotation/class-descriptions")
+    created = await authenticated_client.post(
+        f"/api/workspaces/{workspace_id}/annotation/class-descriptions"
+    )
     node_id = created.json()["id"]
     await authenticated_client.put(
-        f"/api/workspaces/annotation/class-descriptions/{node_id}",
+        f"/api/workspaces/{workspace_id}/annotation/class-descriptions/{node_id}",
         json={
             "class_column": "class",
             "description_column": "description",
@@ -189,7 +206,7 @@ async def _make_source_with_rows(authenticated_client):
         },
     )
     await authenticated_client.post(
-        f"/api/workspaces/annotation/source/{node_id}/annotation-column",
+        f"/api/workspaces/{workspace_id}/annotation/source/{node_id}/annotation-column",
         json={"column_name": "annotation"},
     )
     return node_id
@@ -198,10 +215,10 @@ async def _make_source_with_rows(authenticated_client):
 async def test_set_annotation_cell_writes_value(
     authenticated_client, workspace_id, test_user
 ):
-    node_id = await _make_source_with_rows(authenticated_client)
+    node_id = await _make_source_with_rows(authenticated_client, workspace_id)
 
     response = await authenticated_client.put(
-        f"/api/workspaces/annotation/source/{node_id}/annotation-cell",
+        f"/api/workspaces/{workspace_id}/annotation/source/{node_id}/annotation-cell",
         json={"column_name": "annotation", "row_index": 1, "value": "support"},
     )
     assert response.status_code == 200
@@ -215,14 +232,14 @@ async def test_set_annotation_cell_writes_value(
 async def test_set_annotation_cell_clears_to_null_on_blank(
     authenticated_client, workspace_id, test_user
 ):
-    node_id = await _make_source_with_rows(authenticated_client)
+    node_id = await _make_source_with_rows(authenticated_client, workspace_id)
     await authenticated_client.put(
-        f"/api/workspaces/annotation/source/{node_id}/annotation-cell",
+        f"/api/workspaces/{workspace_id}/annotation/source/{node_id}/annotation-cell",
         json={"column_name": "annotation", "row_index": 0, "value": "support"},
     )
 
     cleared = await authenticated_client.put(
-        f"/api/workspaces/annotation/source/{node_id}/annotation-cell",
+        f"/api/workspaces/{workspace_id}/annotation/source/{node_id}/annotation-cell",
         json={"column_name": "annotation", "row_index": 0, "value": "  "},
     )
     assert cleared.status_code == 200
@@ -236,16 +253,16 @@ async def test_set_annotation_cell_clears_to_null_on_blank(
 async def test_set_annotation_cell_rejects_bad_column_and_row(
     authenticated_client, workspace_id
 ):
-    node_id = await _make_source_with_rows(authenticated_client)
+    node_id = await _make_source_with_rows(authenticated_client, workspace_id)
 
     missing_column = await authenticated_client.put(
-        f"/api/workspaces/annotation/source/{node_id}/annotation-cell",
+        f"/api/workspaces/{workspace_id}/annotation/source/{node_id}/annotation-cell",
         json={"column_name": "nope", "row_index": 0, "value": "x"},
     )
     assert missing_column.status_code == 400
 
     out_of_range = await authenticated_client.put(
-        f"/api/workspaces/annotation/source/{node_id}/annotation-cell",
+        f"/api/workspaces/{workspace_id}/annotation/source/{node_id}/annotation-cell",
         json={"column_name": "annotation", "row_index": 5, "value": "x"},
     )
     assert out_of_range.status_code == 400
@@ -255,7 +272,7 @@ async def test_set_annotation_cell_missing_node_returns_404(
     authenticated_client, workspace_id
 ):
     response = await authenticated_client.put(
-        "/api/workspaces/annotation/source/does-not-exist/annotation-cell",
+        f"/api/workspaces/{workspace_id}/annotation/source/does-not-exist/annotation-cell",
         json={"column_name": "annotation", "row_index": 0, "value": "x"},
     )
     assert response.status_code == 404

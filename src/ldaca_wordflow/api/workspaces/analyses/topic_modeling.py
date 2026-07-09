@@ -12,33 +12,26 @@ Flow:
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from pathlib import Path
 from typing import cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import polars as pl
 from fastapi import APIRouter, Depends
 
 from docworkspace import Node
 
-from ....analysis.implementations.topic_modeling import (
-    TopicModelingRequest as AnalysisTopicModelingRequest,
-)
 from ....analysis.manager import get_task_manager
 from ....analysis.models import AnalysisStatus, AnalysisTask
 from ....core.auth import get_current_user
 from ....core.exceptions import (
     InternalServiceError,
     InvalidInputError,
-    NoActiveWorkspaceError,
     NotFoundError,
     ResourceConflictError,
     TaskNotFoundError,
-    WorkspaceNotFoundError,
 )
-from ....core.worker_input_snapshots import create_worker_input_snapshot
 from ....core.workspace import workspace_manager
 from ....models import (
     AnalysisClearResponse,
@@ -53,7 +46,7 @@ from ....models import (
     TopicModelingRequest,
     TopicModelingResponse,
 )
-from ..utils import ensure_task_synced, update_workspace
+from ..utils import ensure_task_synced, require_workspace, update_workspace
 from .generated_columns import (
     TOPIC_COLUMN,
     TOPIC_DISTRIBUTION_COLUMN,
@@ -62,28 +55,15 @@ from .generated_columns import (
     TOPIC_TOP1_COLUMN,
     is_tokenization_column_name,
 )
+from .topic_modeling_submission import submit_topic_modeling
 
-router = APIRouter(prefix="/workspaces", tags=["topic-modeling"])
+router = APIRouter(
+    prefix="/workspaces/{workspace_id:uuid}",
+    tags=["topic-modeling"],
+)
 
 
 logger = logging.getLogger(__name__)
-
-_TOPIC_SUBMISSION_LOCKS: dict[tuple[str, str], asyncio.Lock] = {}
-
-
-def _topic_submission_lock(user_id: str, workspace_id: str) -> asyncio.Lock:
-    """Support topic-modeling routes with a topic submission lock helper.
-
-    Called by:
-    - Local helpers, route handlers, or service methods in this module because they need this unit's "Support topic-modeling routes with a topic submission lock helper" behavior.
-    """
-
-    key = (user_id, workspace_id)
-    lock = _TOPIC_SUBMISSION_LOCKS.get(key)
-    if lock is None:
-        lock = asyncio.Lock()
-        _TOPIC_SUBMISSION_LOCKS[key] = lock
-    return lock
 
 
 def _task_metadata(task_id: object | None) -> AnalysisTaskMetadata:
@@ -94,27 +74,6 @@ def _task_metadata(task_id: object | None) -> AnalysisTaskMetadata:
     """
 
     return AnalysisTaskMetadata(task_id=str(task_id) if task_id is not None else None)
-
-
-def _prepare_topic_artifact_target(user_id: str, workspace_id: str) -> tuple[Path, str]:
-    """Prepare topic artifact target data consumed by topic-modeling routes.
-
-    Steps:
-    - Normalize caller input into the representation this module expects.
-    - Delegate stateful, expensive, or validating work to the owning manager/helper when needed.
-    - Return the compact value the caller uses for artifacts, validation, or response shaping.
-
-    Called by:
-    - Local helpers, route handlers, or service methods in this module because they need this unit's "Prepare topic artifact target data consumed by topic-modeling routes" behavior.
-    """
-
-    workspace_artifacts_dir = workspace_manager.ensure_workspace_artifacts_dir(
-        user_id, workspace_id
-    )
-    if workspace_artifacts_dir is None:
-        raise WorkspaceNotFoundError("Workspace not found")
-    artifact_prefix = f"topic_modeling_{uuid4()}"
-    return workspace_artifacts_dir, artifact_prefix
 
 
 def _task_result_payload(task: AnalysisTask) -> dict:
@@ -336,6 +295,7 @@ async def _require_completed_topic_task(
 
 @router.delete("/topic-modeling", response_model=AnalysisClearResponse)
 async def clear_topic_modeling_results(
+    workspace_id: UUID,
     current_user: dict = Depends(get_current_user),
 ):
     """Clear stored topic-modeling task state for a workspace.
@@ -352,14 +312,12 @@ async def clear_topic_modeling_results(
     - Removes explicit topic-modeling task records for broad legacy clear actions.
     """
     user_id = current_user["id"]
-    workspace_id = workspace_manager.get_current_workspace_id(user_id)
-    if not workspace_id:
-        raise NoActiveWorkspaceError("No active workspace selected")
+    workspace_id_str = str(workspace_id)
     task_manager = get_task_manager(user_id)
     task_ids = [
         task.task_id
         for task in task_manager.get_all_tasks()
-        if task.workspace_id == workspace_id
+        if task.workspace_id == workspace_id_str
         and task.request.__class__.__name__ == "TopicModelingRequest"
     ]
     for task_id in task_ids:
@@ -377,6 +335,7 @@ async def clear_topic_modeling_results(
 
 @router.post("/topic-modeling", response_model=TopicModelingResponse)
 async def run_topic_modeling(
+    workspace_id: UUID,
     request: TopicModelingRequest,
     current_user: dict = Depends(get_current_user),
 ):
@@ -395,127 +354,18 @@ async def run_topic_modeling(
         for progress/result polling.
     """
     user_id = current_user["id"]
-    workspace_id = workspace_manager.get_current_workspace_id(user_id)
-    ws = workspace_manager.get_current_workspace(user_id)
-    if not workspace_id or ws is None:
-        raise NoActiveWorkspaceError("No active workspace selected")
-    if not request.node_ids:
-        raise InvalidInputError("At least one node ID must be provided")
-    node_infos: list[dict[str, object]] = []
-    for node_id in request.node_ids:
-        column_name = request.node_columns[node_id]
-        if node_id not in ws.nodes:
-            raise NotFoundError(f"Node {node_id} not found")
-        node_infos.append(
-            {
-                "node_id": node_id,
-                "text_column": column_name,
-            }
-        )
-
-    tm = workspace_manager.get_task_manager(user_id)
-    task_id = str(uuid4())
-    min_topic_size = (
-        request.min_topic_size if request.min_topic_size is not None else 10
-    )
-    random_seed = request.random_seed if request.random_seed is not None else 42
-    representative_words_count = (
-        request.representative_words_count
-        if request.representative_words_count is not None
-        else 5
-    )
-    analysis_request = AnalysisTopicModelingRequest(
-        node_ids=request.node_ids,
-        node_columns=request.node_columns,
-        min_topic_size=min_topic_size,
-        random_seed=random_seed,
-        representative_words_count=representative_words_count,
-        sample_fractions=request.sample_fractions,
-    )
-    submission_lock = _topic_submission_lock(user_id, workspace_id)
-    async with submission_lock:
-        artifact_dir, artifact_prefix = _prepare_topic_artifact_target(
-            user_id, workspace_id
-        )
-        input_snapshot_dir = create_worker_input_snapshot(
-            user_id=user_id,
-            workspace_id=workspace_id,
-            task_id=task_id,
-            node_ids=request.node_ids,
-            workspace=ws,
-            artifact_dir=artifact_dir,
-        )
-        analysis_tm = get_task_manager(user_id)
-        analysis_tm.save_task(
-            AnalysisTask(
-                task_id=task_id,
-                user_id=user_id,
-                workspace_id=workspace_id,
-                request=analysis_request,
-                status=AnalysisStatus.RUNNING,
-            )
-        )
-        worker_task = await tm.submit_task(
-            user_id=user_id,
-            workspace_id=workspace_id,
-            task_type="topic_modeling",
-            task_id=task_id,
-            task_args={
-                "input_snapshot_dir": str(input_snapshot_dir),
-                "node_infos": node_infos,
-                "artifact_dir": str(artifact_dir),
-                "artifact_prefix": artifact_prefix,
-                "min_topic_size": min_topic_size,
-                "random_seed": random_seed,
-                "representative_words_count": representative_words_count,
-                "sample_fractions": request.sample_fractions,
-            },
-            task_name="Topic Modeling",
-        )
-
-    return TopicModelingResponse(
-        state="running",
-        message="Topic Modeling analysis started",
-        data=None,
-        metadata=_task_metadata(task_id),
+    workspace_id_str = str(workspace_id)
+    ws = require_workspace(user_id, workspace_id_str)
+    return await submit_topic_modeling(
+        user_id=user_id,
+        workspace_id=workspace_id_str,
+        workspace=ws,
+        request=request,
     )
 
 
-@router.get(
-    "/topic-modeling/tasks/{task_id}/request",
-    response_model=AnalysisTopicModelingRequest,
-)
-async def topic_modeling_task_request(
-    task_id: str,
-    current_user: dict = Depends(get_current_user),
-):
-    """Return stored request payload for a topic-modeling task.
-
-    Flow:
-    - Resolve authentication and request parameters from FastAPI dependencies.
-    - Delegate validation, manager calls, artifacts, or state changes to the owning helper.
-    - Shape the response payload or raise the HTTP error the client should see.
-
-    Used by:
-    - Frontend and API clients through the FastAPI GET /topic-modeling/tasks/{task_id}/request route because they need this unit's "Return stored request payload for a topic-modeling task" behavior.
-    """
-    user_id = current_user["id"]
-    workspace_id = workspace_manager.get_current_workspace_id(user_id)
-    if not workspace_id:
-        raise NoActiveWorkspaceError("No active workspace selected")
-    task_manager = get_task_manager(user_id)
-    task = task_manager.get_task(task_id)
-    if task is None:
-        raise TaskNotFoundError("Task not found")
-    request = task.request
-    return request.model_dump()
-
-
-@router.get(
-    "/topic-modeling/tasks/{task_id}/result",
-    response_model=TopicModelingResponse,
-)
 async def topic_modeling_task_result(
+    workspace_id: str,
     task_id: str,
     current_user: dict = Depends(get_current_user),
 ):
@@ -527,16 +377,13 @@ async def topic_modeling_task_result(
     - Shape the response payload or raise the HTTP error the client should see.
 
     Used by:
-    - Frontend polling route: because they need this unit's "Return current status or final payload for a topic-modeling task" behavior.
-        `GET /workspaces/{id}/topic-modeling/tasks/{task_id}/result`
+    - shared analysis-task result route because topic-modeling result reads
+      need the existing worker-sync and status normalization.
 
     Why:
     - Normalizes task lifecycle states into one response contract for UI polling.
     """
     user_id = current_user["id"]
-    workspace_id = workspace_manager.get_current_workspace_id(user_id)
-    if not workspace_id:
-        raise NoActiveWorkspaceError("No active workspace selected")
     task = await ensure_task_synced(
         user_id, workspace_id, task_id, get_task_manager(user_id)
     )
@@ -621,11 +468,8 @@ def _resolve_topic_output_columns(original_columns: list[str]) -> tuple[str, str
     return top1_name, dist_name
 
 
-@router.get(
-    "/topic-modeling/tasks/{task_id}/detach-options",
-    response_model=TopicModelingDetachOptionsResponse,
-)
 async def topic_modeling_detach_options(
+    workspace_id: UUID,
     task_id: str,
     current_user: dict = Depends(get_current_user),
 ):
@@ -637,18 +481,16 @@ async def topic_modeling_detach_options(
     - Shape the response payload or raise the HTTP error the client should see.
 
     Used by:
-    - Frontend detach-options route: because they need this unit's "List detachable node/column options for a completed topic task" behavior.
-        `GET /workspaces/{id}/topic-modeling/tasks/{task_id}/detach-options`
+    - shared analysis-task detach-options route because completed
+      topic-modeling artifacts should be inspected through the task resource.
 
     Why:
     - Exposes artifact-backed node metadata so users can choose output columns safely.
     """
     user_id = current_user["id"]
-    workspace_id = workspace_manager.get_current_workspace_id(user_id)
-    ws = workspace_manager.get_current_workspace(user_id)
-    if not workspace_id or ws is None:
-        raise NoActiveWorkspaceError("No active workspace selected")
-    task = await _require_completed_topic_task(user_id, workspace_id, task_id)
+    workspace_id_str = str(workspace_id)
+    ws = require_workspace(user_id, workspace_id_str)
+    task = await _require_completed_topic_task(user_id, workspace_id_str, task_id)
 
     artifacts = _topic_artifacts_from_task(task)
     node_artifacts = artifacts.get("nodes") or []
@@ -693,11 +535,8 @@ async def topic_modeling_detach_options(
     )
 
 
-@router.post(
-    "/topic-modeling/tasks/{task_id}/detach",
-    response_model=TopicModelingDetachResponse,
-)
 async def detach_topic_modeling(
+    workspace_id: UUID,
     task_id: str,
     request: TopicModelingDetachRequest,
     current_user: dict = Depends(get_current_user),
@@ -710,19 +549,17 @@ async def detach_topic_modeling(
     - Shape the response payload or raise the HTTP error the client should see.
 
     Used by:
-    - Frontend detach route: because they need this unit's "Create detached nodes from artifact-backed topic-modeling outputs" behavior.
-        `POST /workspaces/{id}/topic-modeling/tasks/{task_id}/detach`
+    - shared analysis-task detachments route because topic output node creation
+      is a task lifecycle operation.
 
         Why:
         - Materializes user-selected columns and topic labels as reusable workspace
             nodes without rerunning the model.
     """
     user_id = current_user["id"]
-    workspace_id = workspace_manager.get_current_workspace_id(user_id)
-    ws = workspace_manager.get_current_workspace(user_id)
-    if not workspace_id or ws is None:
-        raise NoActiveWorkspaceError("No active workspace selected")
-    task = await _require_completed_topic_task(user_id, workspace_id, task_id)
+    workspace_id_str = str(workspace_id)
+    ws = require_workspace(user_id, workspace_id_str)
+    task = await _require_completed_topic_task(user_id, workspace_id_str, task_id)
 
     artifacts = _topic_artifacts_from_task(task)
     node_artifacts = artifacts.get("nodes") or []
@@ -928,7 +765,7 @@ async def detach_topic_modeling(
             )
         )
 
-    update_workspace(user_id, workspace_id, ws)
+    update_workspace(user_id, workspace_id_str, ws)
 
     return TopicModelingDetachResponse(
         state="successful",

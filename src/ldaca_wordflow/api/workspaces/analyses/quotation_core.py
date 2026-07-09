@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import math
+from functools import partial
 from typing import Any, Dict, Iterable, List, Optional, Tuple, cast
 
 import polars as pl
@@ -20,8 +21,10 @@ from polars.exceptions import ColumnNotFoundError
 
 logger = logging.getLogger(__name__)
 
+from ....core.services.quotation_client import extract_remote_quotations
 from ....core.utils import stringify_unsafe_integers
 from ....models import QuotationEngineConfig, QuotationEngineType
+from ....settings import settings
 from .generated_columns import (
     QUOTE_COLUMN_NAMES,
     QUOTE_IS_FLOATING_COLUMN,
@@ -700,6 +703,47 @@ async def compute_on_demand_page(
             "descending": descending,
         },
     }
+
+
+async def compute_remote_on_demand_page(
+    node: Any,
+    column: str,
+    engine: QuotationEngineConfig,
+    *,
+    page: int,
+    page_size: Optional[int],
+    sort_by: Optional[str],
+    descending: bool,
+    materialized_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Compute one quotation page with the configured local/remote extractor.
+
+    Used by:
+    - quotation API result routes and quotation worker tasks because both need
+      identical pagination, sorting, and service-client settings without
+      depending on the router module.
+
+    Flow: bind the configured quotation service client and settings to
+        ``compute_quote_dataframe``, then delegate page collection to
+        ``compute_on_demand_page``.
+    """
+    compute_quote_dataframe_fn = partial(
+        compute_quote_dataframe,
+        extract_remote_fn=extract_remote_quotations,
+        quotation_service_max_batch_size=settings.quotation_service_max_batch_size,
+        quotation_service_timeout=settings.quotation_service_timeout,
+    )
+    return await compute_on_demand_page(
+        node,
+        column,
+        engine,
+        page=page,
+        page_size=page_size,
+        sort_by=sort_by,
+        descending=descending,
+        compute_quote_dataframe_fn=compute_quote_dataframe_fn,
+        materialized_path=materialized_path,
+    )
 
 
 async def _resolve_quotation_page_size(
