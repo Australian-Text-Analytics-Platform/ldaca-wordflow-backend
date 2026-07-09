@@ -164,7 +164,6 @@ def test_run_rust_topic_modeling_reconstructs_result_dict(monkeypatch):
 
     result = worker_tasks_topic_pipeline._run_rust_topic_modeling(
         all_docs=["d0", "d1", "d2", "d3"],
-        corpus_indices=[0, 0, 1, 1],
         seed=42,
         top_k=50,
         min_cluster_size=10,

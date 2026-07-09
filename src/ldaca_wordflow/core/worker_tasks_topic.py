@@ -252,11 +252,6 @@ def _compute_topic_payload(
     max_representative_words = max(1, int(representative_words_count))
     min_cluster_size = max(2, int(min_topic_size))
 
-    corpus_indices = [
-        corpus_idx
-        for corpus_idx, size in enumerate(sampled.corpus_sizes)
-        for _ in range(size)
-    ]
     vectorizer_model, stopwords_lang = _resolve_vectorizer_model(sampled.all_docs)
 
     logger.info(
@@ -270,7 +265,6 @@ def _compute_topic_payload(
 
     rust_result = _run_rust_topic_modeling(
         all_docs=sampled.all_docs,
-        corpus_indices=corpus_indices,
         seed=random_state,
         top_k=_resolve_top_n_words(representative_words_count),
         min_cluster_size=min_cluster_size,

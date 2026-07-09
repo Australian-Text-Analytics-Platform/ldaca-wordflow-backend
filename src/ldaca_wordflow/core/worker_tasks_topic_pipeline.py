@@ -75,8 +75,9 @@ def _sample_corpora_for_topic_modeling(
     - ``_compute_topic_payload`` in ``worker_tasks_topic``.
 
     The flattened ``all_docs`` order (corpus 0 documents, then corpus 1, ...) is
-    the contract the Rust pipeline relies on: ``corpus_indices`` is derived from
-    the same order, and ``documents[].doc_index`` indexes back into it.
+    the contract shared with ``_build_topic_result_payload``: the native result's
+    ``documents[].doc_index`` indexes back into this sampled document list, and
+    ``corpus_sizes`` splits the flat result back into per-corpus summaries.
     """
     corpus_sizes_before_sample = [len(corpus) for corpus in corpora]
     active_corpora: list[list[str]] = []
@@ -223,7 +224,6 @@ def _stopwords_for_lang(lang: str | None) -> list[str]:
 def _run_rust_topic_modeling(
     *,
     all_docs: list[str],
-    corpus_indices: list[int],
     seed: int,
     top_k: int,
     min_cluster_size: int,
@@ -247,11 +247,6 @@ def _run_rust_topic_modeling(
     dominant topic, and the run-level ``n_topics`` / ``n_chunks`` /
     ``stage_timings_ms`` replicated on every row.
 
-    ``corpus_indices`` is accepted for call-site compatibility but no longer
-    forwarded: the expression always treats the input as a single corpus, and
-    per-corpus splitting happens downstream from ``corpus_sizes`` in
-    ``_build_topic_result_payload``.
-
     Flow:
     1. Wrap ``all_docs`` in a one-column frame and evaluate the expression,
        unnesting the per-row struct into flat columns.
@@ -266,8 +261,6 @@ def _run_rust_topic_modeling(
     Called by:
     - ``_compute_topic_payload`` in ``worker_tasks_topic`` for the initial run.
     """
-    del corpus_indices  # retained for call-site compatibility; see docstring
-
     import polars_text  # noqa: F401  (registers the ``.text`` expr namespace)
 
     result = (
