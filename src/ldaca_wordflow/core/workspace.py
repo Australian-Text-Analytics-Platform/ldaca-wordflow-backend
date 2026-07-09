@@ -4,6 +4,8 @@ Design Goals:
 * Each user can have many persisted workspaces on disk.
 * At most ONE workspace object is resident in memory per user at any time.
 * Switching workspaces always saves & unloads the previous one before loading the next.
+* The user-facing selected workspace id is tracked separately from the resident
+  workspace so explicit route loads do not rewrite UI selection state.
 * Business logic remains in docworkspace.Workspace / Node; this is only orchestration.
 * Backward compatibility deliberately dropped.
 
@@ -60,6 +62,10 @@ class WorkspaceManager:
         """
 
         self._current: dict[str, dict[str, Any]] = {}
+        # User-facing selection restored by /api/users/me/current-workspace.
+        # Explicit workspace-scoped routes may load a different resident
+        # workspace, but they should not rewrite this preference.
+        self._selected: dict[str, str] = {}
         # Per-user task managers (single channel per user, not serialized)
         self._task_managers: dict[str, Any] = {}
         # Track on-disk workspace folder paths per user/workspace
@@ -234,8 +240,18 @@ class WorkspaceManager:
         return allocated
 
     # ---------------- Public API ----------------
+    def get_selected_workspace_id(self, user_id: str) -> str | None:
+        """Return the user-facing workspace selection without loading workspace data.
+
+        Called by:
+        - the current-workspace user endpoint because selection is a session/UI
+          preference, not the source of truth for explicit workspace-scoped API
+          targets.
+        """
+        return self._selected.get(user_id)
+
     def get_current_workspace_id(self, user_id: str) -> str | None:
-        """Return current workspace id data used by workspace persistence and selection.
+        """Return the id of the resident workspace object for this user.
 
         Called by:
         - `WorkspaceManager` instances owned by backend services, routes, and tests because they
@@ -252,7 +268,7 @@ class WorkspaceManager:
         return entry.get("wid")
 
     def get_current_workspace(self, user_id: str) -> Any | None:
-        """Return current workspace data used by workspace persistence and selection.
+        """Return the resident workspace object for this user.
 
         Called by:
         - `WorkspaceManager` instances owned by backend services, routes, and tests because they
@@ -268,36 +284,38 @@ class WorkspaceManager:
             return None
         return entry.get("workspace")
 
-    def set_current_workspace(self, user_id: str, workspace_id: str | None) -> bool:
-        """Store current workspace data used by workspace persistence and selection.
+    def load_workspace(self, user_id: str, workspace_id: str) -> Workspace | None:
+        """Load a workspace as the resident object without changing selection.
 
-        Called by:
-        - `WorkspaceManager` instances owned by backend services, routes, and tests because they
-          need a backend boundary that validates inputs before delegating to workspace or worker
-          state.
+        Used by:
+        - explicit workspace-scoped routes and worker completion flows because
+          the request/task already names its target workspace and should not
+          rewrite `/api/users/me/current-workspace`.
 
-        Flow: resolve the user workspace directory, refresh cached path indexes, coordinate task
-            cleanup, and return stable workspace metadata to callers.
+        Flow: reuse the resident object when it already matches, otherwise
+            unload the previous resident workspace with its normal persistence
+            and task-eviction path, deserialize the requested workspace from its
+            cached folder, then rehydrate persisted analysis task records.
         """
-
-        if workspace_id is None:
-            self.unload_workspace(user_id, save=True)
-            return True
         cid = self.get_current_workspace_id(user_id)
         cws = self.get_current_workspace(user_id)
         if cid == workspace_id and cws is not None:
-            return True
-        if cid is not None and cws is not None:
-            # Strict switch behavior: always unload current before loading next.
-            self.unload_workspace(user_id, save=True)
+            return cws
         target_dir = self._get_indexed_path(user_id, workspace_id)
+        if target_dir is None:
+            self._refresh_user_workspace_paths(user_id)
+            target_dir = self._get_indexed_path(user_id, workspace_id)
         if target_dir is None:
             logger.warning(
                 "Workspace folder not found for workspace %s under user %s",
                 workspace_id,
                 user_id,
             )
-            return False
+            return None
+        if cid is not None and cws is not None:
+            # Strict resident-object behavior: always unload the previous
+            # workspace before deserializing another one for the same user.
+            self.unload_workspace(user_id, save=True)
         try:
             # 1. Read metadata to get workspace name (no node deserialization).
             meta = read_workspace_metadata(target_dir)
@@ -324,9 +342,9 @@ class WorkspaceManager:
                 target_dir,
                 e,
             )
-            return False
+            return None
         if not new_ws:
-            return False
+            return None
         current_path = self._get_cached_path(user_id, workspace_id)
         self._current[user_id] = {
             "wid": workspace_id,
@@ -341,6 +359,30 @@ class WorkspaceManager:
             from ..analysis.persistence import load_workspace_analysis_tasks
 
             load_workspace_analysis_tasks(user_id, workspace_id, restore_dir)
+        return new_ws
+
+    def set_current_workspace(self, user_id: str, workspace_id: str | None) -> bool:
+        """Set or clear the user's selected workspace and resident workspace.
+
+        Called by:
+        - the current-workspace user endpoint and workspace creation flow
+          because those operations intentionally update UI selection.
+
+        Flow: clearing unloads the resident workspace and removes the selected
+            id; setting loads the requested workspace through the shared
+            resident-workspace path and records it as the selected id only after
+            the load succeeds.
+        """
+
+        if workspace_id is None:
+            self.unload_workspace(user_id, save=True, clear_selection=True)
+            self._selected.pop(user_id, None)
+            return True
+
+        workspace = self.load_workspace(user_id, workspace_id)
+        if workspace is None:
+            return False
+        self._selected[user_id] = workspace_id
         return True
 
     def list_user_workspaces_summaries(self, user_id: str) -> list[dict[str, Any]]:
@@ -446,6 +488,8 @@ class WorkspaceManager:
         if target_dir and target_dir.exists():
             shutil.rmtree(target_dir, ignore_errors=True)
             self._paths.pop(self._path_key(user_id, workspace_id), None)
+            if self.get_selected_workspace_id(user_id) == workspace_id:
+                self._selected.pop(user_id, None)
             return True
         return False
 
@@ -589,8 +633,9 @@ class WorkspaceManager:
         user_id: str,
         workspace_id: str | None = None,
         save: bool = True,
+        clear_selection: bool = False,
     ) -> bool:
-        """Unload current workspace object from memory, optionally persisting first.
+        """Unload the resident workspace object from memory, optionally persisting first.
 
         Used by:
         - lifecycle unload/switch operations because workspace flows need user-scoped paths,
@@ -598,15 +643,26 @@ class WorkspaceManager:
         Why:
         - Enforces one-active-workspace-per-user memory policy.
 
-        Flow: resolve the user workspace directory, refresh cached path indexes, coordinate task
-            cleanup, and return stable workspace metadata to callers.
+        Flow: persist the resident object when requested, snapshot and evict its
+            task records, remove it from memory, and clear the user-facing
+            selected id only when the caller is an explicit unload/clear
+            operation rather than an internal resident-workspace switch. If the
+            requested workspace is already not resident but exists on disk,
+            treat unload as a successful no-op.
         """
         cid = self.get_current_workspace_id(user_id)
         cws = self.get_current_workspace(user_id)
-        if not cid or not cws:
-            return False
-        if workspace_id is not None and workspace_id != cid:
-            return False
+        if not cid or not cws or (workspace_id is not None and workspace_id != cid):
+            if workspace_id is None:
+                return False
+            if self.get_workspace_dir(user_id, workspace_id) is None:
+                return False
+            if (
+                clear_selection
+                and self.get_selected_workspace_id(user_id) == workspace_id
+            ):
+                self._selected.pop(user_id, None)
+            return True
         if save:
             cws.modified_at = datetime.now().isoformat()
             target_dir = self._resolve_workspace_dir(
@@ -628,6 +684,8 @@ class WorkspaceManager:
             save_workspace_analysis_tasks(user_id, cid, workspace_dir)
         self._clear_workspace_tasks(user_id, cid)
         self._current.pop(user_id, None)
+        if clear_selection and self.get_selected_workspace_id(user_id) == cid:
+            self._selected.pop(user_id, None)
         return True
 
     def _clear_workspace_tasks(self, user_id: str, workspace_id: str) -> None:

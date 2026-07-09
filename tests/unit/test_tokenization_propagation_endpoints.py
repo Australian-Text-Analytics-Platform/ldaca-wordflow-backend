@@ -84,6 +84,9 @@ class _FakeManager:
     def get_current_workspace_id(self, _user_id: str):
         return self.workspace_id
 
+    def load_workspace(self, _user_id: str, _workspace_id: str):
+        return self.workspace
+
     def _resolve_workspace_dir(self, *_args, **_kwargs):  # pragma: no cover
         return "/tmp/dummy"
 

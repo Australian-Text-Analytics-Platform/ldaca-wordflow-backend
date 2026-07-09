@@ -189,6 +189,39 @@ class TestWorkspaceAPI:
         assert data["id"] == first_id
         assert data["name"] == "first explicit workspace"
 
+    async def test_explicit_workspace_read_preserves_selected_workspace(
+        self, authenticated_client
+    ):
+        """Explicit workspace reads do not rewrite the user current-workspace preference."""
+
+        first_response = await authenticated_client.post(
+            "/api/workspaces/",
+            json={"name": "selection preservation first", "description": "First"},
+        )
+        assert first_response.status_code == 200, first_response.text
+        first_id = first_response.json()["id"]
+
+        second_response = await authenticated_client.post(
+            "/api/workspaces/",
+            json={"name": "selection preservation second", "description": "Second"},
+        )
+        assert second_response.status_code == 200, second_response.text
+        second_id = second_response.json()["id"]
+
+        selected_before = await authenticated_client.get(
+            "/api/users/me/current-workspace"
+        )
+        assert selected_before.status_code == 200, selected_before.text
+        assert selected_before.json()["id"] == second_id
+
+        response = await authenticated_client.get(f"/api/workspaces/{first_id}")
+        assert response.status_code == 200, response.text
+        assert response.json()["id"] == first_id
+
+        selected_after = await authenticated_client.get("/api/users/me/current-workspace")
+        assert selected_after.status_code == 200, selected_after.text
+        assert selected_after.json()["id"] == second_id
+
     async def test_workspace_explicit_routes_cover_graph_nodes_data_and_updates(
         self,
         authenticated_client,
@@ -831,8 +864,72 @@ class TestWorkspaceAPI:
             data = response.json()
             assert data.get("state") == "successful"
             assert data["id"] == workspace_id
-            mock_unload.assert_called_once_with("test", workspace_id, save=True)
+            mock_unload.assert_called_once_with(
+                "test", workspace_id, save=True, clear_selection=True
+            )
             mock_clear_tasks.assert_not_called()
+
+    async def test_unload_selected_workspace_clears_selection(self, authenticated_client):
+        """Unloading the selected workspace clears the user current-workspace pointer."""
+
+        create_response = await authenticated_client.post(
+            "/api/workspaces/",
+            json={"name": "selected unload workspace"},
+        )
+        assert create_response.status_code == 200, create_response.text
+        workspace_id = create_response.json()["id"]
+
+        selected_before = await authenticated_client.get(
+            "/api/users/me/current-workspace"
+        )
+        assert selected_before.status_code == 200, selected_before.text
+        assert selected_before.json()["id"] == workspace_id
+
+        unload_response = await authenticated_client.post(
+            f"/api/workspaces/{workspace_id}/unload"
+        )
+        assert unload_response.status_code == 200, unload_response.text
+
+        selected_after = await authenticated_client.get("/api/users/me/current-workspace")
+        assert selected_after.status_code == 200, selected_after.text
+        assert selected_after.json()["id"] is None
+
+    async def test_unload_selected_workspace_not_resident_clears_selection(
+        self, authenticated_client
+    ):
+        """Explicit unload targets the path workspace even when another workspace is resident."""
+
+        first_response = await authenticated_client.post(
+            "/api/workspaces/",
+            json={"name": "resident after explicit read"},
+        )
+        assert first_response.status_code == 200, first_response.text
+        first_id = first_response.json()["id"]
+
+        second_response = await authenticated_client.post(
+            "/api/workspaces/",
+            json={"name": "selected nonresident unload"},
+        )
+        assert second_response.status_code == 200, second_response.text
+        second_id = second_response.json()["id"]
+
+        read_first = await authenticated_client.get(f"/api/workspaces/{first_id}")
+        assert read_first.status_code == 200, read_first.text
+
+        selected_before = await authenticated_client.get(
+            "/api/users/me/current-workspace"
+        )
+        assert selected_before.status_code == 200, selected_before.text
+        assert selected_before.json()["id"] == second_id
+
+        unload_response = await authenticated_client.post(
+            f"/api/workspaces/{second_id}/unload"
+        )
+        assert unload_response.status_code == 200, unload_response.text
+
+        selected_after = await authenticated_client.get("/api/users/me/current-workspace")
+        assert selected_after.status_code == 200, selected_after.text
+        assert selected_after.json()["id"] is None
 
     async def test_unload_workspace_not_found(self, authenticated_client):
         """Missing explicit workspace unload targets return 404."""
@@ -1172,18 +1269,12 @@ class TestWorkspaceAPI:
                 self.data = source_df
 
         workspace_id = "00000000-0000-0000-0000-000000000408"
-        with (
-            patch(
-                "ldaca_wordflow.api.workspaces.utils.workspace_manager.get_current_workspace_id",
-                return_value=workspace_id,
-            ),
-            patch(
-                "ldaca_wordflow.api.workspaces.utils.workspace_manager.get_current_workspace"
-            ) as mock_active_ws,
+        mock_workspace = Mock()
+        mock_workspace.nodes = {"test-node": DummyNode()}
+        with patch(
+            "ldaca_wordflow.api.workspaces.utils.workspace_manager.load_workspace",
+            return_value=mock_workspace,
         ):
-            mock_workspace = Mock()
-            mock_workspace.nodes = {"test-node": DummyNode()}
-            mock_active_ws.return_value = mock_workspace
 
             response = await authenticated_client.get(
                 f"/api/workspaces/{workspace_id}/nodes/test-node/columns/category/unique"
@@ -1211,18 +1302,12 @@ class TestWorkspaceAPI:
                 self.data = source_df
 
         workspace_id = "00000000-0000-0000-0000-000000000409"
-        with (
-            patch(
-                "ldaca_wordflow.api.workspaces.utils.workspace_manager.get_current_workspace_id",
-                return_value=workspace_id,
-            ),
-            patch(
-                "ldaca_wordflow.api.workspaces.utils.workspace_manager.get_current_workspace"
-            ) as mock_active_ws,
+        mock_workspace = Mock()
+        mock_workspace.nodes = {"test-node": DummyNode()}
+        with patch(
+            "ldaca_wordflow.api.workspaces.utils.workspace_manager.load_workspace",
+            return_value=mock_workspace,
         ):
-            mock_workspace = Mock()
-            mock_workspace.nodes = {"test-node": DummyNode()}
-            mock_active_ws.return_value = mock_workspace
 
             response = await authenticated_client.get(
                 f"/api/workspaces/{workspace_id}/nodes/test-node/columns/topic/unique"
@@ -1267,18 +1352,12 @@ class TestWorkspaceAPI:
                 self.data = source_df
 
         workspace_id = "00000000-0000-0000-0000-000000000410"
-        with (
-            patch(
-                "ldaca_wordflow.api.workspaces.utils.workspace_manager.get_current_workspace_id",
-                return_value=workspace_id,
-            ),
-            patch(
-                "ldaca_wordflow.api.workspaces.utils.workspace_manager.get_current_workspace"
-            ) as mock_active_ws,
+        mock_workspace = Mock()
+        mock_workspace.nodes = {"test-node": DummyNode()}
+        with patch(
+            "ldaca_wordflow.api.workspaces.utils.workspace_manager.load_workspace",
+            return_value=mock_workspace,
         ):
-            mock_workspace = Mock()
-            mock_workspace.nodes = {"test-node": DummyNode()}
-            mock_active_ws.return_value = mock_workspace
 
             response = await authenticated_client.get(
                 f"/api/workspaces/{workspace_id}/nodes/test-node/columns/TOPIC_distribution/unique"
@@ -1359,11 +1438,7 @@ class TestWorkspaceAPI:
 
         with (
             patch(
-                "ldaca_wordflow.api.workspaces.utils.workspace_manager.get_current_workspace_id",
-                return_value=workspace_id,
-            ),
-            patch(
-                "ldaca_wordflow.api.workspaces.utils.workspace_manager.get_current_workspace",
+                "ldaca_wordflow.api.workspaces.utils.workspace_manager.load_workspace",
                 return_value=mock_workspace,
             ),
             patch(

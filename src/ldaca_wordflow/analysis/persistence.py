@@ -10,8 +10,8 @@ parquet, so persisting the request is sufficient to fully reconstruct results.
 Used by:
 - `core.workspace.WorkspaceManager.unload_workspace` to snapshot tasks before
   the in-memory store is cleared.
-- `core.workspace.WorkspaceManager.set_current_workspace` to rehydrate tasks
-  right after a workspace is loaded.
+- `core.workspace.WorkspaceManager.load_workspace` to rehydrate tasks right
+  after a workspace is loaded.
 
 Flow: locate the per-workspace sidecar file, serialize/deserialize via the
     per-user `TaskManager`, and tolerate missing/corrupt files quietly.
@@ -67,7 +67,7 @@ def load_workspace_analysis_tasks(
 ) -> None:
     """Restore the workspace-scoped analysis task snapshot from disk.
 
-    Called by `WorkspaceManager.set_current_workspace` right after a workspace is
+    Called by `WorkspaceManager.load_workspace` right after a workspace is
     loaded, making task ids stored on persisted tabs resolvable again.
 
     Flow: read the sidecar (no-op when absent), then replay records and

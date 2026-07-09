@@ -6,14 +6,20 @@
 `docworkspace.Workspace` per user while allowing many saved workspace folders
 on disk.
 
+The manager keeps the user-facing selected workspace id separate from the
+resident workspace object. `GET/PUT /api/users/me/current-workspace` owns that
+selection preference. Explicit workspace-scoped routes load the requested
+`workspace_id` as the resident object when needed, but they must not rewrite the
+selection preference as a side effect.
+
 The manager is responsible for:
 
 - resolving each user's workspace root,
 - listing persisted workspace summaries,
 - allocating display-name-safe workspace folders,
-- loading a selected workspace into memory,
+- loading a requested workspace into memory,
 - rebasing serialized LazyFrame scan paths before load,
-- saving and unloading the current workspace,
+- saving and unloading the resident workspace,
 - deleting workspace folders,
 - clearing workspace-specific analysis caches and task state.
 
@@ -57,8 +63,7 @@ when an operation naturally has multiple path fields, such as move.
 
 ## Workspace Lifecycle Routes
 
-`api/workspaces/lifecycle.py` handles workspace CRUD and active-workspace
-selection:
+`api/workspaces/lifecycle.py` handles workspace CRUD and workspace selection:
 
 - list, create, delete, rename, unload, and set current workspace,
 - lightweight workspace graph summaries,
@@ -70,6 +75,8 @@ Workspace-scoped lifecycle actions name their target in the URL. Save, download,
 download-artifact retrieval, and unload use
 `/api/workspaces/{workspace_id}/...`; only collection operations such as list,
 create, and ZIP import stay directly under `/api/workspaces/`.
+Unloading an existing workspace is idempotent when it is already not resident;
+if the unloaded id is the user's selected workspace, the selection is cleared.
 
 `GET /api/workspaces/{workspace_id}/graph` intentionally returns only graph/topology and
 display/action state: node ids, names, parent/child ids, document column,

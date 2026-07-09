@@ -675,15 +675,9 @@ class WorkerTaskManager:
                         if not isinstance(node_payload, dict):
                             raise ValueError("Task result missing node_payload")
 
-                        if (
-                            workspace_manager.get_current_workspace_id(user_id)
-                            != workspace_id
-                        ):
-                            if not workspace_manager.set_current_workspace(
-                                user_id, workspace_id
-                            ):
-                                raise RuntimeError("Workspace not found")
-                        workspace = workspace_manager.get_current_workspace(user_id)
+                        workspace = workspace_manager.load_workspace(
+                            user_id, workspace_id
+                        )
                         if workspace is None:
                             raise RuntimeError("Workspace not found")
 

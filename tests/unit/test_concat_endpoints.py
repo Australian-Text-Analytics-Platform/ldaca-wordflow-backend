@@ -113,6 +113,9 @@ def fake_workspace_manager(monkeypatch: pytest.MonkeyPatch, sample_nodes):
         def get_current_workspace_id(self, _user_id: str):
             return self.workspace_id
 
+        def load_workspace(self, _user_id: str, _workspace_id: str):
+            return self.workspace
+
         def _resolve_workspace_dir(
             self,
             user_id: str,

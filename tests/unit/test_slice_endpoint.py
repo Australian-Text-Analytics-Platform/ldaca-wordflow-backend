@@ -68,6 +68,9 @@ class FakeWorkspaceManager:
     def get_current_workspace_id(self, _user_id: str):
         return self.workspace_id
 
+    def load_workspace(self, _user_id: str, _workspace_id: str):
+        return self.workspace
+
     def save_workspace(self, _user_id: str, _workspace_id: str) -> None:
         pass
 

@@ -247,6 +247,9 @@ async def test_tokens_materialize_route_selects_tokenization_column_once(
         def get_current_workspace(self, _user_id: str) -> Workspace:
             return Workspace()
 
+        def load_workspace(self, _user_id: str, _workspace_id: str) -> Workspace:
+            return Workspace()
+
         def get_task_manager(self, _user_id: str) -> TaskManager:
             return TaskManager()
 

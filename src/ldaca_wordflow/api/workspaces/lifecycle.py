@@ -208,12 +208,14 @@ async def unload_workspace(
 
     Flow: resolve the authenticated user, pass the path workspace id to the
         manager unload operation, and return the standard action response or
-        a not-found error when that workspace is not currently loaded.
+        a not-found error when that workspace does not exist.
     """
 
     user_id = current_user["id"]
     workspace_id_str = str(workspace_id)
-    existed = workspace_manager.unload_workspace(user_id, workspace_id_str, save=save)
+    existed = workspace_manager.unload_workspace(
+        user_id, workspace_id_str, save=save, clear_selection=True
+    )
     if not existed:
         raise WorkspaceNotFoundError("Workspace not found")
     return {

@@ -301,22 +301,14 @@ def require_workspace(user_id: str, workspace_id: str) -> Workspace:
       from the request path instead of the user's hidden current-workspace
       pointer.
 
-    Flow: reject blank ids, reuse the loaded workspace when it already matches,
-        otherwise ask the manager to load the requested id and raise the
+    Flow: reject blank ids, ask the manager to load the requested workspace as
+        the resident object without rewriting user selection, and raise the
         standard workspace not-found error when it cannot be resolved.
     """
     if not workspace_id.strip():
         raise WorkspaceNotFoundError("Workspace not found")
 
-    current_workspace_id = workspace_manager.get_current_workspace_id(user_id)
-    current_workspace = workspace_manager.get_current_workspace(user_id)
-    if current_workspace_id == workspace_id and current_workspace is not None:
-        return current_workspace
-
-    if not workspace_manager.set_current_workspace(user_id, workspace_id):
-        raise WorkspaceNotFoundError("Workspace not found")
-
-    workspace = workspace_manager.get_current_workspace(user_id)
+    workspace = workspace_manager.load_workspace(user_id, workspace_id)
     if workspace is None:
         raise WorkspaceNotFoundError("Workspace not found")
     return workspace

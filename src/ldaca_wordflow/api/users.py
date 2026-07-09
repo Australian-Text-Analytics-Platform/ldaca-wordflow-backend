@@ -38,7 +38,7 @@ async def get_my_current_workspace(current_user: dict = Depends(get_current_user
         workspace pointer without loading workspace data.
     """
     user_id = current_user["id"]
-    return {"id": workspace_manager.get_current_workspace_id(user_id)}
+    return {"id": workspace_manager.get_selected_workspace_id(user_id)}
 
 
 @router.put("/me/current-workspace", response_model=SetCurrentWorkspaceResponse)
