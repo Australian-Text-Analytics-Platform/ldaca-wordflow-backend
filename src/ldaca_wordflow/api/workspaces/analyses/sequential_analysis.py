@@ -794,7 +794,7 @@ async def detach_sequential_analysis_task(
     ws.add_node(new_node)
     # Smart insertion: keep the detached node directly below its source node.
     ws.place_node_after_parent(new_node)
-    update_workspace(user_id, workspace_id_str, best_effort=True)
+    update_workspace(user_id, workspace_id_str, ws, best_effort=True)
 
     return {
         "new_node_id": getattr(new_node, "id", None),

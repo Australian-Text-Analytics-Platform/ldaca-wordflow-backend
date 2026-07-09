@@ -96,34 +96,21 @@ def _scan_workspace_parquet(parquet_path: Path):
 def update_workspace(
     user_id: str,
     workspace_id: str,
-    workspace: Any | None = None,
+    workspace: Any,
     *,
     best_effort: bool = False,
 ) -> Path | None:
     """Persist workspace metadata/path updates through one shared code path.
 
-    Steps:
-    - Normalize caller input into the representation this module expects.
-    - Delegate stateful, expensive, or validating work to the owning manager/helper when needed.
-    - Return the compact value the caller uses for artifacts, validation, or response shaping.
-
     Used by:
-    - workspace lifecycle, node, and analysis endpoints after mutations because they need this unit's "Persist workspace metadata/path updates through one shared code path" behavior.
+    - workspace lifecycle, node, and analysis endpoints after they have resolved
+      the target workspace from an explicit route path.
 
     Why:
-    - Removes repeated save/update boilerplate from route handlers.
+    - Removes repeated save/update boilerplate from route handlers without
+      letting persistence infer the target from mutable current-workspace state.
     """
     try:
-        if workspace is None:
-            current_workspace_id = workspace_manager.get_current_workspace_id(user_id)
-            if current_workspace_id != workspace_id:
-                if not workspace_manager.set_current_workspace(user_id, workspace_id):
-                    return None
-            workspace = workspace_manager.get_current_workspace(user_id)
-
-        if workspace is None:
-            return None
-
         workspace.modified_at = datetime.now().isoformat()
         target_dir = workspace_manager._resolve_workspace_dir(
             user_id=user_id,
@@ -304,14 +291,6 @@ def stage_parquet_artifact_as_lazy(
             f"Failed to copy artifact parquet into workspace data: {exc}",
         )
     return _scan_workspace_parquet(persisted_path), persisted_path
-
-
-def require_current_workspace(user_id: str) -> Workspace:
-    """Resolve required current workspace, raising 404 if absent."""
-    workspace = workspace_manager.get_current_workspace(user_id)
-    if workspace is None:
-        raise WorkspaceNotFoundError("Workspace not found")
-    return workspace
 
 
 def require_workspace(user_id: str, workspace_id: str) -> Workspace:
@@ -538,7 +517,6 @@ __all__ = [
     "_serialize_column_scalar",
     "_validate_existing_column",
     "ensure_task_synced",
-    "require_current_workspace",
     "require_workspace",
     "stage_dataframe_as_lazy",
     "stage_parquet_artifact_as_lazy",

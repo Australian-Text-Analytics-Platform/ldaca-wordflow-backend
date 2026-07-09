@@ -44,7 +44,6 @@ from ...models import (
     WorkspaceUploadResponse,
 )
 from .utils import (
-    require_current_workspace,
     require_workspace,
     update_workspace,
 )
@@ -253,7 +252,9 @@ async def start_workspace_download(
 
     current_workspace_id = workspace_manager.get_current_workspace_id(user_id)
     if current_workspace_id == workspace_id_str:
-        ws = require_current_workspace(user_id)
+        ws = workspace_manager.get_current_workspace(user_id)
+        if ws is None:
+            raise WorkspaceNotFoundError("Workspace not found")
         update_workspace(user_id, workspace_id_str, ws)
         ws_name = ws.name
     else:
