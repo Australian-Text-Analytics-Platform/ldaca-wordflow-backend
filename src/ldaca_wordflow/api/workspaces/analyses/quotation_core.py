@@ -625,7 +625,7 @@ async def compute_on_demand_page(
     """Compute one on-demand quotation page from source node data.
 
     - When `materialized_path` is set, paginate the flat parquet directly
-      (each row becomes a single-hit group for UI compatibility).
+      (each row becomes a single-hit group for the quotation result UI).
     - When `page_size` is None, estimate via `page_size_estimation.estimate_page_size`.
 
     Why:

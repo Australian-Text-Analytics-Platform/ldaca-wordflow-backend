@@ -258,6 +258,7 @@ def test_openapi_uses_shared_analysis_task_read_routes() -> None:
     assert "/api/workspaces/{workspace_id}/analysis-tasks/{task_id}/result" in paths
     assert "/api/workspaces/{workspace_id}/analysis-tasks/{task_id}/result-query" in paths
     assert "/api/workspaces/{workspace_id}/analysis-tasks/{task_id}/preferences" in paths
+    assert "delete" not in paths["/api/workspaces/{workspace_id}/token-frequencies"]
 
     legacy_read_paths = [
         "/api/workspaces/{workspace_id}/concordance/tasks/{task_id}/request",

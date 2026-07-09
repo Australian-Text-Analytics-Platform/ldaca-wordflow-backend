@@ -12,7 +12,7 @@ Flow:
 - FastAPI mounts these routes through the workspace package router.
 - Route handlers lock per user/workspace, hydrate token inputs, and submit artifact-first work.
 - Result helpers lazy-scan Parquet artifacts, apply requested limits, and synchronize task state.
-- Responses return task metadata, frequency tables, preference updates, or clear-task results.
+- Responses return task metadata, frequency tables, or preference updates.
 """
 
 from __future__ import annotations
@@ -39,8 +39,6 @@ from ....core.exceptions import (
     NotFoundError,
     TaskNotFoundError,
 )
-from ....core.workspace import workspace_manager
-from ....models.analysis_common import AnalysisClearResponse
 from ....models.token_frequencies import (
     TokenFrequencyPreferenceUpdateRequest,
     TokenFrequencyRequest,
@@ -82,42 +80,6 @@ class TokenFrequencyArtifacts:
 
     nodes: tuple[TokenNodeArtifact, ...]
     statistics_parquet_path: Path | None
-
-
-@router.delete("/token-frequencies", response_model=AnalysisClearResponse)
-async def clear_token_frequencies(
-    workspace_id: UUID,
-    current_user=Depends(get_current_user),
-):
-    """Clear Token Frequency analysis state for a workspace.
-
-    Legacy broad clear endpoint: removes all token-frequency task records for
-    the active workspace. Tabbed clients should normally clear by explicit
-    task_id through `DELETE /api/tasks/{task_id}` instead.
-
-    Flow:
-    - Resolve authentication and request parameters from FastAPI dependencies.
-    - Delegate validation, manager calls, artifacts, or state changes to the owning helper.
-    - Shape the response payload or raise the HTTP error the client should see.
-
-    Used by:
-    - Frontend and API clients through the FastAPI DELETE /token-frequencies route because they need this unit's "Clear Token Frequency analysis state for a workspace" behavior.
-    """
-    user_id = current_user["id"]
-    workspace_id_str = str(workspace_id)
-    task_manager = get_task_manager(user_id)
-    task_ids = _token_frequency_task_ids(user_id, workspace_id_str)
-    for task_id in task_ids:
-        task_manager.clear_task(task_id)
-
-    worker_tm = workspace_manager.get_task_manager(user_id)
-    for task_id in task_ids:
-        await worker_tm.clear_task(task_id)
-
-    return {
-        "state": "successful",
-        "message": "Token frequencies cleared successfully.",
-    }
 
 
 def _coerce_limit_value(value: Any) -> int:
@@ -236,32 +198,6 @@ def _server_limit(token_limit: int) -> int:
         max(token_limit * SERVER_LIMIT_MULTIPLIER, DEFAULT_TOKEN_LIMIT),
         MAX_SERVER_TOKEN_LIMIT,
     )
-
-
-def _is_token_frequency_task(task: AnalysisTask, workspace_id: str) -> bool:
-    """Return whether an analysis task belongs to token-frequency for a workspace."""
-    if task.workspace_id != workspace_id:
-        return False
-    if isinstance(task.request, AnalysisTokenFrequencyRequest):
-        return True
-    payload = task.request.model_dump() if hasattr(task.request, "model_dump") else {}
-    return (
-        isinstance(payload, dict)
-        and "node_ids" in payload
-        and "node_columns" in payload
-    )
-
-
-def _token_frequency_task_ids(user_id: str, workspace_id: str) -> list[str]:
-    """List token-frequency task ids for broad workspace clear operations."""
-    task_manager = get_task_manager(user_id)
-    tasks = [
-        task
-        for task in task_manager.get_all_tasks()
-        if _is_token_frequency_task(task, workspace_id)
-    ]
-    tasks.sort(key=lambda task: task.updated_at or task.created_at, reverse=True)
-    return [task.task_id for task in tasks]
 
 
 def _safe_float(value: Any) -> float | str | None:

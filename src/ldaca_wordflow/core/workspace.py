@@ -7,7 +7,6 @@ Design Goals:
 * The user-facing selected workspace id is tracked separately from the resident
   workspace so explicit route loads do not rewrite UI selection state.
 * Business logic remains in docworkspace.Workspace / Node; this is only orchestration.
-* Backward compatibility deliberately dropped.
 
 Used by:
 - Backend API routes, worker tasks, workspace services, and backend tests because they

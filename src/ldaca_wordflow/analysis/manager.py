@@ -222,8 +222,8 @@ class TaskManager:
         depend on the user's mutable current-workspace selection.
 
         Called by:
-        - Backend tests and compatibility-light helpers that need to seed
-          analysis task records without duplicating task normalization.
+        - Backend tests and helper routes that need to seed analysis task
+          records without duplicating task normalization.
 
         Flow: normalize request payloads, update per-user task maps, maintain current-tab
             pointers, and walk parent-child links for cleanup.
