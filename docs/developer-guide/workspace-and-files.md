@@ -139,6 +139,6 @@ fabricating token columns in individual routers.
 
 ## Export
 
-`api/workspaces/base.py` still owns export endpoints and some legacy column
+`api/workspaces/base.py` still owns export endpoints and column-mutation
 routes. Export supports CSV, JSON, Parquet, IPC, NDJSON, and XLSX. Lazy sinks
 are used where available; JSON and Excel collect at the serialization boundary.

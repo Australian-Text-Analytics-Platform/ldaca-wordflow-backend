@@ -5,11 +5,11 @@ Persists the analysis tab system's structure into
 analysis task system. Each analysis type (e.g. ``concordance``) owns a *tab
 group*: an ordered list of tabs plus the active tab id. A tab carries its own
 id, an optional ``task_id`` (the analysis result it currently shows), a display
-``title``, and node selector state. ``inputs`` is the legacy/default source
-selector; ``input_sets`` stores any additional named selectors a view needs.
-Each tab owns its selectors so switching tabs never reconfigures another tab's
-node selection. Remaining analysis parameters (search words, thresholds, ...)
-still live on the referenced ``AnalysisTask.request``.
+``title``, named node selector state in ``input_sets``, and lightweight
+per-view string settings. Each tab owns its selectors so switching tabs never
+reconfigures another tab's node selection. Remaining analysis parameters
+(search words, thresholds, ...) still live on the referenced
+``AnalysisTask.request``.
 
 Endpoints:
 
@@ -44,7 +44,7 @@ import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from ...core.auth import get_current_user
 from ...core.exceptions import InternalServiceError, WorkspaceNotFoundError
@@ -66,9 +66,11 @@ class AnalysisTabInput(BaseModel):
     model.
 
     Used by:
-    - `AnalysisTab.inputs`, `AnalysisTab.input_sets`, and the GET/PUT tab
-      routes because the frontend tab store round-trips this exact shape.
+    - `AnalysisTab.input_sets` and the GET/PUT tab routes because the frontend
+      tab store round-trips this exact shape.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     node_id: str
     column: str | None = None
@@ -79,10 +81,9 @@ class AnalysisTab(BaseModel):
 
     Carries identity (``tab_id``), a pointer to the analysis result it shows
     (``task_id``), a display ``title``, selector state, and free-form view
-    settings. ``inputs`` remains the legacy source selector for existing
-    clients. ``input_sets`` is keyed by selector id (for example, ``source`` or
-    ``classDescriptions``) so newer views can persist multiple node selectors on
-    the same tab. ``settings`` is a flat string→string map a view uses to
+    settings. ``input_sets`` is keyed by selector id (for example, ``source``
+    or ``classDescriptions``) so views can persist one or more node selectors
+    on the same tab. ``settings`` is a flat string→string map a view uses to
     round-trip lightweight scalar parameters that are not node selections — for
     example the Annotation tab persists its Manual/AI mode, AI provider id,
     model name, and prompt here so they survive reloads and tab switches like
@@ -94,12 +95,13 @@ class AnalysisTab(BaseModel):
       store round-trips this exact shape.
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     tab_id: str
     task_id: str | None = None
     title: str = "Untitled"
-    inputs: list[AnalysisTabInput] = Field(default_factory=list)
-    input_sets: dict[str, list[AnalysisTabInput]] = Field(default_factory=dict)
-    settings: dict[str, str] = Field(default_factory=dict)
+    input_sets: dict[str, list[AnalysisTabInput]]
+    settings: dict[str, str]
 
 
 class AnalysisTabGroup(BaseModel):

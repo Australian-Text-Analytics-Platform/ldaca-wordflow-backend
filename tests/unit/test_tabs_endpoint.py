@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 from ldaca_wordflow.api.workspaces import tabs as tabs_api
 from ldaca_wordflow.core.exceptions import WorkspaceNotFoundError
+from pydantic import ValidationError
 
 WORKSPACE_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
 UNKNOWN_WORKSPACE_ID = uuid.UUID("00000000-0000-0000-0000-000000000002")
@@ -50,10 +51,6 @@ def _sample_group() -> dict:
                         "tab_id": "t1",
                         "task_id": "task-1",
                         "title": "First",
-                        "inputs": [
-                            {"node_id": "n1", "column": "text"},
-                            {"node_id": "n2", "column": None},
-                        ],
                         "input_sets": {
                             "source": [
                                 {"node_id": "n1", "column": "text"},
@@ -74,7 +71,6 @@ def _sample_group() -> dict:
                         "tab_id": "t2",
                         "task_id": None,
                         "title": "Untitled",
-                        "inputs": [],
                         "input_sets": {},
                         "settings": {},
                     },
@@ -159,7 +155,6 @@ async def test_put_replaces_existing_contents_not_merges(fake_workspace):
                         "tab_id": "x",
                         "task_id": None,
                         "title": "New",
-                        "inputs": [],
                         "input_sets": {},
                         "settings": {},
                     }
@@ -189,11 +184,11 @@ async def test_put_404s_on_unknown_workspace(fake_workspace):
 
 @pytest.mark.asyncio
 async def test_put_then_get_round_trips_tab_inputs(fake_workspace):
-    """Per-tab input selectors (node_id + optional column) survive PUT/GET.
+    """Per-tab named input selectors (node_id + optional column) survive PUT/GET.
 
     Guards the add-node-as-needed model: each tab owns its source selection and
     any extra named selector values, so the sidecar must persist and restore
-    both the legacy ``inputs`` field and the newer ``input_sets`` mapping.
+    the ``input_sets`` mapping.
     """
     payload = _sample_group()
     await tabs_api.put_workspace_tabs(
@@ -203,7 +198,6 @@ async def test_put_then_get_round_trips_tab_inputs(fake_workspace):
         workspace_id=WORKSPACE_ID, current_user={"id": "u"}
     )
     tab = result.groups["concordance"].tabs[0]
-    assert [(i.node_id, i.column) for i in tab.inputs] == [("n1", "text"), ("n2", None)]
     assert {
         key: [(i.node_id, i.column) for i in inputs]
         for key, inputs in tab.input_sets.items()
@@ -211,7 +205,6 @@ async def test_put_then_get_round_trips_tab_inputs(fake_workspace):
         "source": [("n1", "text"), ("n2", None)],
         "classDescriptions": [("classes", "class")],
     }
-    assert result.groups["concordance"].tabs[1].inputs == []
     assert result.groups["concordance"].tabs[1].input_sets == {}
     # Free-form per-view settings (Annotation's Manual/AI mode, provider, model,
     # prompt) round-trip on the owning tab and default to an empty map when the
@@ -225,25 +218,41 @@ async def test_put_then_get_round_trips_tab_inputs(fake_workspace):
     assert result.groups["concordance"].tabs[1].settings == {}
 
 
-@pytest.mark.asyncio
-async def test_get_defaults_settings_when_absent(fake_workspace):
-    """A tab persisted before ``settings`` existed hydrates to an empty map.
+def test_tab_model_rejects_legacy_inputs_field():
+    """The clean tab contract rejects the removed top-level ``inputs`` mirror."""
 
-    Guards backward compatibility: older sidecars have no ``settings`` key, so
-    the model must supply the default rather than failing validation.
-    """
-    legacy = {
+    stale_payload = {
         "groups": {
             "annotation": {
-                "tabs": [{"tab_id": "t1", "title": "Legacy"}],
+                "tabs": [
+                    {
+                        "tab_id": "t1",
+                        "title": "Stale",
+                        "inputs": [{"node_id": "n1"}],
+                        "input_sets": {"source": [{"node_id": "n1"}]},
+                        "settings": {},
+                    }
+                ],
                 "active_tab_id": "t1",
             }
         }
     }
-    (fake_workspace.workspace_dir / "tabs.json").write_text(
-        json.dumps(legacy), encoding="utf-8"
-    )
-    result = await tabs_api.get_workspace_tabs(
-        workspace_id=WORKSPACE_ID, current_user={"id": "u"}
-    )
-    assert result.groups["annotation"].tabs[0].settings == {}
+
+    with pytest.raises(ValidationError):
+        _state(stale_payload)
+
+
+def test_tab_model_requires_current_input_sets_and_settings_shape():
+    """Tabs must persist the current selector/settings fields explicitly."""
+
+    stale_payload = {
+        "groups": {
+            "annotation": {
+                "tabs": [{"tab_id": "t1", "title": "Stale"}],
+                "active_tab_id": "t1",
+            }
+        }
+    }
+
+    with pytest.raises(ValidationError):
+        _state(stale_payload)

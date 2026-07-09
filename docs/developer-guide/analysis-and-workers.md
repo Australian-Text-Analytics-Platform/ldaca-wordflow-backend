@@ -31,8 +31,8 @@ request/result payloads by explicit `task_id` through
 `GET /api/workspaces/{workspace_id}/analysis-tasks/{task_id}/result`. Analysis
 request/result APIs do not accept frontend `tab_id`; tab identity stays in the
 frontend tab sidecar. The same sidecar also stores tab-owned node selectors:
-legacy `inputs` for the default source selector and `input_sets` for additional
-named selectors.
+`input_sets.source` for the default source selector and additional
+`input_sets` entries for named selectors.
 
 Task follow-up actions use the same shared namespace. Detach-option reads and
 detach submissions go through
