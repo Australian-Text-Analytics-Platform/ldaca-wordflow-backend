@@ -77,6 +77,9 @@ def test_import_ldaca_ignores_current_workspace_for_task_scope(client: TestClien
     assert payload["state"] == "running"
     assert payload["metadata"]["task_id"] == "task-456"
     get_task_manager.assert_called_once_with("test_user")
+    await_args = mock_tm.submit_task.await_args
+    assert await_args is not None
+    assert await_args.kwargs["workspace_id"] == "global"
 
 
 def test_list_files_tasks_returns_user_scope_tasks(client: TestClient):

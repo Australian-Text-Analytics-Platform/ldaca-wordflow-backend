@@ -49,7 +49,8 @@ async def import_ldaca_dataset(
     - Runs network/download/import pipeline outside request-response lifecycle.
     """
     user_id = current_user["id"]
-    workspace_id = workspace_manager.get_current_workspace_id(user_id) or "global"
+    # File imports write into the user's file tree, not a workspace graph.
+    workspace_id = "global"
     tm = workspace_manager.get_task_manager(user_id)
     task_info = await tm.submit_task(
         user_id=user_id,
