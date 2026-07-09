@@ -399,7 +399,6 @@ async def detach_concordance(
     try:
         task_id = str(uuid4())
         input_snapshot_dir = create_worker_input_snapshot(
-            user_id=user_id,
             workspace_id=workspace_id_str,
             task_id=task_id,
             node_ids=[node_id],
@@ -509,7 +508,6 @@ async def detach_concordance_dispersion(
     try:
         child_task_id = str(uuid4())
         input_snapshot_dir = create_worker_input_snapshot(
-            user_id=user_id,
             workspace_id=workspace_id_str,
             task_id=child_task_id,
             node_ids=[node_id],
@@ -615,7 +613,6 @@ async def materialize_concordance(
     try:
         child_task_id = str(uuid4())
         input_snapshot_dir = create_worker_input_snapshot(
-            user_id=user_id,
             workspace_id=workspace_id_str,
             task_id=child_task_id,
             node_ids=[node_id],

@@ -83,7 +83,6 @@ async def submit_sequential_analysis(
         if artifact_dir is None:
             raise InternalServiceError("Workspace artifacts directory is unavailable")
         input_snapshot_dir = create_worker_input_snapshot(
-            user_id=user_id,
             workspace_id=workspace_id,
             task_id=task_id,
             node_ids=[node_id],

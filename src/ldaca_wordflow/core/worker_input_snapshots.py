@@ -18,8 +18,6 @@ import polars as pl
 
 from docworkspace import Node
 
-from .workspace import workspace_manager
-
 _SNAPSHOT_ROOT_NAME = "task_inputs"
 _SNAPSHOT_FILENAME = "snapshot.json"
 _SNAPSHOT_DATA_DIR = "data"
@@ -91,12 +89,11 @@ def _node_snapshot_payload(
 
 def create_worker_input_snapshot(
     *,
-    user_id: str,
     workspace_id: str,
     task_id: str,
     node_ids: list[str],
-    workspace: Any | None = None,
-    artifact_dir: str | Path | None = None,
+    workspace: Any,
+    artifact_dir: str | Path,
 ) -> Path:
     """Persist selected node LazyFrame plans for a worker task.
 
@@ -106,27 +103,13 @@ def create_worker_input_snapshot(
       corpus data.
 
     Flow:
-    1. Resolve the active in-memory workspace and task artifact directory.
-    2. Serialize only the requested nodes' LazyFrame plans under
+    1. Serialize only the requested nodes' LazyFrame plans under
        ``data/artifacts/task_inputs/{task_id}``.
-    3. Write JSON metadata that workers can load without touching the live
+    2. Write JSON metadata that workers can load without touching the live
        workspace object.
     """
 
-    workspace = (
-        workspace
-        if workspace is not None
-        else workspace_manager.get_current_workspace(user_id)
-    )
-    if workspace is None:
-        raise ValueError("No active workspace selected")
-    resolved_artifact_dir = (
-        Path(artifact_dir)
-        if artifact_dir is not None
-        else workspace_manager.ensure_workspace_artifacts_dir(user_id, workspace_id)
-    )
-    if resolved_artifact_dir is None:
-        raise ValueError("Workspace artifacts directory is unavailable")
+    resolved_artifact_dir = Path(artifact_dir)
 
     snapshot_dir = resolved_artifact_dir / _SNAPSHOT_ROOT_NAME / task_id
     if snapshot_dir.exists():

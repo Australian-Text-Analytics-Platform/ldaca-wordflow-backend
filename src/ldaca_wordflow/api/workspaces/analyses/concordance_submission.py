@@ -58,7 +58,6 @@ async def submit_concordance_analysis(
         if workspace_dir is None:
             raise WorkspaceNotFoundError("Workspace not found")
         input_snapshot_dir = create_worker_input_snapshot(
-            user_id=user_id,
             workspace_id=workspace_id,
             task_id=task_id,
             node_ids=request.node_ids,

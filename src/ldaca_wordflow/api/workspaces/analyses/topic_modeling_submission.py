@@ -94,7 +94,6 @@ async def submit_topic_modeling(
     async with _submission_lock(user_id, workspace_id):
         artifact_dir, artifact_prefix = _prepare_artifact_target(user_id, workspace_id)
         input_snapshot_dir = create_worker_input_snapshot(
-            user_id=user_id,
             workspace_id=workspace_id,
             task_id=task_id,
             node_ids=request.node_ids,

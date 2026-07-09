@@ -58,7 +58,6 @@ async def submit_quotation_analysis(
             raise WorkspaceNotFoundError("Workspace not found")
         task_id = str(uuid4())
         input_snapshot_dir = create_worker_input_snapshot(
-            user_id=user_id,
             workspace_id=workspace_id,
             task_id=task_id,
             node_ids=[node_id],

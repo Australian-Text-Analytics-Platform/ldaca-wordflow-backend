@@ -190,7 +190,6 @@ async def submit_token_frequency_analysis(
     artifact_dir, artifact_prefix = _prepare_artifact_target(user_id, workspace_id)
     task_id = str(uuid4())
     input_snapshot_dir = create_worker_input_snapshot(
-        user_id=user_id,
         workspace_id=workspace_id,
         task_id=task_id,
         node_ids=request.node_ids,
