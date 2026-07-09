@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 from ....core.services.quotation_client import extract_remote_quotations
 from ....core.utils import stringify_unsafe_integers
-from ....models import QuotationEngineConfig, QuotationEngineType
+from ....models.quotation import QuotationEngineConfig, QuotationEngineType
 from ....settings import settings
 from .generated_columns import (
     QUOTE_COLUMN_NAMES,

@@ -23,7 +23,7 @@ from ...core.annotation_ai import AnnotationAiError, InferenceConfig, list_model
 from ...core.annotation_preview_store import preview_store, signature_of
 from ...core.auth import get_current_user
 from ...core.exceptions import BadGatewayError, InvalidInputError, NotFoundError
-from ...models import WorkspaceNodeInfo
+from ...models.workspace import WorkspaceNodeInfo
 from .annotation_ai_workflows import (
     annotate_all_annotation_ai_rows,
     detach_previewed_annotation_ai_rows,

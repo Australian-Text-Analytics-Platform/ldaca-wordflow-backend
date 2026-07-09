@@ -30,7 +30,7 @@ from ....core.analysis_helpers import sanitize_stop_words
 from ....core.exceptions import InvalidInputError, NotFoundError, WorkspaceNotFoundError
 from ....core.worker_input_snapshots import create_worker_input_snapshot
 from ....core.workspace import workspace_manager
-from ....models import TokenFrequencyRequest
+from ....models.token_frequencies import TokenFrequencyRequest
 
 
 DEFAULT_TOKEN_LIMIT = 25

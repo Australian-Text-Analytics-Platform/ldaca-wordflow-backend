@@ -22,7 +22,7 @@ from ...core.utils import (
     validate_file_path,
     validate_workspace_name,
 )
-from ...models import (
+from ...models.files import (
     CreateFolderRequest,
     CreateFolderResponse,
     FileTreeNodeResponse,

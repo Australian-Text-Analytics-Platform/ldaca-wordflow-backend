@@ -18,7 +18,7 @@ from ....core.exceptions import (
 )
 from ....core.worker_input_snapshots import create_worker_input_snapshot
 from ....core.workspace import workspace_manager
-from ....models import ConcordanceAnalysisRequest
+from ....models.concordance import ConcordanceAnalysisRequest
 from .concordance_core import DEFAULT_CONCORDANCE_PAGE, normalize_saved_request
 
 

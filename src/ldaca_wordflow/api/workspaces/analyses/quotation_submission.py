@@ -21,7 +21,7 @@ from ....core.exceptions import (
 from ....core.services.quotation_client import QuotationServiceError
 from ....core.worker_input_snapshots import create_worker_input_snapshot
 from ....core.workspace import workspace_manager
-from ....models import QuotationEngineConfig, QuotationRequest
+from ....models.quotation import QuotationEngineConfig, QuotationRequest
 from .quotation_core import DEFAULT_CONTEXT_LENGTH
 
 

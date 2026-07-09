@@ -15,7 +15,8 @@ import uuid
 from fastapi import APIRouter, Depends, Query
 
 from ...core.auth import get_current_user
-from ...models import FilterPreviewResponse, WorkspaceNodeInfo
+from ...models.nodes import FilterPreviewResponse
+from ...models.workspace import WorkspaceNodeInfo
 from .schema_filter import frontend_node_info
 from ...core.exceptions import InternalServiceError
 from .node_join import joined_lazyframe_for_nodes, preview_joined_nodes

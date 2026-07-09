@@ -23,7 +23,7 @@ from ...core.utils import (
     get_user_data_folder,
     validate_file_path,
 )
-from ...models import FileInfoResponse, FilePreviewRequest, FilePreviewResponse
+from ...models.files import FileInfoResponse, FilePreviewRequest, FilePreviewResponse
 from .crud import _resolve_user_file_path
 from .file_preview import build_file_preview_response
 

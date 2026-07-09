@@ -11,7 +11,7 @@ from ldaca_wordflow.core.services.quotation_client import (
     extract_remote_quotations,
     normalise_engine_base_url,
 )
-from ldaca_wordflow.models import QuotationEngineConfig, QuotationEngineType
+from ldaca_wordflow.models.quotation import QuotationEngineConfig, QuotationEngineType
 from ldaca_wordflow.settings import settings
 from pydantic import AnyHttpUrl, TypeAdapter
 

@@ -21,7 +21,7 @@ from typing import cast
 
 import polars as pl
 from ldaca_wordflow.api.workspaces.nodes_filter import _build_filter_expression
-from ldaca_wordflow.models import FilterCondition, FilterRequest
+from ldaca_wordflow.models.nodes import FilterCondition, FilterRequest
 
 
 def _filter(df: pl.DataFrame, request: FilterRequest) -> pl.DataFrame:

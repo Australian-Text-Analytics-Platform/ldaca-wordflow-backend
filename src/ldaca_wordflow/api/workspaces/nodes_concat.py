@@ -18,10 +18,12 @@ import polars as pl
 from fastapi import APIRouter, Depends, Query
 
 from ...core.auth import get_current_user
-from ...models import (
+from ...models.nodes import (
     ConcatPreviewRequest,
     ConcatRequest,
     FilterPreviewResponse,
+)
+from ...models.workspace import (
     WorkspaceNodeInfo,
 )
 from .schema_filter import frontend_node_info

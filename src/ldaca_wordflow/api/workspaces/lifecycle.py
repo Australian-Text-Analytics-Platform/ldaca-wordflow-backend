@@ -32,7 +32,7 @@ from ...core.exceptions import (
 from ...core.utils import validate_workspace_name
 from ...core.workspace_archive_import import import_workspace_zip
 from ...core.workspace import workspace_manager
-from ...models import (
+from ...models.workspace import (
     WorkspaceActionResponse,
     WorkspaceCreateRequest,
     WorkspaceGraphResponse,
@@ -452,8 +452,8 @@ async def delete_workspace_by_id(
       should not depend on the backend-selected current workspace.
 
     Flow: let the UUID path converter reject static route names, delegate
-        deletion to the manager, and return the
-        same action response shape as the legacy query-parameter route.
+        deletion to the manager, and return the standard workspace action
+        response used by lifecycle mutations.
     """
     user_id = current_user["id"]
     workspace_id_str = str(workspace_id)

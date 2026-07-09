@@ -26,7 +26,7 @@ from ....analysis.models import AnalysisStatus, AnalysisTask
 from ....core.exceptions import InternalServiceError, InvalidInputError, NotFoundError
 from ....core.worker_input_snapshots import create_worker_input_snapshot
 from ....core.workspace import workspace_manager
-from ....models import SequentialAnalysisRequest
+from ....models.sequential_analysis import SequentialAnalysisRequest
 
 
 logger = logging.getLogger(__name__)

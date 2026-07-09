@@ -8,7 +8,7 @@ import polars as pl
 import pytest
 from ldaca_wordflow.api.workspaces import nodes_slice as nodes_api
 from ldaca_wordflow.api.workspaces import utils as workspace_utils
-from ldaca_wordflow.models import SliceRequest
+from ldaca_wordflow.models.nodes import SliceRequest
 
 
 class DummyNode:

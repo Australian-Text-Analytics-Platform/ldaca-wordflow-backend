@@ -25,7 +25,7 @@ from ...core.utils import (
     get_user_data_folder,
     import_sample_data_for_user,
 )
-from ...models import (
+from ...models.files import (
     ImportSampleDataRequest,
     ImportSampleDataResponse,
     SampleDataCatalogueResponse,

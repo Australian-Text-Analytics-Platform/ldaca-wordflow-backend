@@ -122,7 +122,7 @@ def run_quotation_analysis_task(
             DEFAULT_CONTEXT_LENGTH,
             compute_remote_on_demand_page,
         )
-        from ..models import QuotationEngineConfig
+        from ..models.quotation import QuotationEngineConfig
         from .worker_input_snapshots import load_snapshot_node
 
         snapshot_node = load_snapshot_node(input_snapshot_dir, node_id)

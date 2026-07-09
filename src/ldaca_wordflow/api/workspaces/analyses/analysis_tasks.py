@@ -45,20 +45,28 @@ from ....analysis.manager import get_task_manager
 from ....analysis.models import AnalysisTask
 from ....core.auth import get_current_user
 from ....core.exceptions import AccessDeniedError, InvalidInputError, TaskNotFoundError
-from ....models import (
-    AnalysisTaskActionResponse,
+from ....models.analysis_common import AnalysisTaskActionResponse
+from ....models.concordance import (
     ConcordanceDetachOptionsResponse,
     ConcordanceDetachRequest,
     ConcordanceDispersionBinsResponse,
     ConcordanceDispersionDetachRequest,
     ConcordanceMaterializeRequest,
+)
+from ....models.quotation import (
     QuotationResultQuery,
     QuotationDetachOptionsResponse,
     QuotationDetachRequest,
     QuotationMaterializeRequest,
+)
+from ....models.sequential_analysis import (
     SequentialAnalysisPreferenceUpdateRequest,
     SequentialAnalysisDetachResponse,
+)
+from ....models.token_frequencies import (
     TokenFrequencyPreferenceUpdateRequest,
+)
+from ....models.topic_modeling import (
     TopicModelingDetachOptionsResponse,
     TopicModelingDetachRequest,
     TopicModelingDetachResponse,

@@ -448,7 +448,7 @@ def _paginated_lazy_preview(
     dtypes = {col: str(dtype) for col, dtype in preview_df.schema.items()}
     data_rows = preview_df.to_dicts()
 
-    from ...models import PaginationInfo
+    from ...models.analysis_common import PaginationInfo
 
     pagination = PaginationInfo(
         page=normalized_page,

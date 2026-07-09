@@ -26,7 +26,8 @@ from ..core.auth import (
 )
 from ..core.auth_service import cleanup_expired_sessions, create_user_session, get_or_create_user
 from ..core.cilogon_auth import complete_cilogon_callback, get_cilogon_config
-from ..models import AuthInfoResponse, GoogleIn, GoogleOut, MessageResponse, User, UserResponse
+from ..models.auth import AuthInfoResponse, GoogleIn, GoogleOut, User, UserResponse
+from ..models.files import MessageResponse
 from ..settings import settings
 from ..core.exceptions import (
     AccessDeniedError,

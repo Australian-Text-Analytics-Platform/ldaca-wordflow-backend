@@ -32,9 +32,8 @@ from ....core.exceptions import (
 )
 from ....core.worker_input_snapshots import create_worker_input_snapshot
 from ....core.workspace import workspace_manager
-from ....models import (
-    AnalysisTaskActionResponse,
-    DetachNodeOption,
+from ....models.analysis_common import AnalysisTaskActionResponse, DetachNodeOption
+from ....models.quotation import (
     QuotationAnalysisResponse,
     QuotationDetachOptionsResponse,
     QuotationDetachRequest,

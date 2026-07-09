@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, Header
 
 from ...core.auth import get_current_user
 from ...core.oni_client import OniClient, OniSearchMethod
-from ...models import OniSearchRequest, OniSearchResponse, OniSearchResult
+from ...models.files import OniSearchRequest, OniSearchResponse, OniSearchResult
 from ...settings import settings
 from ...core.exceptions import InvalidInputError
 

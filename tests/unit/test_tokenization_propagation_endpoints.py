@@ -32,14 +32,16 @@ class NodesApiMock:
 
 
 nodes_api = NodesApiMock
-from ldaca_wordflow.models import (
+from ldaca_wordflow.models.nodes import (
     ConcatRequest,
     FilterCondition,
     FilterRequest,
+    SliceRequest,
+)
+from ldaca_wordflow.models.polars_expression import (
     PolarsExpressionContext,
     PolarsExpressionItem,
     PolarsExpressionRequest,
-    SliceRequest,
 )
 
 from docworkspace import Node, TokenizationMeta

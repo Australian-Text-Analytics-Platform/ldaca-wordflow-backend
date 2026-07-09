@@ -37,8 +37,8 @@ from ....core.exceptions import (
 )
 from ....core.worker_input_snapshots import create_worker_input_snapshot
 from ....core.workspace import workspace_manager
-from ....models import (
-    AnalysisTaskActionResponse,
+from ....models.analysis_common import AnalysisTaskActionResponse, DetachNodeOption
+from ....models.concordance import (
     ConcordanceAnalysisRequest,
     ConcordanceAnalysisResponse,
     ConcordanceDetachOptionsResponse,
@@ -46,7 +46,6 @@ from ....models import (
     ConcordanceDispersionBinsResponse,
     ConcordanceDispersionDetachRequest,
     ConcordanceMaterializeRequest,
-    DetachNodeOption,
 )
 from ..utils import _build_detach_options, require_workspace
 from .concordance_core import (

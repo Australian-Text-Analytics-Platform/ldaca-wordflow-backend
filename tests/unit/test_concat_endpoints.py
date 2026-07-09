@@ -9,7 +9,7 @@ import pytest
 from fastapi import HTTPException
 from ldaca_wordflow.api.workspaces import nodes_concat as nodes_api
 from ldaca_wordflow.api.workspaces import utils as workspace_utils
-from ldaca_wordflow.models import ConcatPreviewRequest, ConcatRequest
+from ldaca_wordflow.models.nodes import ConcatPreviewRequest, ConcatRequest
 
 
 class DummyNode:

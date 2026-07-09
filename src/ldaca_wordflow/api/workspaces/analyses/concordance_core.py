@@ -19,6 +19,7 @@ from typing import Any, Optional, cast
 
 import polars as pl
 
+from ....core.exceptions import InvalidInputError
 from ....core.utils import stringify_unsafe_integers
 from .concordance_tokens_mode import (
     compute_tokens_concordance_page,
@@ -54,8 +55,8 @@ _REQUEST_EXCLUDE_KEYS = {
     "sort_by",
     "descending",
     "pagination",
-    # ``combined`` was a backend view flag; the combined comparison view is now
-    # synthesized client-side, so drop any legacy persisted value here.
+    # ``combined`` is not part of the backend request contract; the comparison
+    # view is synthesized client-side from per-node result payloads.
     "combined",
 }
 
@@ -681,20 +682,19 @@ def _serialize_materialized_rows(
     df: pl.DataFrame,
     *,
     node_label: Optional[str] = None,
-    document_column: Optional[str] = None,
+    document_column: str,
+    include_document_column: bool = True,
 ) -> tuple[list[list[dict[str, Any]]], list[str]]:
     """Convert a materialised concordance slice into per-document groups.
 
-    When ``document_column`` is provided and present in the frame, consecutive
-    rows that share the same document value are folded into one group — so the
-    dispersion view renders one horizontal bar per document with every hit
-    marked along it. The materialise worker writes rows in document order, so
-    a single linear ``groupby`` is enough; we don't re-sort.
+    Consecutive rows that share the same document value are folded into one
+    group so the dispersion view renders one horizontal bar per document with
+    every hit marked along it. The materialise worker writes rows in document
+    order, so a single linear ``groupby`` is enough; we don't re-sort.
 
-    When ``document_column`` is missing (legacy materialised parquets from
-    before the document column was always recorded) we fall back to the
-    pre-fix shape: one singleton group per hit, which keeps the table view
-    looking correct but degrades dispersion to bar-per-hit.
+    ``include_document_column`` controls only display. The materialized parquet
+    must still contain ``document_column`` so grouping and dispersion binning
+    have a stable source of truth.
 
     Steps:
     - Normalize caller input into the representation this module expects.
@@ -704,31 +704,39 @@ def _serialize_materialized_rows(
     Called by:
     - Local helpers, route handlers, or service methods in this module because they need this unit's "Convert a materialised concordance slice into per-document groups" behavior.
     """
+    if not document_column or document_column not in df.columns:
+        raise InvalidInputError(
+            "Materialized concordance rows must include the document column",
+        )
+
     if df.height == 0:
-        return [], list(df.columns)
+        columns = [
+            column
+            for column in df.columns
+            if include_document_column or column != document_column
+        ]
+        return [], columns
 
-    columns = list(df.columns)
+    columns = [
+        column
+        for column in df.columns
+        if include_document_column or column != document_column
+    ]
     grouped_rows: list[list[dict[str, Any]]] = []
-    can_group = bool(document_column) and document_column in df.columns
 
-    if can_group:
-        from itertools import groupby
+    from itertools import groupby
 
-        for _, group in groupby(df.to_dicts(), key=lambda r: r.get(document_column)):
-            hits: list[dict[str, Any]] = []
-            for row in group:
-                hit = dict(row)
-                if node_label:
-                    hit["__source_node"] = node_label
-                hits.append(hit)
-            if hits:
-                grouped_rows.append(hits)
-    else:
-        for row in df.to_dicts():
+    for _, group in groupby(df.to_dicts(), key=lambda r: r.get(document_column)):
+        hits: list[dict[str, Any]] = []
+        for row in group:
             hit = dict(row)
+            if not include_document_column:
+                hit.pop(document_column, None)
             if node_label:
                 hit["__source_node"] = node_label
-            grouped_rows.append([hit])
+            hits.append(hit)
+        if hits:
+            grouped_rows.append(hits)
 
     if node_label and "__source_node" not in columns:
         columns.append("__source_node")
@@ -743,7 +751,8 @@ def compute_materialized_page(
     sort_by: Optional[str],
     descending: bool,
     node_label: Optional[str] = None,
-    document_column: Optional[str] = None,
+    document_column: str,
+    include_document_column: bool = True,
 ) -> dict[str, Any]:
     """Paginate a materialized concordance parquet as occurrence rows.
 
@@ -780,7 +789,10 @@ def compute_materialized_page(
     start = max(page - 1, 0) * effective_page_size
     slice_df = cast(pl.DataFrame, lazy.slice(start, effective_page_size).collect())
     rows, columns = _serialize_materialized_rows(
-        slice_df, node_label=node_label, document_column=document_column
+        slice_df,
+        node_label=node_label,
+        document_column=document_column,
+        include_document_column=include_document_column,
     )
 
     total_source_pages = (
@@ -840,9 +852,13 @@ def read_dispersion_bins(
 
     has_matched_text = CONC_MATCHED_TEXT_COLUMN in schema
     has_start_idx = CONC_START_IDX_COLUMN in schema
-    doc_col = document_column if document_column and document_column in schema else None
+    if not document_column or document_column not in schema:
+        raise InvalidInputError(
+            "Materialized concordance rows must include the document column",
+        )
+    doc_col = document_column
 
-    if not has_matched_text or not has_start_idx or doc_col is None:
+    if not has_matched_text or not has_start_idx:
         return {
             "total_hits": 0,
             "document_column": document_column,
@@ -973,6 +989,12 @@ def build_concordance_response(
         if not src:
             continue
         if node_id in materialized_paths:
+            document_column = src["column"]
+            selected_columns = request.get("selected_columns")
+            include_document_column = (
+                not isinstance(selected_columns, list)
+                or document_column in selected_columns
+            )
             data[node_id] = compute_materialized_page(
                 materialized_paths[node_id],
                 page=page,
@@ -980,7 +1002,8 @@ def build_concordance_response(
                 sort_by=sort_by,
                 descending=descending,
                 node_label=src.get("label"),
-                document_column=src.get("column"),
+                document_column=document_column,
+                include_document_column=include_document_column,
             )
             continue
         data[node_id] = compute_node_concordance_page(

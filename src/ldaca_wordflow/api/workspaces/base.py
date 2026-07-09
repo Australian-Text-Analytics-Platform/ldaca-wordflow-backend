@@ -30,10 +30,12 @@ from ...core.auth import get_current_user
 from ...core.node_casting import cast_lazyframe_column
 
 # Note: DocWorkspace API helpers are not used directly in this HTTP layer
-from ...models import (
+from ...models.files import RenameColumnRequest
+from ...models.nodes import (
     CastNodeRequest,
     CastNodeResponse,
-    RenameColumnRequest,
+)
+from ...models.workspace import (
     WorkspaceNodeInfo,
 )
 from .schema_filter import frontend_node_info

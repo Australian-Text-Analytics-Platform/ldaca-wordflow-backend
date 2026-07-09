@@ -40,8 +40,8 @@ from ....core.exceptions import (
     TaskNotFoundError,
 )
 from ....core.workspace import workspace_manager
-from ....models import (
-    AnalysisClearResponse,
+from ....models.analysis_common import AnalysisClearResponse
+from ....models.token_frequencies import (
     TokenFrequencyPreferenceUpdateRequest,
     TokenFrequencyRequest,
     TokenFrequencyResponse,

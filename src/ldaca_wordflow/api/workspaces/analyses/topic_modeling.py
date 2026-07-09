@@ -33,10 +33,8 @@ from ....core.exceptions import (
     TaskNotFoundError,
 )
 from ....core.workspace import workspace_manager
-from ....models import (
-    AnalysisClearResponse,
-    AnalysisTaskMetadata,
-    DetachNodeOption,
+from ....models.analysis_common import AnalysisClearResponse, AnalysisTaskMetadata, DetachNodeOption
+from ....models.topic_modeling import (
     TopicModelingData,
     TopicModelingDetachData,
     TopicModelingDetachedNode,
@@ -309,7 +307,7 @@ async def clear_topic_modeling_results(
     - Frontend clear action: `DELETE /workspaces/{id}/topic-modeling` because they need this unit's "Clear stored topic-modeling task state for a workspace" behavior.
 
     Why:
-    - Removes explicit topic-modeling task records for broad legacy clear actions.
+    - Removes explicit topic-modeling task records for the requested workspace.
     """
     user_id = current_user["id"]
     workspace_id_str = str(workspace_id)

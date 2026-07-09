@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, Header
 
 from ...core.auth import get_current_user
 from ...core.workspace import workspace_manager
-from ...models import (
+from ...models.files import (
     FilesImportTaskStartResponse,
     FilesTaskActionResponse,
     FilesTasksListResponse,

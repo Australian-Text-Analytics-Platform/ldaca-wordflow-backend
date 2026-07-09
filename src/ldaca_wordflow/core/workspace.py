@@ -28,7 +28,7 @@ from typing import Any
 from docworkspace.workspace.io import read_workspace_metadata, rebase_workspace_sources
 
 from docworkspace import Workspace
-from ldaca_wordflow.models import WorkspaceSummary
+from ldaca_wordflow.models.workspace import WorkspaceSummary
 
 from .utils import (
     allocate_workspace_folder,

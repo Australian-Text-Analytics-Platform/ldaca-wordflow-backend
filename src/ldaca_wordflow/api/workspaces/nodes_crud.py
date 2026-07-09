@@ -31,16 +31,18 @@ from ...core.exceptions import (
 from ...core.polars_operations import get_operations_for_dtype
 from ...core.tokenization import tokenise_column
 from ...core.utils import stringify_unsafe_integers
-from ...models import (
+from ...models.nodes import (
     ColumnDescribeResponse,
     ColumnOperationsResponse,
     ColumnUniqueValuesResponse,
     NodeActionResponse,
-    NodeColorUpdateRequest,
     NodeDataResponse,
-    NodeDocumentColumnUpdateRequest,
     NodeQueryPlanResponse,
     NodeShapeResponse,
+)
+from ...models.workspace import (
+    NodeColorUpdateRequest,
+    NodeDocumentColumnUpdateRequest,
     NodeTokenizationPreferenceRequest,
     TokenizerModelsResponse,
     WorkspaceNodeInfo,

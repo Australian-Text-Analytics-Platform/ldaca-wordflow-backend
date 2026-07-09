@@ -10,7 +10,7 @@ from ldaca_wordflow.api.workspaces.analyses.generated_columns import (
     QUOTE_COLUMN_NAMES,
 )
 from ldaca_wordflow.core.workspace import workspace_manager
-from ldaca_wordflow.models import QuotationEngineConfig
+from ldaca_wordflow.models.quotation import QuotationEngineConfig
 
 USER_ID = "test"
 WORKSPACE_ID = "00000000-0000-0000-0000-000000000301"

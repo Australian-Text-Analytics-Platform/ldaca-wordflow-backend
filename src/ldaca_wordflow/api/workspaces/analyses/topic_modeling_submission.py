@@ -27,7 +27,7 @@ from ....analysis.models import AnalysisStatus, AnalysisTask
 from ....core.exceptions import InvalidInputError, NotFoundError, WorkspaceNotFoundError
 from ....core.worker_input_snapshots import create_worker_input_snapshot
 from ....core.workspace import workspace_manager
-from ....models import TopicModelingRequest
+from ....models.topic_modeling import TopicModelingRequest
 
 
 _TOPIC_SUBMISSION_LOCKS: dict[tuple[str, str], asyncio.Lock] = {}

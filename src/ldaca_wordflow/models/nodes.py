@@ -117,6 +117,134 @@ class FilterPreviewResponse(BaseModel):
     pagination: PaginationInfo
 
 
+class ReplaceRequest(BaseModel):
+    """Request schema used by API routes and generated clients for replace request.
+
+    Used by:
+    - replace node routes because replace/extract operations need one validated
+      request body shared by preview and apply endpoints.
+
+    Flow: validate the source/pattern/replacement fields and expose defaults
+        used by the replace route helpers before they build Polars expressions.
+    """
+
+    source_column: str = Field(..., min_length=1, max_length=200)
+    pattern: str = Field(..., min_length=1)
+    replacement: str = Field(default="")
+    output_column_name: str | None = Field(default=None, max_length=200)
+    preview_limit: int | None = Field(default=50, ge=1, le=500)
+    mode: Literal["replace", "extract"] = Field(default="replace")
+    count: Literal["all", "first"] = Field(default="all")
+    n: int | None = Field(default=None, ge=1)
+    connector: str = Field(default=" ")
+
+
+class ReplaceApplyResponse(BaseModel):
+    """Response returned when a replace operation materializes a node column.
+
+    Used by:
+    - replace apply route because generated clients need the new node id,
+      output column name, dtype, and user-facing completion message.
+    """
+
+    state: Literal["successful"]
+    node_id: str
+    column_name: str
+    dtype: str | None = None
+    message: str
+
+
+class ConcatPreviewRequest(BaseModel):
+    """Request schema used by concat preview endpoints.
+
+    Used by:
+    - concat preview and apply routes because both need the same node id list
+      and deduplication flag before building aligned LazyFrames.
+    """
+
+    node_ids: list[str] = Field(..., min_length=2)
+    deduplicate: bool = True
+
+
+class ConcatRequest(ConcatPreviewRequest):
+    """Request schema used when concatenation creates a persisted node.
+
+    Used by:
+    - concat apply route because it extends the preview contract with an
+      optional output node name.
+    """
+
+    new_node_name: str | None = None
+
+
+class NodeOperationResponse(BaseModel):
+    """Response shared by node operations that create one child node.
+
+    Used by:
+    - filter and slice apply routes because both return the child node id and
+      display name after persisting a derived node.
+    """
+
+    node_name: str
+    node_id: str
+
+
+class NodeActionResponse(BaseModel):
+    """Response shared by node actions that do not need a full node payload.
+
+    Used by:
+    - node delete route because the frontend only needs success state and a
+      message after the workspace graph is invalidated.
+    """
+
+    state: Literal["successful"]
+    message: str
+
+
+class CastNodeRequest(BaseModel):
+    """Request body for casting one node column.
+
+    Used by:
+    - cast node route because it validates the column, target type, optional
+      datetime format, and strict-mode flag before delegating to casting logic.
+    """
+
+    column: str
+    target_type: str
+    format: str | None = None
+    strict: bool | None = None
+
+
+class CastNodeInfo(BaseModel):
+    """Metadata returned for a completed cast operation.
+
+    Used by:
+    - cast node response because the UI needs the original/resolved dtypes and
+      effective format/strict options for feedback.
+    """
+
+    column: str
+    original_type: str
+    new_type: str
+    target_type: str
+    format_used: str | None = None
+    strict_used: bool | None = None
+
+
+class CastNodeResponse(BaseModel):
+    """Response returned after casting one node column.
+
+    Used by:
+    - cast node route and generated clients because the route returns an action
+      status plus typed cast metadata instead of a full node snapshot.
+    """
+
+    state: Literal["successful"]
+    node_id: str
+    cast_info: CastNodeInfo
+    message: str
+
+
 ColumnScalarValue = str | int | float | bool
 AnalysisTaskState = Literal["pending", "running", "successful", "failed", "cancelled"]
 

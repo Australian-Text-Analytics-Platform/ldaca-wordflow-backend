@@ -30,7 +30,7 @@ from ...core.annotation_ai import (
 )
 from ...core.annotation_preview_store import preview_store, signature_of
 from ...core.exceptions import BadGatewayError, InvalidInputError, NotFoundError
-from ...models import WorkspaceNodeInfo
+from ...models.workspace import WorkspaceNodeInfo
 from .schema_filter import frontend_node_info
 from .utils import (
     Node,

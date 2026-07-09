@@ -23,7 +23,7 @@ from ..analysis.manager import get_task_manager as get_analysis_task_manager
 from ..core.auth import get_current_user
 from ..core.task_streaming import TASK_STREAM_HEADERS, task_event_stream
 from ..core.workspace import workspace_manager
-from ..models import TaskCancelActionResponse, TaskClearActionResponse, TaskListResponse
+from ..models.files import TaskCancelActionResponse, TaskClearActionResponse, TaskListResponse
 
 router = APIRouter(prefix="/tasks", tags=["task_streaming"])
 TASK_STREAM_RESPONSES = {

@@ -41,7 +41,7 @@ from ldaca_wordflow.core.worker_tasks_concordance import (
     _build_concordance_occurrence_dataframe,
     _build_tokens_concordance_occurrence_dataframe,
 )
-from ldaca_wordflow.models import ConcordanceMaterializeRequest
+from ldaca_wordflow.models.concordance import ConcordanceMaterializeRequest
 
 from docworkspace import Node
 

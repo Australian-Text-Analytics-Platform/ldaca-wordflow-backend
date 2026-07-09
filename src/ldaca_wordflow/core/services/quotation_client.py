@@ -16,7 +16,7 @@ from typing import Any
 
 import httpx
 
-from ...models import QuotationEngineConfig, QuotationEngineType
+from ...models.quotation import QuotationEngineConfig, QuotationEngineType
 from ...settings import settings
 
 logger = logging.getLogger(__name__)

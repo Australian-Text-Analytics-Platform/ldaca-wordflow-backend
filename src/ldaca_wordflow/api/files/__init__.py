@@ -8,8 +8,8 @@ Flow:
   mounts it at ``/api``. The top-level ``router`` here carries the ``/files``
   prefix so every sub-router inherits the correct path nesting.
 - Each sub-module defines its own ``router = APIRouter()`` with the routes it
-  owns. The aggregate router includes them here, preserving URL contract
-  compatibility with the original monolithic ``files.py``.
+  owns. The aggregate router includes them here so route ownership is explicit
+  while public file URLs stay under one ``/api/files`` resource tree.
 """
 
 from pathlib import Path

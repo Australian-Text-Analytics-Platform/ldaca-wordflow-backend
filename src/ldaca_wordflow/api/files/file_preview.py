@@ -35,7 +35,7 @@ from ...core.utils import (
     read_zip_file,
     validate_file_path,
 )
-from ...models import FilePreviewRequest, FilePreviewResponse
+from ...models.files import FilePreviewRequest, FilePreviewResponse
 
 logger = logging.getLogger(__name__)
 

@@ -11,6 +11,7 @@ from ldaca_wordflow.api.workspaces.analyses.concordance_core import (
     normalize_saved_request,
     sanitize_request_for_storage,
 )
+from ldaca_wordflow.core.exceptions import InvalidInputError
 
 
 @pytest.mark.parametrize(
@@ -230,10 +231,29 @@ def test_serialize_materialized_rows_groups_by_document_for_dispersion():
     )
 
 
-def test_serialize_materialized_rows_falls_back_to_singleton_groups_without_document_column():
-    """When the caller doesn't provide ``document_column`` (legacy parquets
-    or unknown column), keep the pre-fix shape: one singleton group per
-    hit, so the table view still works."""
+def test_serialize_materialized_rows_can_hide_document_column_from_display():
+    """The document column stays available for grouping even when hidden."""
+    df = pl.DataFrame(
+        {
+            "context": ["doc-A", "doc-A", "doc-B"],
+            "CONC_matched_text": ["a", "b", "c"],
+            "CONC_start_idx": [0, 1, 2],
+        }
+    )
+
+    grouped, columns = _serialize_materialized_rows(
+        df,
+        node_label="n",
+        document_column="context",
+        include_document_column=False,
+    )
+
+    assert "context" not in columns
+    assert [len(g) for g in grouped] == [2, 1]
+    assert all("context" not in hit for group in grouped for hit in group)
+
+
+def test_serialize_materialized_rows_requires_document_column():
     df = pl.DataFrame(
         {
             "CONC_matched_text": ["a", "b", "c"],
@@ -241,5 +261,5 @@ def test_serialize_materialized_rows_falls_back_to_singleton_groups_without_docu
         }
     )
 
-    grouped, _ = _serialize_materialized_rows(df, node_label="n")
-    assert [len(g) for g in grouped] == [1, 1, 1]
+    with pytest.raises(InvalidInputError):
+        _serialize_materialized_rows(df, node_label="n", document_column="context")

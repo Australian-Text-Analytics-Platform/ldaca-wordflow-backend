@@ -39,7 +39,7 @@ from ....core.exceptions import (
     TaskNotFoundError,
 )
 from ....core.workspace import workspace_manager
-from ....models import (
+from ....models.sequential_analysis import (
     SequentialAnalysisDetachResponse,
     SequentialAnalysisPreferenceUpdateRequest,
     SequentialAnalysisPreferenceUpdateResponse,

@@ -25,8 +25,8 @@ from ...core.polars_expr_validator import (
 )
 from ...core.utils import stringify_unsafe_integers
 from ...core.exceptions import InvalidInputError
-from ...models import (
-    FilterPreviewResponse,
+from ...models.nodes import FilterPreviewResponse
+from ...models.polars_expression import (
     PolarsExpressionApplyResponse,
     PolarsExpressionContext,
     PolarsExpressionRequest,

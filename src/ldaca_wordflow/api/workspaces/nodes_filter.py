@@ -20,7 +20,8 @@ from fastapi import APIRouter, Depends, Query
 
 from ...core.auth import get_current_user
 from ...core.docworkspace_data_types import TM_DISTRIBUTION_POLARS_DTYPE
-from ...models import FilterPreviewResponse, FilterRequest, NodeOperationResponse, PaginationInfo
+from ...models.analysis_common import PaginationInfo
+from ...models.nodes import FilterPreviewResponse, FilterRequest, NodeOperationResponse
 from ...core.exceptions import InvalidInputError
 from .utils import (
     _coerce_scalar,

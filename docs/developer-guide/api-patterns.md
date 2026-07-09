@@ -4,7 +4,9 @@
 
 Backend routers should be thin. The normal structure is:
 
-1. declare Pydantic request/response models near the route or in `core/`;
+1. import Pydantic request/response models from the owning domain module under
+   `ldaca_wordflow.models` (`models.nodes`, `models.files`,
+   `models.workspace`, or the analysis-specific modules);
 2. resolve the current user with `Depends(get_current_user)`;
 3. validate route-level identifiers and simple request invariants;
 4. call a workspace, core, analysis, or worker helper;

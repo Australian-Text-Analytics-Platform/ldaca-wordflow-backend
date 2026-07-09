@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends
 from ..core.auth import get_current_user
 from ..core.exceptions import WorkspaceNotFoundError
 from ..core.workspace import workspace_manager
-from ..models import (
+from ..models.workspace import (
     CurrentWorkspaceResponse,
     CurrentWorkspaceUpdateRequest,
     SetCurrentWorkspaceResponse,

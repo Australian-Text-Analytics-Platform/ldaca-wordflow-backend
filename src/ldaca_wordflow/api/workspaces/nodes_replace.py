@@ -19,9 +19,9 @@ import polars as pl
 from fastapi import APIRouter, Depends, Query
 
 from ...core.auth import get_current_user
-from ...models import (
+from ...models.analysis_common import PaginationInfo
+from ...models.nodes import (
     FilterPreviewResponse,
-    PaginationInfo,
     ReplaceApplyResponse,
     ReplaceRequest,
 )

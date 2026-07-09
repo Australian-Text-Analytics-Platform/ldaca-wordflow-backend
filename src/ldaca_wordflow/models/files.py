@@ -46,6 +46,39 @@ class FileUploadResponse(BaseModel):
     preview_available: bool
 
 
+class FilePreviewRequest(BaseModel):
+    """Request body for previewing one user file.
+
+    Used by:
+    - file preview route and preview helpers because they need the selected
+      filename, pagination window, and optional format-specific payload such as
+      an Excel sheet name.
+    """
+
+    filename: str
+    page: int = 0
+    page_size: int = 20
+    payload: dict[str, Any] | None = None
+
+
+class FilePreviewResponse(BaseModel):
+    """Typed preview payload returned for supported user data files.
+
+    Used by:
+    - file preview route and generated clients because the Data Loader needs
+      explicit columns, preview rows, total row count, and sheet metadata.
+    """
+
+    filename: str
+    file_type: str
+    supported_types: list[str]
+    columns: list[str]
+    preview: list[dict[str, Any]]
+    total_rows: int
+    sheet_names: list[str] | None = None
+    selected_sheet: str | None = None
+
+
 
 class ImportSampleDataResponse(BaseModel):
     """Response schema returned by API routes and consumed by generated clients for import sample data response.
