@@ -56,7 +56,7 @@ def _seed_paginated_analysis(rows: list[dict[str, Any]], context_length: int = 1
     _prime_workspace_state()
     task_manager = get_task_manager(USER_ID)
     request = QuotationRequest(node_id="node-1", column="text")
-    task_id = task_manager.create_task(request)
+    task_id = task_manager.create_task(request, workspace_id=WORKSPACE_ID)
     task = task_manager.get_task(task_id)
     assert task is not None
 
@@ -138,7 +138,7 @@ def seeded_quotation_analysis():
     _prime_workspace_state()
     task_manager = get_task_manager(USER_ID)
     request = QuotationRequest(node_id="node-1", column="text")
-    task_id = task_manager.create_task(request)
+    task_id = task_manager.create_task(request, workspace_id=WORKSPACE_ID)
     task = task_manager.get_task(task_id)
     assert task is not None
 

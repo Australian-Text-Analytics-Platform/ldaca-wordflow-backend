@@ -21,7 +21,8 @@ async def test_task_manager_endpoints_roundtrip(authenticated_client, workspace_
             "node_ids": ["node-1"],
             "node_columns": {"node-1": "text"},
             "tokenizer_model": "native:plain_words_en",
-        }
+        },
+        workspace_id=workspace_id,
     )
     manager.update_task(task_id, {"state": "successful", "data": {}})
 
@@ -44,7 +45,9 @@ async def test_clear_analysis_only_task_emits_task_removed(
     """Clearing an analysis-only task should notify Task Center subscribers."""
     user_id = "test"
     analysis_manager = get_task_manager(user_id)
-    task_id = analysis_manager.create_task({"node_ids": ["node-1"]})
+    task_id = analysis_manager.create_task(
+        {"node_ids": ["node-1"]}, workspace_id=workspace_id
+    )
 
     worker_manager = workspace_manager.get_task_manager(user_id)
     queue = await worker_manager.subscribe(user_id)
@@ -143,7 +146,9 @@ async def test_clear_analysis_task_removes_child_worker_tasks(
     """Clearing an analysis parent should recursively remove worker children."""
     user_id = "test"
     analysis_manager = get_task_manager(user_id)
-    parent_task_id = analysis_manager.create_task({"node_ids": ["node-1"]})
+    parent_task_id = analysis_manager.create_task(
+        {"node_ids": ["node-1"]}, workspace_id=workspace_id
+    )
 
     child_task_id = "task-concordance-materialize-child"
     grandchild_task_id = "task-concordance-materialize-grandchild"
@@ -218,7 +223,8 @@ async def test_clear_analysis_task_deletes_owned_artifacts_only(
 
     analysis_manager = get_task_manager(user_id)
     task_id = analysis_manager.create_task(
-        {"materialized_paths": {"node-1": str(request_artifact)}}
+        {"materialized_paths": {"node-1": str(request_artifact)}},
+        workspace_id=workspace_id,
     )
     task = analysis_manager.get_task(task_id)
     assert task is not None
@@ -318,7 +324,7 @@ async def test_task_manager_saves_result_by_task_id(workspace_id):
     """WorkerTaskManager should persist results by task_id in TaskManager."""
     user_id = "test"
     manager = get_task_manager(user_id)
-    task_id = manager.create_task({"node_ids": ["node-1"]})
+    task_id = manager.create_task({"node_ids": ["node-1"]}, workspace_id=workspace_id)
 
     task_info = TaskInfo(id=task_id, future=Future())
     manager_instance = WorkerTaskManager()

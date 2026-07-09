@@ -213,23 +213,22 @@ class TaskManager:
     def create_task(
         self,
         request: BaseAnalysisRequest | dict[str, Any],
+        *,
+        workspace_id: str,
     ) -> str:
         """Create and store a new pending analysis task.
 
-        The current workspace is resolved automatically from
-        ``workspace_manager`` so callers don't need to pass it.
+        Callers pass the workspace id explicitly so analysis task records never
+        depend on the user's mutable current-workspace selection.
 
         Called by:
-        - `TaskManager` instances owned by backend services, routes, and tests because they need
-          a backend boundary that validates inputs before delegating to workspace or worker
-          state.
+        - Backend tests and compatibility-light helpers that need to seed
+          analysis task records without duplicating task normalization.
 
         Flow: normalize request payloads, update per-user task maps, maintain current-tab
             pointers, and walk parent-child links for cleanup.
         """
-        from ..core.workspace import workspace_manager
 
-        workspace_id = workspace_manager.get_current_workspace_id(self.user_id) or ""
         task_id = str(uuid4())
         normalized_request = self._normalize_request(request)
         task = AnalysisTask(
