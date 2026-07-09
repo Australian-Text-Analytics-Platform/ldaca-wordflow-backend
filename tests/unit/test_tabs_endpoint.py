@@ -8,11 +8,15 @@ maps workspace_id → a tmp_path. The endpoints load/save a JSON sidecar at
 from __future__ import annotations
 
 import json
+import uuid
 from pathlib import Path
 
 import pytest
 from ldaca_wordflow.api.workspaces import tabs as tabs_api
 from ldaca_wordflow.core.exceptions import WorkspaceNotFoundError
+
+WORKSPACE_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
+UNKNOWN_WORKSPACE_ID = uuid.UUID("00000000-0000-0000-0000-000000000002")
 
 
 def _state(payload: dict | None = None) -> tabs_api.WorkspaceTabsState:
@@ -32,7 +36,7 @@ class _FakeManager:
 
 @pytest.fixture
 def fake_workspace(tmp_path, monkeypatch):
-    manager = _FakeManager(workspace_id="ws1", workspace_dir=tmp_path)
+    manager = _FakeManager(workspace_id=str(WORKSPACE_ID), workspace_dir=tmp_path)
     monkeypatch.setattr(tabs_api, "workspace_manager", manager)
     return manager
 
@@ -84,7 +88,7 @@ def _sample_group() -> dict:
 @pytest.mark.asyncio
 async def test_get_returns_default_when_file_missing(fake_workspace):
     result = await tabs_api.get_workspace_tabs(
-        workspace_id="ws1", current_user={"id": "u"}
+        workspace_id=WORKSPACE_ID, current_user={"id": "u"}
     )
     assert result == tabs_api.WorkspaceTabsState()
 
@@ -96,7 +100,7 @@ async def test_get_returns_parsed_contents_when_present(fake_workspace):
         json.dumps(payload), encoding="utf-8"
     )
     result = await tabs_api.get_workspace_tabs(
-        workspace_id="ws1", current_user={"id": "u"}
+        workspace_id=WORKSPACE_ID, current_user={"id": "u"}
     )
     assert result.model_dump() == payload
 
@@ -105,7 +109,7 @@ async def test_get_returns_parsed_contents_when_present(fake_workspace):
 async def test_get_404s_on_unknown_workspace(fake_workspace):
     with pytest.raises(WorkspaceNotFoundError):
         await tabs_api.get_workspace_tabs(
-            workspace_id="does-not-exist", current_user={"id": "u"}
+            workspace_id=UNKNOWN_WORKSPACE_ID, current_user={"id": "u"}
         )
 
 
@@ -115,7 +119,7 @@ async def test_get_swallows_corrupt_json(fake_workspace):
         "{not-valid", encoding="utf-8"
     )
     result = await tabs_api.get_workspace_tabs(
-        workspace_id="ws1", current_user={"id": "u"}
+        workspace_id=WORKSPACE_ID, current_user={"id": "u"}
     )
     assert result == tabs_api.WorkspaceTabsState()
 
@@ -126,7 +130,7 @@ async def test_get_swallows_non_object_json(fake_workspace):
         '["not", "an", "object"]', encoding="utf-8"
     )
     result = await tabs_api.get_workspace_tabs(
-        workspace_id="ws1", current_user={"id": "u"}
+        workspace_id=WORKSPACE_ID, current_user={"id": "u"}
     )
     assert result == tabs_api.WorkspaceTabsState()
 
@@ -135,7 +139,7 @@ async def test_get_swallows_non_object_json(fake_workspace):
 async def test_put_writes_file_and_echoes_payload(fake_workspace):
     payload = _sample_group()
     result = await tabs_api.put_workspace_tabs(
-        workspace_id="ws1", payload=_state(payload), current_user={"id": "u"}
+        workspace_id=WORKSPACE_ID, payload=_state(payload), current_user={"id": "u"}
     )
     assert result.model_dump() == payload
     written = (fake_workspace.workspace_dir / "tabs.json").read_text(encoding="utf-8")
@@ -165,7 +169,9 @@ async def test_put_replaces_existing_contents_not_merges(fake_workspace):
         }
     }
     await tabs_api.put_workspace_tabs(
-        workspace_id="ws1", payload=_state(new_payload), current_user={"id": "u"}
+        workspace_id=WORKSPACE_ID,
+        payload=_state(new_payload),
+        current_user={"id": "u"},
     )
     written = (fake_workspace.workspace_dir / "tabs.json").read_text(encoding="utf-8")
     assert json.loads(written) == new_payload
@@ -175,7 +181,7 @@ async def test_put_replaces_existing_contents_not_merges(fake_workspace):
 async def test_put_404s_on_unknown_workspace(fake_workspace):
     with pytest.raises(WorkspaceNotFoundError):
         await tabs_api.put_workspace_tabs(
-            workspace_id="does-not-exist",
+            workspace_id=UNKNOWN_WORKSPACE_ID,
             payload=_state(),
             current_user={"id": "u"},
         )
@@ -191,10 +197,10 @@ async def test_put_then_get_round_trips_tab_inputs(fake_workspace):
     """
     payload = _sample_group()
     await tabs_api.put_workspace_tabs(
-        workspace_id="ws1", payload=_state(payload), current_user={"id": "u"}
+        workspace_id=WORKSPACE_ID, payload=_state(payload), current_user={"id": "u"}
     )
     result = await tabs_api.get_workspace_tabs(
-        workspace_id="ws1", current_user={"id": "u"}
+        workspace_id=WORKSPACE_ID, current_user={"id": "u"}
     )
     tab = result.groups["concordance"].tabs[0]
     assert [(i.node_id, i.column) for i in tab.inputs] == [("n1", "text"), ("n2", None)]
@@ -238,6 +244,6 @@ async def test_get_defaults_settings_when_absent(fake_workspace):
         json.dumps(legacy), encoding="utf-8"
     )
     result = await tabs_api.get_workspace_tabs(
-        workspace_id="ws1", current_user={"id": "u"}
+        workspace_id=WORKSPACE_ID, current_user={"id": "u"}
     )
     assert result.groups["annotation"].tabs[0].settings == {}

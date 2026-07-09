@@ -177,6 +177,11 @@ def test_workspace_scoped_route_handlers_use_path_workspace_identity() -> None:
             route_path = _workspace_scoped_route(node, prefixes)
             if route_path is None:
                 continue
+            if "{workspace_id:uuid}" not in route_path:
+                offenders.append(
+                    f"{path.relative_to(WORKSPACES_API_DIR)}:{node.name} "
+                    f"does not constrain workspace_id as a UUID for {route_path}"
+                )
             arg_names = {arg.arg for arg in node.args.args}
             if "workspace_id" not in arg_names:
                 offenders.append(

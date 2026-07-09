@@ -13,11 +13,11 @@ still live on the referenced ``AnalysisTask.request``.
 
 Endpoints:
 
-    GET  /workspaces/{workspace_id}/tabs
+    GET  /workspaces/{workspace_id:uuid}/tabs
         Returns the parsed tab state, or an empty ``{"groups": {}}`` default
         when the file doesn't exist yet. 404 on unknown workspace.
 
-    PUT  /workspaces/{workspace_id}/tabs
+    PUT  /workspaces/{workspace_id:uuid}/tabs
         Replaces the file contents with the request body.
 
 Why PUT (not PATCH): the frontend tab store maintains the canonical tab
@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends
@@ -116,8 +117,8 @@ class AnalysisTabGroup(BaseModel):
 class WorkspaceTabsState(BaseModel):
     """Full per-workspace analysis-tab state.
 
-    API schema round-tripped by the GET/PUT ``/{workspace_id}/tabs`` routes and
-    the frontend tab store. ``groups`` is keyed by analysis type.
+    API schema round-tripped by the GET/PUT ``/{workspace_id:uuid}/tabs`` routes
+    and the frontend tab store. ``groups`` is keyed by analysis type.
 
     Used by:
     - backend API routes, generated frontend client, and backend tests.
@@ -138,9 +139,9 @@ def _tabs_path_for(user_id: str, workspace_id: str) -> Path:
     return Path(workspace_dir) / _TABS_FILENAME
 
 
-@router.get("/{workspace_id}/tabs")
+@router.get("/{workspace_id:uuid}/tabs")
 async def get_workspace_tabs(
-    workspace_id: str,
+    workspace_id: uuid.UUID,
     current_user: dict = Depends(get_current_user),
 ) -> WorkspaceTabsState:
     """Return the persisted analysis-tab state for a workspace.
@@ -149,7 +150,8 @@ async def get_workspace_tabs(
     task ids) after a reload. Returns the empty default when no sidecar exists.
     """
     user_id = current_user["id"]
-    path = _tabs_path_for(user_id, workspace_id)
+    workspace_id_str = str(workspace_id)
+    path = _tabs_path_for(user_id, workspace_id_str)
     if not path.exists():
         return WorkspaceTabsState()
     try:
@@ -158,22 +160,22 @@ async def get_workspace_tabs(
     except (OSError, json.JSONDecodeError) as exc:
         logger.warning(
             "Failed to read tabs.json for workspace %s: %s — returning default state",
-            workspace_id,
+            workspace_id_str,
             exc,
         )
         return WorkspaceTabsState()
     if not isinstance(data, dict):
         logger.warning(
             "tabs.json for workspace %s was not a JSON object — returning default state",
-            workspace_id,
+            workspace_id_str,
         )
         return WorkspaceTabsState()
     return WorkspaceTabsState.model_validate(data)
 
 
-@router.put("/{workspace_id}/tabs")
+@router.put("/{workspace_id:uuid}/tabs")
 async def put_workspace_tabs(
-    workspace_id: str,
+    workspace_id: uuid.UUID,
     payload: WorkspaceTabsState,
     current_user: dict = Depends(get_current_user),
 ) -> WorkspaceTabsState:
@@ -184,7 +186,8 @@ async def put_workspace_tabs(
     write the whole tabs.json sidecar on every change.
     """
     user_id = current_user["id"]
-    path = _tabs_path_for(user_id, workspace_id)
+    workspace_id_str = str(workspace_id)
+    path = _tabs_path_for(user_id, workspace_id_str)
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
         with path.open("w", encoding="utf-8") as f:
@@ -192,7 +195,7 @@ async def put_workspace_tabs(
     except OSError as exc:
         logger.error(
             "Failed to write tabs.json for workspace %s: %s",
-            workspace_id,
+            workspace_id_str,
             exc,
         )
         raise InternalServiceError("Failed to persist tab state") from exc
