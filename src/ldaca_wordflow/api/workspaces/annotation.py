@@ -19,8 +19,8 @@ import polars as pl
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict, Field
 
-from ...core.annotation_ai import AnnotationAiError, InferenceConfig, list_models
-from ...core.annotation_preview_store import preview_store, signature_of
+from ...core.annotation_ai import AnnotationAiError, list_models
+from ...core.annotation_preview_store import preview_store
 from ...core.auth import get_current_user
 from ...core.exceptions import BadGatewayError, InvalidInputError, NotFoundError
 from ...models.workspace import WorkspaceNodeInfo
@@ -28,6 +28,7 @@ from .annotation_ai_workflows import (
     annotate_all_annotation_ai_rows,
     detach_previewed_annotation_ai_rows,
     preview_annotation_ai_page,
+    read_annotation_ai_preview_state,
 )
 from .schema_filter import frontend_node_info
 from .utils import (
@@ -106,9 +107,7 @@ def _validate_class_description_columns(
     if class_column == description_column:
         raise InvalidInputError("Class and description columns must be different")
     missing = [
-        column
-        for column in (class_column, description_column)
-        if column not in schema
+        column for column in (class_column, description_column) if column not in schema
     ]
     if missing:
         raise InvalidInputError(f"Column not found: {', '.join(missing)}")
@@ -139,10 +138,7 @@ def _class_description_payload_from_node(
             ]
         ).collect(),
     )
-    rows = [
-        AnnotationClassDescriptionRow.model_validate(row)
-        for row in df.to_dicts()
-    ]
+    rows = [AnnotationClassDescriptionRow.model_validate(row) for row in df.to_dicts()]
     return AnnotationClassDescriptionsPayload(
         class_column=class_column,
         description_column=description_column,
@@ -204,7 +200,9 @@ async def create_annotation_class_descriptions(
         {node.name for node in workspace.nodes.values()}
     )
     data = pl.DataFrame(schema={"class": pl.String, "description": pl.String})
-    lazy_data = stage_dataframe_as_lazy(data, workspace.ws_root_dir, node_name=node_name)
+    lazy_data = stage_dataframe_as_lazy(
+        data, workspace.ws_root_dir, node_name=node_name
+    )
     node = Node(
         data=lazy_data,
         name=node_name,
@@ -450,7 +448,9 @@ async def update_annotation_class_descriptions(
         payload.description_column,
     )
     updated = _updated_class_description_frame(existing, payload)
-    node.data = stage_dataframe_as_lazy(updated, workspace.ws_root_dir, node_name=node.name)
+    node.data = stage_dataframe_as_lazy(
+        updated, workspace.ws_root_dir, node_name=node.name
+    )
     update_workspace(user_id, workspace_id_str, workspace)
     return _class_description_payload_from_node(
         node,
@@ -503,7 +503,7 @@ class AnnotationAiPreviewRequest(BaseModel):
     # preview session as metadata so detach/annotate-all know where the reused
     # labels belong; it is not part of the cache signature (the model's label for a
     # given text does not depend on the write target).
-    annotation_column: str = ""
+    annotation_column: str
     # Sampling/reasoning knobs from the "Model Configuration" section; defaults
     # reproduce the prior behaviour (deterministic sampling, no reasoning).
     temperature: float = 0.0
@@ -540,6 +540,10 @@ class AnnotationAiPreviewStateQuery(BaseModel):
     base_url: str | None = None
     model: str
     instruction: str
+    # The write target is excluded from the prediction hash but is part of exact
+    # session identity. Hydration for another target must not return this session's
+    # overrides or id.
+    annotation_column: str
     temperature: float = 0.0
     reasoning_enabled: bool = False
     reasoning_effort: str = "medium"
@@ -556,28 +560,31 @@ class AnnotationAiPreviewRowState(BaseModel):
 
 
 class AnnotationAiPreviewStateResponse(BaseModel):
-    """Every stored row for the requested session (empty when config changed)."""
+    """Matching session identity and rows, or null metadata when none matches."""
 
+    session_id: str | None
+    annotation_column: str | None
     rows: list[AnnotationAiPreviewRowState] = Field(default_factory=list)
 
 
 class AnnotationAiPreviewOverrideRequest(BaseModel):
-    """One manual cell edit to persist onto the node's current preview session.
+    """One manual cell edit to persist onto an exact preview generation.
 
     Used by:
     - Frontend AnnotationAiPreviewPanel when the user changes a prediction in the
       dropdown, so the choice survives a tab switch and is honoured by
-      detach/annotate-all. Only the new label is needed in the body because the
-      session node and row index are resource identifiers in the URL.
+      detach/annotate-all. The opaque session id prevents a delayed edit from an
+      old panel generation from attaching to a newer session for the same node.
       A blank/whitespace ``label`` means the user picked "None" and is stored as an
       explicit null override (which still wins over the model's label).
     """
 
+    session_id: str
     label: str | None = None
 
 
 class AnnotationAiPreviewOverrideResponse(BaseModel):
-    """Whether the edit was applied (False when no active session exists)."""
+    """Acknowledgement that the edit was applied to the expected generation."""
 
     ok: bool = True
 
@@ -586,6 +593,12 @@ class AnnotationAiPreviewClearResponse(BaseModel):
     """Acknowledgement that the node's preview session was cleared."""
 
     ok: bool = True
+
+
+class AnnotationAiPreviewSessionQuery(BaseModel):
+    """Opaque generation reference required when explicitly closing a preview."""
+
+    session_id: str
 
 
 class AnnotationAiAnnotateAllRequest(BaseModel):
@@ -597,6 +610,7 @@ class AnnotationAiAnnotateAllRequest(BaseModel):
       results back in one go, unlike the transient per-page preview.
     """
 
+    session_id: str
     text_column: str
     annotation_column: str
     class_node_id: str
@@ -639,6 +653,7 @@ class AnnotationAiDetachRequest(BaseModel):
       confirmation dialog can show the exact count.
     """
 
+    session_id: str
     annotation_column: str
     new_node_name: str | None = None
     dry_run: bool = False
@@ -676,7 +691,9 @@ async def list_annotation_ai_models(
     """
     require_workspace(current_user["id"], str(workspace_id))
     try:
-        models = await list_models(payload.provider_id, payload.base_url, payload.api_key)
+        models = await list_models(
+            payload.provider_id, payload.base_url, payload.api_key
+        )
     except AnnotationAiError as error:
         raise BadGatewayError(str(error)) from error
     return AnnotationAiModelsResponse(models=models)
@@ -740,38 +757,23 @@ async def annotate_ai_preview_state(
     Flow:
     - Resolve the workspace + source node (404).
     - Recompute the config signature and ask the store for its rows; if the stored
-      session belongs to a different config the store returns nothing, so the panel
-      shows an empty preview and re-classifies on demand rather than displaying
-      stale labels.
+      session belongs to a different config or target column the store returns null
+      metadata and no rows, so the panel re-classifies on demand rather than
+      displaying stale labels.
     """
     user_id = current_user["id"]
     workspace_id_str = str(workspace_id)
     workspace = require_workspace(user_id, workspace_id_str)
-    node = workspace.nodes.get(node_id)
-    if node is None:
-        raise NotFoundError("Source node not found")
-    config = InferenceConfig.from_request(
-        temperature=query.temperature,
-        reasoning_enabled=query.reasoning_enabled,
-        reasoning_effort=query.reasoning_effort,
-    )
-    signature = signature_of(
-        text_column=query.text_column,
-        class_node_id=query.class_node_id,
-        class_column=query.class_column,
-        description_column=query.description_column,
-        provider_id=query.provider_id,
-        base_url=query.base_url,
-        model=query.model,
-        instruction=query.instruction,
-        temperature=config.temperature,
-        reasoning_enabled=config.reasoning_enabled,
-        reasoning_effort=config.reasoning_effort,
-    )
-    rows = preview_store.state(
-        user_id, workspace_id_str, node_id, signature=signature
+    state = read_annotation_ai_preview_state(
+        user_id=user_id,
+        workspace_id=workspace_id_str,
+        workspace=workspace,
+        node_id=node_id,
+        payload=query,
     )
     return AnnotationAiPreviewStateResponse(
+        session_id=state.session_id if state is not None else None,
+        annotation_column=state.annotation_column if state is not None else None,
         rows=[
             AnnotationAiPreviewRowState(
                 row_index=row.row_index,
@@ -780,8 +782,8 @@ async def annotate_ai_preview_state(
                 has_override=row.has_override,
                 effective=row.effective,
             )
-            for row in rows
-        ]
+            for row in (state.rows if state is not None else [])
+        ],
     )
 
 
@@ -796,7 +798,7 @@ async def annotate_ai_preview_override(
     payload: AnnotationAiPreviewOverrideRequest,
     current_user: dict = Depends(get_current_user),
 ):
-    """Persist one manual cell edit onto the node's active preview session.
+    """Persist one manual cell edit onto an exact preview generation.
 
     Used by:
     - Frontend AnnotationAiPreviewPanel when the user changes a prediction in the
@@ -807,8 +809,8 @@ async def annotate_ai_preview_override(
 
     Flow:
     - Resolve the workspace + source node (404).
-    - Write the override to the current session; ``ok=False`` when there is no active
-      session (the edit is stale — an override can only follow a preview).
+    - Write the override only when the opaque id is still current and the row has a
+      computed model result. A stale id is 409; an arbitrary unpreviewed row is 400.
     """
     user_id = current_user["id"]
     workspace_id_str = str(workspace_id)
@@ -817,10 +819,15 @@ async def annotate_ai_preview_override(
     if node is None:
         raise NotFoundError("Source node not found")
     label = (payload.label or "").strip() or None
-    applied = preview_store.set_override(
-        user_id, workspace_id_str, node_id, row_index, label
+    preview_store.set_override(
+        user_id,
+        workspace_id_str,
+        node_id,
+        payload.session_id,
+        row_index,
+        label,
     )
-    return AnnotationAiPreviewOverrideResponse(ok=applied)
+    return AnnotationAiPreviewOverrideResponse(ok=True)
 
 
 @router.delete(
@@ -830,6 +837,7 @@ async def annotate_ai_preview_override(
 async def annotate_ai_preview_clear(
     workspace_id: uuid.UUID,
     node_id: str,
+    query: Annotated[AnnotationAiPreviewSessionQuery, Depends()],
     current_user: dict = Depends(get_current_user),
 ):
     """Discard the node's cached AI preview session.
@@ -843,14 +851,14 @@ async def annotate_ai_preview_clear(
 
     Flow:
     - Resolve the path workspace (the store is keyed per user+workspace+node).
-    - Clear the node's session unconditionally. Clearing is idempotent, so a missing
-      session (nothing previewed, or already cleared) is a successful no-op; the node
-      itself is not required to still exist, which is why no 404 is raised here.
+    - Clear only the opaque generation named by the caller. A missing or superseded
+      id is a 409 conflict, so a delayed close can never delete a new preview. The
+      node itself is not required to still exist, which is why no 404 is raised.
     """
     user_id = current_user["id"]
     workspace_id_str = str(workspace_id)
     require_workspace(user_id, workspace_id_str)
-    preview_store.clear(user_id, workspace_id_str, node_id)
+    preview_store.clear(user_id, workspace_id_str, node_id, query.session_id)
     return AnnotationAiPreviewClearResponse(ok=True)
 
 

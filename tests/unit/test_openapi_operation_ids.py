@@ -188,25 +188,75 @@ def test_openapi_excludes_current_workspace_node_and_analysis_routes() -> None:
 
 
 def test_openapi_uses_annotation_ai_preview_session_resources() -> None:
-    """AI preview lifecycle should be modeled as a preview-session resource."""
-    paths = app.openapi()["paths"]
+    """AI preview lifecycle exposes one concrete, generation-safe SDK contract."""
+    spec = app.openapi()
+    paths = spec["paths"]
+    schemas = spec["components"]["schemas"]
 
-    assert "post" in paths["/api/workspaces/{workspace_id}/annotation-ai-preview-sessions"]
-    assert "get" in paths[
+    assert (
+        "post" in paths["/api/workspaces/{workspace_id}/annotation-ai-preview-sessions"]
+    )
+    assert (
+        "get"
+        in paths[
+            "/api/workspaces/{workspace_id}/annotation-ai-preview-sessions/{node_id}"
+        ]
+    )
+    assert (
+        "delete"
+        in paths[
+            "/api/workspaces/{workspace_id}/annotation-ai-preview-sessions/{node_id}"
+        ]
+    )
+    assert (
+        "patch"
+        in paths[
+            "/api/workspaces/{workspace_id}/annotation-ai-preview-sessions/{node_id}/rows/{row_index}"
+        ]
+    )
+    assert (
+        "post"
+        in paths[
+            "/api/workspaces/{workspace_id}/annotation-ai-preview-sessions/{node_id}/annotations"
+        ]
+    )
+    assert (
+        "post"
+        in paths[
+            "/api/workspaces/{workspace_id}/annotation-ai-preview-sessions/{node_id}/detachments"
+        ]
+    )
+
+    preview_response = schemas["AnnotationAiPreviewResponse"]
+    assert "session_id" in preview_response["required"]
+    state_response = schemas["AnnotationAiPreviewStateResponse"]
+    assert {"session_id", "annotation_column", "rows"} <= set(
+        state_response["properties"]
+    )
+    assert {"session_id", "annotation_column"} <= set(state_response["required"])
+
+    session_path = paths[
         "/api/workspaces/{workspace_id}/annotation-ai-preview-sessions/{node_id}"
     ]
-    assert "delete" in paths[
-        "/api/workspaces/{workspace_id}/annotation-ai-preview-sessions/{node_id}"
-    ]
-    assert "patch" in paths[
-        "/api/workspaces/{workspace_id}/annotation-ai-preview-sessions/{node_id}/rows/{row_index}"
-    ]
-    assert "post" in paths[
-        "/api/workspaces/{workspace_id}/annotation-ai-preview-sessions/{node_id}/annotations"
-    ]
-    assert "post" in paths[
-        "/api/workspaces/{workspace_id}/annotation-ai-preview-sessions/{node_id}/detachments"
-    ]
+    get_query = {
+        parameter["name"]: parameter
+        for parameter in session_path["get"]["parameters"]
+        if parameter["in"] == "query"
+    }
+    assert get_query["annotation_column"]["required"] is True
+    delete_query = {
+        parameter["name"]: parameter
+        for parameter in session_path["delete"]["parameters"]
+        if parameter["in"] == "query"
+    }
+    assert delete_query["session_id"]["required"] is True
+
+    for schema_name in [
+        "AnnotationAiPreviewOverrideRequest",
+        "AnnotationAiAnnotateAllRequest",
+        "AnnotationAiDetachRequest",
+    ]:
+        assert "session_id" in schemas[schema_name]["required"]
 
     for legacy_path in [
         "/api/workspaces/{workspace_id}/annotation/ai/preview",
@@ -256,8 +306,12 @@ def test_openapi_uses_shared_analysis_task_read_routes() -> None:
 
     assert "/api/workspaces/{workspace_id}/analysis-tasks/{task_id}/request" in paths
     assert "/api/workspaces/{workspace_id}/analysis-tasks/{task_id}/result" in paths
-    assert "/api/workspaces/{workspace_id}/analysis-tasks/{task_id}/result-query" in paths
-    assert "/api/workspaces/{workspace_id}/analysis-tasks/{task_id}/preferences" in paths
+    assert (
+        "/api/workspaces/{workspace_id}/analysis-tasks/{task_id}/result-query" in paths
+    )
+    assert (
+        "/api/workspaces/{workspace_id}/analysis-tasks/{task_id}/preferences" in paths
+    )
     assert "delete" not in paths["/api/workspaces/{workspace_id}/token-frequencies"]
 
     legacy_read_paths = [
@@ -290,14 +344,25 @@ def test_openapi_uses_shared_analysis_task_detachment_routes() -> None:
 
     paths = app.openapi()["paths"]
 
-    assert "/api/workspaces/{workspace_id}/analysis-tasks/{task_id}/detach-options" in paths
-    assert "/api/workspaces/{workspace_id}/analysis-tasks/{task_id}/detachments" in paths
-    assert "/api/workspaces/{workspace_id}/analysis-tasks/{task_id}/dispersion-bins" in paths
+    assert (
+        "/api/workspaces/{workspace_id}/analysis-tasks/{task_id}/detach-options"
+        in paths
+    )
+    assert (
+        "/api/workspaces/{workspace_id}/analysis-tasks/{task_id}/detachments" in paths
+    )
+    assert (
+        "/api/workspaces/{workspace_id}/analysis-tasks/{task_id}/dispersion-bins"
+        in paths
+    )
     assert (
         "/api/workspaces/{workspace_id}/analysis-tasks/{task_id}/dispersion-detachments"
         in paths
     )
-    assert "/api/workspaces/{workspace_id}/analysis-tasks/{task_id}/materializations" in paths
+    assert (
+        "/api/workspaces/{workspace_id}/analysis-tasks/{task_id}/materializations"
+        in paths
+    )
 
     legacy_detach_paths = {
         "/api/workspaces/{workspace_id}/concordance/tasks/{task_id}/bins": "get",

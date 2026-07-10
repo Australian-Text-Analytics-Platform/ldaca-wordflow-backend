@@ -180,13 +180,21 @@ The analysis routes live under `api/workspaces/analyses/`.
   reasoning off the engine simply forwards the temperature and no thinking config.
   Preview labels are **cached and persisted** in an in-memory preview store
   (`core/annotation_preview_store.py`, a module-level singleton keyed by
-  user + workspace + node, guarded by a lock). Each node's session records its
-  previewed rows under a *signature* — a stable hash of the prediction-affecting
-  config only (text column, class node/columns, provider, base URL, model,
-  instruction, temperature, and the reasoning knobs; **not** the annotation column
-  or page) — so a signature change resets that node's rows. The store is
-  process-lifetime: it survives across requests and tab switches but is cleared on
-  backend restart. `/models` enumerates a
+  user + workspace + node, guarded by a lock). Each node owns one current
+  generation with an opaque `session_id`, a prediction signature, an exact target
+  annotation column, and its previewed/model-overridden rows. The signature hashes
+  an order-sensitive fingerprint of the source text values, text column, class
+  node/columns and current class content, provider, base URL, model, instruction,
+  temperature, and reasoning knobs; the target column is a
+  separate identity component and page is not identity. A signature or target
+  change installs a fresh empty generation. Every read/write after preview sync
+  presents the expected id, so a late provider response, override, clear, detach,
+  or annotate-all call cannot affect a replacement generation. Missing or
+  superseded ids raise `annotation_preview_session_conflict` (409); a generation
+  sealed by materialization raises `annotation_preview_session_busy` (409), which
+  is distinct because a failed owner can release the same generation for retry.
+  The store is process-lifetime: it survives requests and tab switches but is
+  cleared on backend restart. `/models` enumerates a
   provider's model ids (sorted, de-duplicated). Custom endpoints are listed the
   same way — through the OpenAI SDK's `/models` route against their base URL, since
   many local servers (Apple `fm serve`, Ollama, LM Studio, vLLM) expose it — except
@@ -195,30 +203,28 @@ The analysis routes live under `api/workspaces/analyses/`.
   a 502 while the picker's free-text entry still works. `/preview`
   classifies one page of the source node but first serves any rows already stored
   under the current signature and calls the provider (`annotate_batch`) only for
-  the uncached rows, then persists the new labels and returns `{"labels":[...]}`
-  for the page. `/preview/state` returns the whole stored session for that
-  signature (`{ai, override, effective, has_override}` per row) so the frontend can
-  rehydrate the preview panel on remount, and `/preview/override` persists a single
-  cell edit (`row_index`, nullable `label`) so manual overrides survive a tab
-  switch. `/preview/clear` drops a node's session outright (`{node_id}` →
-  `preview_store.clear`, idempotent — a missing session is a successful no-op, no
-  404). This is the key asymmetry the frontend relies on: a tab switch only unmounts
-  the panel and **keeps** the cache so it can rehydrate, whereas clicking "Close
-  preview" is an explicit "done previewing" that calls `/preview/clear`, so the next
-  Preview re-classifies from scratch and no stale detach/annotate-all count lingers.
-  `/annotate-all` reuses the store's cached labels for already-previewed
-  rows, fans only the remainder out over concurrent batches (`asyncio.gather` under
-  a semaphore, order preserved), overwrites the whole String annotation column,
-  restages via `update_workspace`, and clears the node's preview session.
-  `/detach-previewed` takes no LLM path at all: it reads the node's **entire**
-  preview session from the store (effective label = override ?? AI, across every
+  the uncached rows, then persists the new labels and returns the session id plus
+  page labels. Preview validates that the target exists and is String.
+  `/preview/state` requires the exact target/config and returns nullable session
+  metadata plus `{ai, override, effective, has_override}` rows; it deliberately
+  remains usable after the target is deleted so an orphaned tab can discover its
+  id and close it. `/preview/override` requires the id and only edits a row the
+  provider actually computed. `/preview/clear` requires the id and deletes only
+  that generation. A tab switch keeps the store for hydration; explicit Close
+  clears it, retains busy/network failures for retry, and waits before reopening.
+  `/annotate-all` atomically claims the exact generation and copies its effective
+  rows before provider awaits, reuses cached labels, fans only the remainder out
+  over concurrent batches, overwrites the String annotation column, and consumes
+  the generation after persistence. Failure releases the claim.
+  `/detach-previewed` takes no LLM path: non-dry writes claim the generation,
+  read its immutable effective-row snapshot (override ?? AI, across every
   previewed page — the client no longer sends the rows, which fixes the earlier
   "detach only grabs the current page" bug), copies just those rows into a new
   **child node** (via `_create_and_persist_child_node`) with the labels written
   into the annotation column (blanks → null), and leaves the source untouched.
-  The same route also accepts `dry_run: true`, in which case it returns just
+  then release the claim. The same route accepts `dry_run: true`, returning
   `{node: null, detached_rows: N}` — the session's row count — without touching the
-  workspace or 404-ing on an empty session (it returns `0`). The frontend uses this
+  workspace. The frontend uses this
   probe both to enable the Detach button and to fill the confirmation dialog's row
   count after a tab switch, since the browser has no local copy of the previewed
   set once the panel remounts.

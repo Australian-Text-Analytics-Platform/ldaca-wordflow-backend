@@ -28,21 +28,17 @@ from pydantic import BaseModel, ConfigDict
 from docworkspace import Node
 
 from ....analysis.manager import get_task_manager
-from ....analysis.models import AnalysisStatus, AnalysisTask
+from ....analysis.models import AnalysisStatus
 from ....analysis.results import GenericAnalysisResult
 from ....core.auth import get_current_user
 from ....core.exceptions import (
     InternalServiceError,
     InvalidInputError,
     NotFoundError,
-    ResourceConflictError,
     TaskNotFoundError,
 )
-from ....core.workspace import workspace_manager
 from ....models.sequential_analysis import (
-    SequentialAnalysisDetachResponse,
     SequentialAnalysisPreferenceUpdateRequest,
-    SequentialAnalysisPreferenceUpdateResponse,
     SequentialAnalysisPreviewResponse,
     SequentialAnalysisRequest,
     SequentialAnalysisResponse,
@@ -83,13 +79,16 @@ class SelectedPeriod(BaseModel):
 
 
 class VisibleGroupSelection(BaseModel):
-    """API schema used by routes and generated clients for visible group selection.
+    """One exact chart-series identity selected for sequential detachment.
 
     Used by:
-    - backend API routes because they need this unit's "API schema used by routes and generated clients for visible group selection" behavior.
+    - ``detach_sequential_analysis`` because the chart sends the visible legend
+      groups back to the backend so only those source rows are materialised.
+      ``None`` is a real group value for nullable columns and compiles to
+      ``is_null()`` in ``_build_group_filter_expression``.
     """
 
-    values: dict[str, str | int | float | bool]
+    values: dict[str, str | int | float | bool | None]
 
 
 class SequentialAnalysisDetachRequest(BaseModel):

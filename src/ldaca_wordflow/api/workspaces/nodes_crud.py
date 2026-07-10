@@ -10,13 +10,14 @@ Flow:
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Any, cast
 
 import polars as pl
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends
 from polars_text.models import PREDEFINED_MODELS, predefined_model_records
 
 from ...core.auth import get_current_user
@@ -140,10 +141,14 @@ def _node_data_response(
     - current and explicit workspace node-data routes because table reads should
       share sorting/filtering/pagination semantics regardless of route shape.
 
-    Flow: project visible columns, optionally filter/sort, collect the requested
-        page at the HTTP boundary, and return row data plus table metadata.
+    Flow: project visible columns, hash that page-independent lazy plan as the
+        node-data revision, optionally filter/sort, collect the requested page at
+        the HTTP boundary, and return rows plus table metadata. Consumers use the
+        revision to invalidate row-index workflows when the source plan changes.
     """
     lf = project_visible(workspace.nodes[node_id].data)
+    serialized_plan = lf.serialize(format="binary")
+    revision = hashlib.sha256(serialized_plan).hexdigest()
     schema = {col: str(dtype) for col, dtype in lf.collect_schema().items()}
     columns = list(schema.keys())
 
@@ -174,6 +179,7 @@ def _node_data_response(
 
     return {
         "data": stringify_unsafe_integers(page_df.to_dicts()),
+        "revision": revision,
         "pagination": {
             "page": page,
             "page_size": page_size,

@@ -105,6 +105,28 @@ the tab sidecar maps each `tab_id` to its task id, and request/result endpoints
 must remain addressable by that explicit id even after sibling tabs run. Keep
 `tab_id` out of analysis request/result payloads; it is frontend sidecar state.
 
+Transient annotation AI previews use the same explicit-ownership principle. A
+preview sync returns an opaque `session_id`; state hydration returns that id and
+its exact `annotation_column`; and override, clear, detach, and annotate-all calls
+must present the expected id. The store rejects missing or superseded generations
+with `annotation_preview_session_conflict` (409), including provider completions
+that arrive after the user changes configuration. A current generation already
+claimed by materialization returns `annotation_preview_session_busy` (409);
+clients retain that id and retry explicit cleanup because a failed owner can
+release it. Prediction signatures include an order-sensitive source-text
+fingerprint and normalized class content. They exclude the target column because model output is
+target-independent, but the target is a separate part of session identity:
+changing it creates a fresh empty
+generation and deliberately carries neither model labels nor overrides. State and
+explicit clear remain available for an exact orphaned session after its target
+column is deleted, while new preview, detach, and annotate-all work revalidates
+that the target exists and is String. Materialising actions atomically claim and
+snapshot a generation: annotate-all holds the claim through provider inference
+and consumes it after persistence, while non-dry detach releases it after copying.
+Concurrent page completions, overrides, sync/replacement, clear, or another
+materialisation receive the busy 409 while that claim is active; failure releases
+the generation for retry.
+
 Node/table responses use the shared API models in `core/api_models.py` where
 possible. Column schema entries include both the Polars dtype string and a
 frontend-oriented `js_type`.

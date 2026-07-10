@@ -28,7 +28,11 @@ from ...core.annotation_ai import (
     annotate_batch,
     resolve_provider_wire,
 )
-from ...core.annotation_preview_store import preview_store, signature_of
+from ...core.annotation_preview_store import (
+    PreviewSessionState,
+    preview_store,
+    signature_of,
+)
 from ...core.exceptions import BadGatewayError, InvalidInputError, NotFoundError
 from ...models.workspace import WorkspaceNodeInfo
 from .schema_filter import frontend_node_info
@@ -50,9 +54,7 @@ def _validate_class_description_columns(
     if class_column == description_column:
         raise InvalidInputError("Class and description columns must be different")
     missing = [
-        column
-        for column in (class_column, description_column)
-        if column not in schema
+        column for column in (class_column, description_column) if column not in schema
     ]
     if missing:
         raise InvalidInputError(f"Column not found: {', '.join(missing)}")
@@ -100,8 +102,13 @@ def _annotation_classes_from_node(
     return classes
 
 
-def _annotation_signature(payload: Any, config: InferenceConfig) -> str:
-    """Return the preview-cache signature for one request-shaped payload."""
+def _annotation_signature(
+    payload: Any,
+    config: InferenceConfig,
+    classes: list[AnnotationClassOption],
+    source_revision: str,
+) -> str:
+    """Return the exact prediction signature for one request and class list."""
 
     return signature_of(
         text_column=payload.text_column,
@@ -115,6 +122,96 @@ def _annotation_signature(payload: Any, config: InferenceConfig) -> str:
         temperature=config.temperature,
         reasoning_enabled=config.reasoning_enabled,
         reasoning_effort=config.reasoning_effort,
+        class_options=[(option.name, option.description) for option in classes],
+        source_revision=source_revision,
+    )
+
+
+def _source_text_revision(node: Node, text_column: str) -> str:
+    """Hash the ordered source text values that predictions are attached to.
+
+    Used by: preview, state hydration, and annotate-all signature calculation.
+    Two seeded row hashes include the absolute row index and normalized text,
+    then reduce to a compact order-sensitive fingerprint. Unrelated annotation
+    column edits therefore preserve the session, while a source-text edit or row
+    reorder cannot leave cached labels attached to different texts.
+    """
+
+    if text_column not in node.data.collect_schema():
+        raise InvalidInputError(f"Column not found: {text_column}")
+    indexed = node.data.with_row_index("__annotation_preview_row_index__")
+    row_identity = pl.struct(
+        [
+            pl.col("__annotation_preview_row_index__"),
+            pl.col(text_column).cast(pl.String).fill_null(""),
+        ]
+    )
+    revision = cast(
+        pl.DataFrame,
+        indexed.select(
+            [
+                pl.len().alias("row_count"),
+                row_identity.hash(seed=0).sum().alias("hash_a"),
+                row_identity.hash(seed=1).sum().alias("hash_b"),
+            ]
+        ).collect(),
+    )
+    row_count, hash_a, hash_b = revision.row(0)
+    return f"{row_count}:{hash_a}:{hash_b}"
+
+
+def read_annotation_ai_preview_state(
+    *,
+    user_id: str,
+    workspace_id: str,
+    workspace: Any,
+    node_id: str,
+    payload: Any,
+) -> PreviewSessionState | None:
+    """Read the preview generation matching the current request and class rows.
+
+    Used by:
+    - ``annotation.annotate_ai_preview_state`` so the HTTP route delegates class
+      loading and prediction-identity calculation to the same owner as preview
+      and annotate-all.
+
+    Flow: validate the source and class nodes, load normalized ordered class
+    options, compute the full content-sensitive signature, and return only a
+    store generation whose target and signature both match. The target column is
+    intentionally not revalidated here, allowing a tab whose output column was
+    deleted to recover the opaque id and explicitly clear its orphaned session.
+    """
+
+    node = workspace.nodes.get(node_id)
+    if node is None:
+        raise NotFoundError("Source node not found")
+    class_node = workspace.nodes.get(payload.class_node_id)
+    if class_node is None:
+        raise NotFoundError("Class description node not found")
+    classes = _annotation_classes_from_node(
+        class_node,
+        payload.class_column,
+        payload.description_column,
+    )
+    config = InferenceConfig.from_request(
+        temperature=payload.temperature,
+        reasoning_enabled=payload.reasoning_enabled,
+        reasoning_effort=payload.reasoning_effort,
+    )
+    annotation_column = payload.annotation_column.strip()
+    if not annotation_column:
+        raise InvalidInputError("Annotation column name is required")
+    return preview_store.state(
+        user_id,
+        workspace_id,
+        node_id,
+        signature=_annotation_signature(
+            payload,
+            config,
+            classes,
+            _source_text_revision(node, payload.text_column),
+        ),
+        annotation_column=annotation_column,
     )
 
 
@@ -142,6 +239,13 @@ async def preview_annotation_ai_page(
     schema = dict(node.data.collect_schema().items())
     if payload.text_column not in schema:
         raise InvalidInputError(f"Column not found: {payload.text_column}")
+    annotation_column = payload.annotation_column.strip()
+    if not annotation_column:
+        raise InvalidInputError("Annotation column name is required")
+    if annotation_column not in schema:
+        raise InvalidInputError(f"Column not found: {annotation_column}")
+    if schema[annotation_column] != pl.String:
+        raise InvalidInputError(f"Annotation column must be text: {annotation_column}")
     class_node = workspace.nodes.get(payload.class_node_id)
     if class_node is None:
         raise NotFoundError("Class description node not found")
@@ -167,19 +271,26 @@ async def preview_annotation_ai_page(
         reasoning_enabled=payload.reasoning_enabled,
         reasoning_effort=payload.reasoning_effort,
     )
-    signature = _annotation_signature(payload, config)
-    preview_store.sync(
+    signature = _annotation_signature(
+        payload,
+        config,
+        classes,
+        _source_text_revision(node, payload.text_column),
+    )
+    session_id = preview_store.sync(
         user_id,
         workspace_id,
         payload.node_id,
         signature=signature,
-        annotation_column=payload.annotation_column,
+        annotation_column=annotation_column,
     )
     page_indices = list(range(start_idx, start_idx + len(texts)))
     cached = preview_store.computed_indices(
-        user_id, workspace_id, payload.node_id, page_indices
+        user_id, workspace_id, payload.node_id, session_id, page_indices
     )
-    missing = [(index, text) for index, text in zip(page_indices, texts) if index not in cached]
+    missing = [
+        (index, text) for index, text in zip(page_indices, texts) if index not in cached
+    ]
     if missing:
         try:
             fresh = await annotate_batch(
@@ -197,12 +308,13 @@ async def preview_annotation_ai_page(
             user_id,
             workspace_id,
             payload.node_id,
+            session_id,
             {index: label for (index, _), label in zip(missing, fresh)},
         )
     labels = preview_store.ai_labels_for_page(
-        user_id, workspace_id, payload.node_id, page_indices
+        user_id, workspace_id, payload.node_id, session_id, page_indices
     )
-    return {"session_id": payload.node_id, "labels": labels}
+    return {"session_id": session_id, "labels": labels}
 
 
 async def annotate_all_annotation_ai_rows(
@@ -262,36 +374,64 @@ async def annotate_all_annotation_ai_rows(
         reasoning_enabled=payload.reasoning_enabled,
         reasoning_effort=payload.reasoning_effort,
     )
-    signature = _annotation_signature(payload, config)
-    cached = preview_store.effective_rows(
-        user_id, workspace_id, node_id, signature=signature
+    signature = _annotation_signature(
+        payload,
+        config,
+        classes,
+        _source_text_revision(node, payload.text_column),
     )
-    missing = [(index, text) for index, text in enumerate(texts) if index not in cached]
+    cached = preview_store.claim_effective_rows(
+        user_id,
+        workspace_id,
+        node_id,
+        payload.session_id,
+        signature=signature,
+        annotation_column=annotation_column,
+    )
+    claim_active = True
     try:
-        fresh = await annotate_all(
-            wire,
-            payload.model,
-            payload.api_key,
-            payload.instruction,
-            classes,
-            [text for _, text in missing],
-            batch_size=batch_size,
-            config=config,
-        )
-    except AnnotationAiError as error:
-        raise BadGatewayError(str(error)) from error
+        missing = [
+            (index, text) for index, text in enumerate(texts) if index not in cached
+        ]
+        try:
+            fresh = (
+                await annotate_all(
+                    wire,
+                    payload.model,
+                    payload.api_key,
+                    payload.instruction,
+                    classes,
+                    [text for _, text in missing],
+                    batch_size=batch_size,
+                    config=config,
+                )
+                if missing
+                else []
+            )
+        except AnnotationAiError as error:
+            raise BadGatewayError(str(error)) from error
 
-    fresh_by_index = {index: label for (index, _), label in zip(missing, fresh)}
-    labels = [
-        cached[index] if index in cached else fresh_by_index.get(index)
-        for index in range(len(texts))
-    ]
-    updated = existing.with_columns(
-        pl.Series(annotation_column, labels, dtype=pl.String)
-    )
-    node.data = stage_dataframe_as_lazy(updated, workspace.ws_root_dir, node_name=node.name)
-    update_workspace(user_id, workspace_id, workspace)
-    preview_store.clear(user_id, workspace_id, node_id)
+        fresh_by_index = {index: label for (index, _), label in zip(missing, fresh)}
+        labels = [
+            cached[index] if index in cached else fresh_by_index.get(index)
+            for index in range(len(texts))
+        ]
+        updated = existing.with_columns(
+            pl.Series(annotation_column, labels, dtype=pl.String)
+        )
+        node.data = stage_dataframe_as_lazy(
+            updated, workspace.ws_root_dir, node_name=node.name
+        )
+        update_workspace(user_id, workspace_id, workspace)
+        preview_store.complete_materialization(
+            user_id, workspace_id, node_id, payload.session_id
+        )
+        claim_active = False
+    finally:
+        if claim_active:
+            preview_store.release_materialization(
+                user_id, workspace_id, node_id, payload.session_id
+            )
     labeled_rows = sum(1 for label in labels if label)
     return {
         "node": WorkspaceNodeInfo.model_validate(frontend_node_info(node)),
@@ -320,44 +460,72 @@ def detach_previewed_annotation_ai_rows(
     if node is None:
         raise NotFoundError("Source node not found")
 
-    index_to_label = dict(preview_store.effective_rows(user_id, workspace_id, node_id))
-    if payload.dry_run:
-        return {"node": None, "detached_rows": len(index_to_label)}
-
     annotation_column = payload.annotation_column.strip()
     if not annotation_column:
         raise InvalidInputError("Annotation column name is required")
+    schema = dict(node.data.collect_schema().items())
+    if annotation_column not in schema:
+        raise InvalidInputError(f"Column not found: {annotation_column}")
+    if schema[annotation_column] != pl.String:
+        raise InvalidInputError(f"Annotation column must be text: {annotation_column}")
+    if payload.dry_run:
+        index_to_label = preview_store.effective_rows(
+            user_id,
+            workspace_id,
+            node_id,
+            payload.session_id,
+            signature=None,
+            annotation_column=annotation_column,
+        )
+        return {"node": None, "detached_rows": len(index_to_label)}
 
-    existing = cast(pl.DataFrame, node.data.collect())
-    total_rows = existing.height
-    if not index_to_label:
-        raise InvalidInputError("No previewed rows to detach")
-    for index in index_to_label:
-        if index < 0 or index >= total_rows:
-            raise InvalidInputError(f"Row index out of range: {index}")
+    index_to_label = preview_store.claim_effective_rows(
+        user_id,
+        workspace_id,
+        node_id,
+        payload.session_id,
+        signature=None,
+        annotation_column=annotation_column,
+    )
+    try:
+        existing = cast(pl.DataFrame, node.data.collect())
+        total_rows = existing.height
+        if not index_to_label:
+            raise InvalidInputError("No previewed rows to detach")
+        for index in index_to_label:
+            if index < 0 or index >= total_rows:
+                raise InvalidInputError(f"Row index out of range: {index}")
 
-    sorted_indices = sorted(index_to_label)
-    labels_in_order = [index_to_label[index] for index in sorted_indices]
-    selected = (
-        existing.with_row_index("__detach_row_index__")
-        .filter(pl.col("__detach_row_index__").is_in(sorted_indices))
-        .drop("__detach_row_index__")
-        .with_columns(pl.Series(annotation_column, labels_in_order, dtype=pl.String))
-    )
-    new_node_name = (payload.new_node_name or "").strip() or f"{node.name}_previewed"
-    lazy_data = stage_dataframe_as_lazy(
-        selected, workspace.ws_root_dir, node_name=new_node_name
-    )
-    new_node = _create_and_persist_child_node(
-        workspace=workspace,
-        data=lazy_data,
-        name=new_node_name,
-        operation=f"annotation_detach_previewed({node.name})",
-        parents=[node],
-        user_id=user_id,
-        workspace_id=workspace_id,
-    )
-    return {
-        "node": WorkspaceNodeInfo.model_validate(frontend_node_info(new_node)),
-        "detached_rows": selected.height,
-    }
+        sorted_indices = sorted(index_to_label)
+        labels_in_order = [index_to_label[index] for index in sorted_indices]
+        selected = (
+            existing.with_row_index("__detach_row_index__")
+            .filter(pl.col("__detach_row_index__").is_in(sorted_indices))
+            .drop("__detach_row_index__")
+            .with_columns(
+                pl.Series(annotation_column, labels_in_order, dtype=pl.String)
+            )
+        )
+        new_node_name = (
+            payload.new_node_name or ""
+        ).strip() or f"{node.name}_previewed"
+        lazy_data = stage_dataframe_as_lazy(
+            selected, workspace.ws_root_dir, node_name=new_node_name
+        )
+        new_node = _create_and_persist_child_node(
+            workspace=workspace,
+            data=lazy_data,
+            name=new_node_name,
+            operation=f"annotation_detach_previewed({node.name})",
+            parents=[node],
+            user_id=user_id,
+            workspace_id=workspace_id,
+        )
+        return {
+            "node": WorkspaceNodeInfo.model_validate(frontend_node_info(new_node)),
+            "detached_rows": selected.height,
+        }
+    finally:
+        preview_store.release_materialization(
+            user_id, workspace_id, node_id, payload.session_id
+        )

@@ -32,7 +32,9 @@ class AppError(HTTPException):
 
     status_code: int = 500
 
-    def __init__(self, detail: Any = None, *, headers: dict[str, str] | None = None) -> None:
+    def __init__(
+        self, detail: Any = None, *, headers: dict[str, str] | None = None
+    ) -> None:
         super().__init__(status_code=self.status_code, detail=detail, headers=headers)
 
 
@@ -97,6 +99,29 @@ class NoActiveWorkspaceError(AppError):
 
 class ResourceConflictError(AppError):
     status_code = 409
+
+
+class AnnotationPreviewSessionConflictError(ResourceConflictError):
+    """The caller's annotation preview generation is no longer current.
+
+    Raised by:
+    - ``AnnotationPreviewStore`` whenever a mutating or materialising operation
+      presents a missing or superseded opaque session id. The distinct error
+      code lets the Annotation UI discard stale work instead of presenting an
+      ordinary validation failure or retrying against a newer session.
+    """
+
+
+class AnnotationPreviewSessionBusyError(ResourceConflictError):
+    """The current annotation preview generation is being materialised.
+
+    Raised by:
+    - ``AnnotationPreviewStore`` when preview, override, clear, replacement, or
+      another materialisation attempts to change a claimed generation. Unlike a
+      stale-session conflict, this generation can become current and mutable
+      again if the owner fails and releases its claim, so clients must retain its
+      id and retry explicit cleanup before opening a replacement.
+    """
 
 
 # ── 410 Gone ─────────────────────────────────────────────────────────────────

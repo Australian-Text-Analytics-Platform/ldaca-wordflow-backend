@@ -102,6 +102,10 @@ The workspace node routers own most row/column transformations:
 - column operations,
 - constrained Polars expression preview/apply.
 
+Paginated node-data responses include a page-independent `revision` hash of the
+visible lazy plan. Frontend row-index workflows use it to revalidate transient
+sessions after a node mutation while reusing the same identity across pages.
+
 Node operations should preserve laziness. Collection belongs at API response
 serialization, preview limits, artifact writing, or other explicit I/O
 boundaries.

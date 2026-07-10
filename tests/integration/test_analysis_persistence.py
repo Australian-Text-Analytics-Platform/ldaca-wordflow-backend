@@ -471,13 +471,8 @@ class TestSequentialAnalysisPersistence:
         dummy_workspace = SimpleNamespace(nodes={node_id: dummy_node})
 
         monkeypatch.setattr(
-            sequential_module.workspace_manager,
-            "get_current_workspace_id",
-            lambda *_args, **_kwargs: workspace_id,
-        )
-        monkeypatch.setattr(
-            sequential_module.workspace_manager,
-            "get_current_workspace",
+            sequential_module,
+            "require_workspace",
             lambda *_args, **_kwargs: dummy_workspace,
         )
 
@@ -620,13 +615,8 @@ class TestSequentialAnalysisPersistence:
         )
 
         monkeypatch.setattr(
-            sequential_module.workspace_manager,
-            "get_current_workspace_id",
-            lambda *_args, **_kwargs: workspace_id,
-        )
-        monkeypatch.setattr(
-            sequential_module.workspace_manager,
-            "get_current_workspace",
+            sequential_module,
+            "require_workspace",
             lambda *_args, **_kwargs: dummy_workspace,
         )
 
@@ -671,13 +661,8 @@ class TestSequentialAnalysisPersistence:
         )
 
         monkeypatch.setattr(
-            sequential_module.workspace_manager,
-            "get_current_workspace_id",
-            lambda *_args, **_kwargs: workspace_id,
-        )
-        monkeypatch.setattr(
-            sequential_module.workspace_manager,
-            "get_current_workspace",
+            sequential_module,
+            "require_workspace",
             lambda *_args, **_kwargs: dummy_workspace,
         )
 
@@ -746,13 +731,8 @@ class TestSequentialAnalysisPersistence:
         dummy_workspace = DummyWorkspace()
 
         monkeypatch.setattr(
-            sequential_module.workspace_manager,
-            "get_current_workspace_id",
-            lambda *_args, **_kwargs: workspace_id,
-        )
-        monkeypatch.setattr(
-            sequential_module.workspace_manager,
-            "get_current_workspace",
+            sequential_module,
+            "require_workspace",
             lambda *_args, **_kwargs: dummy_workspace,
         )
         monkeypatch.setattr(
@@ -777,13 +757,8 @@ class TestSequentialAnalysisPersistence:
             monkeypatch,
         )
         monkeypatch.setattr(
-            sequential_module.workspace_manager,
-            "get_current_workspace_id",
-            lambda *_args, **_kwargs: workspace_id,
-        )
-        monkeypatch.setattr(
-            sequential_module.workspace_manager,
-            "get_current_workspace",
+            sequential_module,
+            "require_workspace",
             lambda *_args, **_kwargs: dummy_workspace,
         )
         task_id = result_data.get("metadata", {}).get("task_id")
@@ -833,7 +808,7 @@ class TestSequentialAnalysisPersistence:
                     datetime(2024, 1, 1),
                     datetime(2024, 1, 2),
                 ],
-                "category": ["alpha", "beta", "alpha"],
+                "category": [None, "beta", "alpha"],
                 "value": [1, 2, 3],
             }
         )
@@ -858,13 +833,8 @@ class TestSequentialAnalysisPersistence:
         dummy_workspace = DummyWorkspace()
 
         monkeypatch.setattr(
-            sequential_module.workspace_manager,
-            "get_current_workspace_id",
-            lambda *_args, **_kwargs: workspace_id,
-        )
-        monkeypatch.setattr(
-            sequential_module.workspace_manager,
-            "get_current_workspace",
+            sequential_module,
+            "require_workspace",
             lambda *_args, **_kwargs: dummy_workspace,
         )
         monkeypatch.setattr(
@@ -911,7 +881,7 @@ class TestSequentialAnalysisPersistence:
                 "visible_groups": [
                     {
                         "values": {
-                            "category": "alpha",
+                            "category": None,
                         }
                     }
                 ],
@@ -923,6 +893,8 @@ class TestSequentialAnalysisPersistence:
         assert len(dummy_workspace.added_nodes) == 1
 
         detached_df = dummy_workspace.added_nodes[0].data.collect().sort("value")
+        # The request model accepts null as a real group identity and the route
+        # compiles it to ``category.is_null()`` rather than rejecting the body.
         assert detached_df["value"].to_list() == [1]
 
 

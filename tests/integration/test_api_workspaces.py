@@ -6,7 +6,6 @@ import io
 import json
 import zipfile
 from csv import DictReader
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import polars as pl
@@ -284,6 +283,13 @@ class TestWorkspaceAPI:
         assert "data" in payload and isinstance(payload["data"], list)
         assert len(payload["data"]) > 0
         assert "columns" in payload
+        assert len(payload["revision"]) == 64
+        next_page = await authenticated_client.get(
+            f"/api/workspaces/{workspace_id}/nodes/{tiny_node_id}/data",
+            params={"page": 2, "page_size": 1},
+        )
+        assert next_page.status_code == 200
+        assert next_page.json()["revision"] == payload["revision"]
         # Ensure pagination metadata present
         pagination = payload.get("pagination", {})
         assert pagination.get("page") == 1
@@ -966,7 +972,7 @@ class TestWorkspaceAPI:
             patch(
                 "ldaca_wordflow.api.workspaces.workspace_manager.get_current_workspace"
             ) as mock_current_ws,
-            patch("docworkspace.workspace.core.Workspace.save") as mock_save,
+            patch("docworkspace.workspace.core.Workspace.save"),
         ):
             mock_workspace = Mock()
             mock_workspace.name = "test-workspace"
@@ -1159,7 +1165,7 @@ class TestWorkspaceAPI:
             patch(
                 "ldaca_wordflow.api.workspaces.workspace_manager.get_current_workspace"
             ) as mock_current_ws,
-            patch("docworkspace.workspace.core.Workspace.save") as mock_save,
+            patch("docworkspace.workspace.core.Workspace.save"),
         ):
             mock_workspace = Mock()
             mock_workspace.name = "test-workspace"
@@ -1204,7 +1210,7 @@ class TestWorkspaceAPI:
             patch(
                 "ldaca_wordflow.api.workspaces.workspace_manager.get_current_workspace"
             ) as mock_current_ws,
-            patch("docworkspace.workspace.core.Workspace.save") as mock_save,
+            patch("docworkspace.workspace.core.Workspace.save"),
         ):
             mock_workspace = Mock()
             mock_workspace.name = "test-workspace"
@@ -1237,7 +1243,7 @@ class TestWorkspaceAPI:
             patch(
                 "ldaca_wordflow.api.workspaces.workspace_manager.get_current_workspace"
             ) as mock_current_ws,
-            patch("docworkspace.workspace.core.Workspace.save") as mock_save,
+            patch("docworkspace.workspace.core.Workspace.save"),
         ):
             mock_workspace = Mock()
             mock_workspace.name = "test-workspace"

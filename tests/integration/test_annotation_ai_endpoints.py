@@ -9,10 +9,14 @@ translation **without any network traffic** — the engine's own SDK dispatch is
 verified separately by its unit probes.
 """
 
+import asyncio
+
 import polars as pl
 
 from ldaca_wordflow.api.workspaces import annotation as annotation_module
-from ldaca_wordflow.api.workspaces import annotation_ai_workflows as annotation_workflows
+from ldaca_wordflow.api.workspaces import (
+    annotation_ai_workflows as annotation_workflows,
+)
 from ldaca_wordflow.core.annotation_ai import AnnotationAiError, InferenceConfig
 from ldaca_wordflow.core.workspace import workspace_manager
 
@@ -31,12 +35,52 @@ def _preview_session_path(workspace_id: str, node_id: str, suffix: str = "") -> 
 
 def _preview_state_params(body: dict) -> dict:
     """Convert a preview request body into GET query params for session state."""
-    return {key: value for key, value in body.items() if key != "node_id" and value is not None}
+    return {
+        key: value
+        for key, value in body.items()
+        if key != "node_id" and value is not None
+    }
 
 
 def _without_node_id(body: dict) -> dict:
     """Return a copy of a request body when the node id has moved into the URL."""
     return {key: value for key, value in body.items() if key != "node_id"}
+
+
+def _preview_body(node_id: str, class_id: str, **overrides) -> dict:
+    """Build one complete preview identity for cache/session endpoint tests."""
+
+    body = {
+        "node_id": node_id,
+        "text_column": "document",
+        "annotation_column": "document",
+        "class_node_id": class_id,
+        "provider_id": "openrouter",
+        "model": "some/model",
+        "instruction": "Classify the stance.",
+    }
+    body.update(overrides)
+    return body
+
+
+async def _start_empty_preview_session(
+    authenticated_client,
+    workspace_id: str,
+    node_id: str,
+    class_id: str,
+    **overrides,
+) -> str:
+    """Create a generation without provider work by previewing beyond the table."""
+
+    response = await authenticated_client.post(
+        _preview_sessions_path(workspace_id),
+        json=_preview_body(node_id, class_id, page=999, page_size=20, **overrides),
+    )
+    assert response.status_code == 200
+    session_id = response.json()["session_id"]
+    assert isinstance(session_id, str)
+    assert session_id != node_id
+    return session_id
 
 
 async def _make_class_node(authenticated_client, workspace_id: str) -> str:
@@ -104,7 +148,9 @@ async def test_annotate_ai_preview_returns_labels_for_page(
     class_id = await _make_class_node(authenticated_client, workspace_id)
     captured: dict[str, object] = {}
 
-    async def fake_annotate_batch(wire, model, api_key, instruction, classes, texts, config=None):
+    async def fake_annotate_batch(
+        wire, model, api_key, instruction, classes, texts, config=None
+    ):
         captured["texts"] = list(texts)
         captured["classes"] = [option.name for option in classes]
         captured["instruction"] = instruction
@@ -123,6 +169,7 @@ async def test_annotate_ai_preview_returns_labels_for_page(
             "model": "some/model",
             "api_key": "sk-test",
             "instruction": "Classify the stance.",
+            "annotation_column": "document",
             "page": 1,
             "page_size": 20,
         },
@@ -152,7 +199,9 @@ async def test_annotate_ai_preview_forwards_inference_config(
     class_id = await _make_class_node(authenticated_client, workspace_id)
     captured: dict[str, object] = {}
 
-    async def fake_annotate_batch(wire, model, api_key, instruction, classes, texts, config=None):
+    async def fake_annotate_batch(
+        wire, model, api_key, instruction, classes, texts, config=None
+    ):
         captured["config"] = config
         return [None for _ in texts]
 
@@ -167,6 +216,7 @@ async def test_annotate_ai_preview_forwards_inference_config(
             "provider_id": "openrouter",
             "model": "some/model",
             "instruction": "x",
+            "annotation_column": "document",
             "temperature": 0.7,
             "reasoning_enabled": True,
             "reasoning_effort": "high",
@@ -186,7 +236,9 @@ async def test_annotate_ai_preview_clamps_and_normalizes_inference_config(
     class_id = await _make_class_node(authenticated_client, workspace_id)
     captured: dict[str, object] = {}
 
-    async def fake_annotate_batch(wire, model, api_key, instruction, classes, texts, config=None):
+    async def fake_annotate_batch(
+        wire, model, api_key, instruction, classes, texts, config=None
+    ):
         captured["config"] = config
         return [None for _ in texts]
 
@@ -201,6 +253,7 @@ async def test_annotate_ai_preview_clamps_and_normalizes_inference_config(
             "provider_id": "openrouter",
             "model": "some/model",
             "instruction": "x",
+            "annotation_column": "document",
             # Out-of-range temperature is clamped; an unknown effort falls back.
             "temperature": 9.0,
             "reasoning_enabled": True,
@@ -220,7 +273,9 @@ async def test_annotate_ai_preview_slices_requested_page(
     class_id = await _make_class_node(authenticated_client, workspace_id)
     captured: dict[str, object] = {}
 
-    async def fake_annotate_batch(wire, model, api_key, instruction, classes, texts, config=None):
+    async def fake_annotate_batch(
+        wire, model, api_key, instruction, classes, texts, config=None
+    ):
         captured["texts"] = list(texts)
         return [None for _ in texts]
 
@@ -235,6 +290,7 @@ async def test_annotate_ai_preview_slices_requested_page(
             "provider_id": "openrouter",
             "model": "some/model",
             "instruction": "x",
+            "annotation_column": "document",
             "page": 2,
             "page_size": 2,
         },
@@ -253,7 +309,9 @@ async def test_annotate_ai_preview_does_not_mutate_source(
 ):
     class_id = await _make_class_node(authenticated_client, workspace_id)
 
-    async def fake_annotate_batch(wire, model, api_key, instruction, classes, texts, config=None):
+    async def fake_annotate_batch(
+        wire, model, api_key, instruction, classes, texts, config=None
+    ):
         return ["support" for _ in texts]
 
     monkeypatch.setattr(annotation_workflows, "annotate_batch", fake_annotate_batch)
@@ -267,6 +325,7 @@ async def test_annotate_ai_preview_does_not_mutate_source(
             "provider_id": "openrouter",
             "model": "some/model",
             "instruction": "x",
+            "annotation_column": "document",
         },
     )
 
@@ -289,6 +348,7 @@ async def test_annotate_ai_preview_missing_text_column_returns_400(
             "provider_id": "openrouter",
             "model": "some/model",
             "instruction": "x",
+            "annotation_column": "document",
         },
     )
     assert response.status_code == 400
@@ -307,6 +367,7 @@ async def test_annotate_ai_preview_missing_node_returns_404(
             "provider_id": "openrouter",
             "model": "some/model",
             "instruction": "x",
+            "annotation_column": "document",
         },
     )
     assert response.status_code == 404
@@ -328,6 +389,7 @@ async def test_annotate_ai_preview_no_classes_returns_400(
             "provider_id": "openrouter",
             "model": "some/model",
             "instruction": "x",
+            "annotation_column": "document",
         },
     )
     assert response.status_code == 400
@@ -352,6 +414,7 @@ async def test_annotate_ai_preview_provider_error_returns_502(
             "provider_id": "openrouter",
             "model": "some/model",
             "instruction": "x",
+            "annotation_column": "document",
         },
     )
     assert response.status_code == 502
@@ -397,9 +460,22 @@ async def test_annotate_ai_annotate_all_writes_column(
 
     monkeypatch.setattr(annotation_workflows, "annotate_all", fake_annotate_all)
 
+    session_id = await _start_empty_preview_session(
+        authenticated_client,
+        workspace_id,
+        sample_node_id,
+        class_id,
+        annotation_column="annotation",
+        instruction="x",
+        temperature=0.3,
+        reasoning_enabled=True,
+        reasoning_effort="low",
+    )
+
     response = await authenticated_client.post(
         _preview_session_path(workspace_id, sample_node_id, "/annotations"),
         json={
+            "session_id": session_id,
             "text_column": "document",
             "annotation_column": "annotation",
             "class_node_id": class_id,
@@ -441,9 +517,18 @@ async def test_annotate_ai_annotate_all_missing_column_returns_400(
 
     monkeypatch.setattr(annotation_workflows, "annotate_all", fake_annotate_all)
 
+    session_id = await _start_empty_preview_session(
+        authenticated_client,
+        workspace_id,
+        sample_node_id,
+        class_id,
+        instruction="x",
+    )
+
     response = await authenticated_client.post(
         _preview_session_path(workspace_id, sample_node_id, "/annotations"),
         json={
+            "session_id": session_id,
             "text_column": "document",
             "annotation_column": "not_there",
             "class_node_id": class_id,
@@ -468,9 +553,19 @@ async def test_annotate_ai_annotate_all_provider_error_leaves_column(
 
     monkeypatch.setattr(annotation_workflows, "annotate_all", fake_annotate_all)
 
+    session_id = await _start_empty_preview_session(
+        authenticated_client,
+        workspace_id,
+        sample_node_id,
+        class_id,
+        annotation_column="annotation",
+        instruction="x",
+    )
+
     response = await authenticated_client.post(
         _preview_session_path(workspace_id, sample_node_id, "/annotations"),
         json={
+            "session_id": session_id,
             "text_column": "document",
             "annotation_column": "annotation",
             "class_node_id": class_id,
@@ -486,6 +581,24 @@ async def test_annotate_ai_annotate_all_provider_error_leaves_column(
     collected = workspace.nodes[sample_node_id].data.collect()
     # Nothing written: the column stays all-null after a provider failure.
     assert collected["annotation"].to_list() == [None, None, None, None]
+    state = await authenticated_client.get(
+        _preview_session_path(workspace_id, sample_node_id),
+        params=_preview_state_params(
+            _preview_body(
+                sample_node_id,
+                class_id,
+                annotation_column="annotation",
+                instruction="x",
+            )
+        ),
+    )
+    assert state.json()["session_id"] == session_id
+    # The failure released the claim, so explicit close can own the session again.
+    cleared = await authenticated_client.delete(
+        _preview_session_path(workspace_id, sample_node_id),
+        params={"session_id": session_id},
+    )
+    assert cleared.status_code == 200
 
 
 async def test_detach_previewed_rows_creates_annotated_child_node(
@@ -497,7 +610,9 @@ async def test_detach_previewed_rows_creates_annotated_child_node(
         authenticated_client, workspace_id, sample_node_id, "annotation"
     )
 
-    async def fake_annotate_batch(wire, model, api_key, instruction, classes, texts, config=None):
+    async def fake_annotate_batch(
+        wire, model, api_key, instruction, classes, texts, config=None
+    ):
         return ["support", None, "critical"][: len(texts)]
 
     monkeypatch.setattr(annotation_workflows, "annotate_batch", fake_annotate_batch)
@@ -505,20 +620,39 @@ async def test_detach_previewed_rows_creates_annotated_child_node(
     preview = await authenticated_client.post(
         _preview_sessions_path(workspace_id),
         json=_preview_body(
-            sample_node_id, class_id, annotation_column="annotation", page=1, page_size=3
+            sample_node_id,
+            class_id,
+            annotation_column="annotation",
+            page=1,
+            page_size=3,
         ),
     )
     assert preview.status_code == 200
 
     response = await authenticated_client.post(
         _preview_session_path(workspace_id, sample_node_id, "/detachments"),
-        json={"annotation_column": "annotation"},
+        json={
+            "session_id": preview.json()["session_id"],
+            "annotation_column": "annotation",
+        },
     )
     assert response.status_code == 200
     payload = response.json()
     assert payload["detached_rows"] == 3
     new_id = payload["node"]["id"]
     assert new_id != sample_node_id
+    # Detach copies rather than consumes the preview; its claim is released after
+    # the child is persisted so another read-only probe can use the same session.
+    probe = await authenticated_client.post(
+        _preview_session_path(workspace_id, sample_node_id, "/detachments"),
+        json={
+            "session_id": preview.json()["session_id"],
+            "annotation_column": "annotation",
+            "dry_run": True,
+        },
+    )
+    assert probe.status_code == 200
+    assert probe.json()["detached_rows"] == 3
 
     workspace = workspace_manager.get_current_workspace(test_user["id"])
     assert workspace is not None
@@ -543,9 +677,20 @@ async def test_detach_previewed_rows_creates_annotated_child_node(
 async def test_detach_previewed_rows_empty_returns_400(
     authenticated_client, workspace_id, sample_node_id
 ):
+    class_id = await _make_class_node(authenticated_client, workspace_id)
+    await _add_annotation_column(
+        authenticated_client, workspace_id, sample_node_id, "annotation"
+    )
+    session_id = await _start_empty_preview_session(
+        authenticated_client,
+        workspace_id,
+        sample_node_id,
+        class_id,
+        annotation_column="annotation",
+    )
     response = await authenticated_client.post(
         _preview_session_path(workspace_id, sample_node_id, "/detachments"),
-        json={"annotation_column": "annotation"},
+        json={"session_id": session_id, "annotation_column": "annotation"},
     )
     assert response.status_code == 400
 
@@ -555,29 +700,9 @@ async def test_detach_previewed_rows_missing_node_returns_404(
 ):
     response = await authenticated_client.post(
         _preview_session_path(workspace_id, "does-not-exist", "/detachments"),
-        json={"annotation_column": "annotation"},
+        json={"session_id": "irrelevant", "annotation_column": "annotation"},
     )
     assert response.status_code == 404
-
-
-def _preview_body(node_id: str, class_id: str, **overrides) -> dict:
-    """Build a minimal AI-preview request body for the cache tests.
-
-    Called by the caching/hydration tests below so preview, state, annotate-all,
-    and detach all send the *same* prediction-affecting config — otherwise their
-    signatures would differ and the server would (correctly) refuse to reuse the
-    cache, defeating the very behaviour under test.
-    """
-    body = {
-        "node_id": node_id,
-        "text_column": "document",
-        "class_node_id": class_id,
-        "provider_id": "openrouter",
-        "model": "some/model",
-        "instruction": "Classify the stance.",
-    }
-    body.update(overrides)
-    return body
 
 
 async def test_annotate_ai_preview_caches_page_and_reuses(
@@ -587,7 +712,9 @@ async def test_annotate_ai_preview_caches_page_and_reuses(
     class_id = await _make_class_node(authenticated_client, workspace_id)
     calls = {"count": 0}
 
-    async def fake_annotate_batch(wire, model, api_key, instruction, classes, texts, config=None):
+    async def fake_annotate_batch(
+        wire, model, api_key, instruction, classes, texts, config=None
+    ):
         calls["count"] += 1
         return [f"L{index}" for index in range(len(texts))]
 
@@ -602,10 +729,105 @@ async def test_annotate_ai_preview_caches_page_and_reuses(
     )
     assert first.status_code == 200
     assert second.status_code == 200
+    assert first.json()["session_id"] == second.json()["session_id"]
+    assert first.json()["session_id"] != sample_node_id
     # Same labels both times, but the provider was hit only for the first call.
     assert first.json()["labels"] == ["L0", "L1", "L2", "L3"]
     assert second.json()["labels"] == ["L0", "L1", "L2", "L3"]
     assert calls["count"] == 1
+
+
+async def test_class_description_edit_starts_fresh_preview_generation(
+    authenticated_client, workspace_id, sample_node_id, monkeypatch
+):
+    """Description-only prompt changes cannot reuse the prior model labels."""
+
+    class_id = await _make_class_node(authenticated_client, workspace_id)
+    calls = {"count": 0}
+
+    async def fake_annotate_batch(
+        wire, model, api_key, instruction, classes, texts, config=None
+    ):
+        calls["count"] += 1
+        label = "support" if calls["count"] == 1 else "critical"
+        return [label for _ in texts]
+
+    monkeypatch.setattr(annotation_workflows, "annotate_batch", fake_annotate_batch)
+    body = _preview_body(sample_node_id, class_id, page=1, page_size=20)
+    first = await authenticated_client.post(
+        _preview_sessions_path(workspace_id), json=body
+    )
+
+    updated = await authenticated_client.put(
+        _annotation_path(workspace_id, f"/class-descriptions/{class_id}"),
+        json={
+            "class_column": "class",
+            "description_column": "description",
+            "rows": [
+                {"class": "support", "description": "Strongly supports the claim"},
+                {"class": "critical", "description": "Strongly rejects the claim"},
+            ],
+        },
+    )
+    assert updated.status_code == 200
+
+    stale_state = await authenticated_client.get(
+        _preview_session_path(workspace_id, sample_node_id),
+        params=_preview_state_params(body),
+    )
+    second = await authenticated_client.post(
+        _preview_sessions_path(workspace_id), json=body
+    )
+
+    assert stale_state.status_code == 200
+    assert stale_state.json()["session_id"] is None
+    assert second.status_code == 200
+    assert second.json()["session_id"] != first.json()["session_id"]
+    assert second.json()["labels"] == ["critical"] * 4
+    assert calls["count"] == 2
+
+
+async def test_source_text_edit_starts_fresh_preview_generation(
+    authenticated_client, workspace_id, sample_node_id, monkeypatch
+):
+    """Row-index labels cannot survive a source-text mutation."""
+
+    class_id = await _make_class_node(authenticated_client, workspace_id)
+    calls = {"count": 0}
+
+    async def fake_annotate_batch(
+        wire, model, api_key, instruction, classes, texts, config=None
+    ):
+        calls["count"] += 1
+        return ["support" for _ in texts]
+
+    monkeypatch.setattr(annotation_workflows, "annotate_batch", fake_annotate_batch)
+    body = _preview_body(sample_node_id, class_id, page=1, page_size=20)
+    first = await authenticated_client.post(
+        _preview_sessions_path(workspace_id), json=body
+    )
+    edited = await authenticated_client.put(
+        _annotation_path(
+            workspace_id,
+            f"/source/{sample_node_id}/annotation-cell",
+        ),
+        json={"column_name": "document", "row_index": 0, "value": "changed text"},
+    )
+    assert edited.status_code == 200
+
+    stale_state = await authenticated_client.get(
+        _preview_session_path(workspace_id, sample_node_id),
+        params=_preview_state_params(body),
+    )
+    second = await authenticated_client.post(
+        _preview_sessions_path(workspace_id), json=body
+    )
+
+    assert stale_state.status_code == 200
+    assert stale_state.json()["session_id"] is None
+    assert second.status_code == 200
+    assert second.json()["session_id"] != first.json()["session_id"]
+    assert calls["count"] == 2
 
 
 async def test_annotate_ai_preview_state_hydrates_stored_rows(
@@ -614,12 +836,14 @@ async def test_annotate_ai_preview_state_hydrates_stored_rows(
     """After a preview, the session resource returns cached rows for rehydration."""
     class_id = await _make_class_node(authenticated_client, workspace_id)
 
-    async def fake_annotate_batch(wire, model, api_key, instruction, classes, texts, config=None):
+    async def fake_annotate_batch(
+        wire, model, api_key, instruction, classes, texts, config=None
+    ):
         return ["support", None, "critical", "support"][: len(texts)]
 
     monkeypatch.setattr(annotation_workflows, "annotate_batch", fake_annotate_batch)
 
-    await authenticated_client.post(
+    preview = await authenticated_client.post(
         _preview_sessions_path(workspace_id),
         json=_preview_body(sample_node_id, class_id, page=1, page_size=20),
     )
@@ -628,12 +852,19 @@ async def test_annotate_ai_preview_state_hydrates_stored_rows(
         params=_preview_state_params(_preview_body(sample_node_id, class_id)),
     )
     assert state.status_code == 200
+    assert state.json()["session_id"] == preview.json()["session_id"]
+    assert state.json()["annotation_column"] == "document"
     rows = state.json()["rows"]
     assert [row["row_index"] for row in rows] == [0, 1, 2, 3]
     assert [row["ai"] for row in rows] == ["support", None, "critical", "support"]
     # Nothing was overridden yet, so effective mirrors the model labels.
     assert all(row["has_override"] is False for row in rows)
-    assert [row["effective"] for row in rows] == ["support", None, "critical", "support"]
+    assert [row["effective"] for row in rows] == [
+        "support",
+        None,
+        "critical",
+        "support",
+    ]
 
 
 async def test_annotate_ai_preview_state_mismatched_config_returns_empty(
@@ -642,7 +873,9 @@ async def test_annotate_ai_preview_state_mismatched_config_returns_empty(
     """State for a different model must not surface labels from another config."""
     class_id = await _make_class_node(authenticated_client, workspace_id)
 
-    async def fake_annotate_batch(wire, model, api_key, instruction, classes, texts, config=None):
+    async def fake_annotate_batch(
+        wire, model, api_key, instruction, classes, texts, config=None
+    ):
         return ["support" for _ in texts]
 
     monkeypatch.setattr(annotation_workflows, "annotate_batch", fake_annotate_batch)
@@ -658,6 +891,8 @@ async def test_annotate_ai_preview_state_mismatched_config_returns_empty(
         ),
     )
     assert state.status_code == 200
+    assert state.json()["session_id"] is None
+    assert state.json()["annotation_column"] is None
     assert state.json()["rows"] == []
 
 
@@ -667,18 +902,20 @@ async def test_annotate_ai_preview_override_persists_and_hydrates(
     """A manual override survives via the store and wins in the state payload."""
     class_id = await _make_class_node(authenticated_client, workspace_id)
 
-    async def fake_annotate_batch(wire, model, api_key, instruction, classes, texts, config=None):
+    async def fake_annotate_batch(
+        wire, model, api_key, instruction, classes, texts, config=None
+    ):
         return ["support" for _ in texts]
 
     monkeypatch.setattr(annotation_workflows, "annotate_batch", fake_annotate_batch)
 
-    await authenticated_client.post(
+    preview = await authenticated_client.post(
         _preview_sessions_path(workspace_id),
         json=_preview_body(sample_node_id, class_id, page=1, page_size=20),
     )
     override = await authenticated_client.patch(
         _preview_session_path(workspace_id, sample_node_id, "/rows/0"),
-        json={"label": "critical"},
+        json={"session_id": preview.json()["session_id"], "label": "critical"},
     )
     assert override.status_code == 200
     assert override.json()["ok"] is True
@@ -695,16 +932,16 @@ async def test_annotate_ai_preview_override_persists_and_hydrates(
     assert row0["effective"] == "critical"
 
 
-async def test_annotate_ai_preview_override_without_session_reports_not_ok(
+async def test_annotate_ai_preview_override_without_session_conflicts(
     authenticated_client, workspace_id, sample_node_id
 ):
-    """Overriding a node that was never previewed is stale and returns ok=False."""
+    """Overriding a node that was never previewed is a typed stale conflict."""
     response = await authenticated_client.patch(
         _preview_session_path(workspace_id, sample_node_id, "/rows/0"),
-        json={"label": "support"},
+        json={"session_id": "missing", "label": "support"},
     )
-    assert response.status_code == 200
-    assert response.json()["ok"] is False
+    assert response.status_code == 409
+    assert response.json()["error"] == "annotation_preview_session_conflict"
 
 
 async def test_detach_previewed_rows_uses_store_across_pages(
@@ -722,26 +959,38 @@ async def test_detach_previewed_rows_uses_store_across_pages(
         authenticated_client, workspace_id, sample_node_id, "annotation"
     )
 
-    async def fake_annotate_batch(wire, model, api_key, instruction, classes, texts, config=None):
+    async def fake_annotate_batch(
+        wire, model, api_key, instruction, classes, texts, config=None
+    ):
         # Return a stable label per text so both pages get distinct predictions.
         return [f"c-{text[:4]}" for text in texts]
 
     monkeypatch.setattr(annotation_workflows, "annotate_batch", fake_annotate_batch)
 
     # View page 1 and page 2 (two rows each) so all four rows land in the store.
+    session_id: str | None = None
     for page in (1, 2):
         preview = await authenticated_client.post(
             _preview_sessions_path(workspace_id),
             json=_preview_body(
-                sample_node_id, class_id, annotation_column="annotation", page=page, page_size=2
+                sample_node_id,
+                class_id,
+                annotation_column="annotation",
+                page=page,
+                page_size=2,
             ),
         )
         assert preview.status_code == 200
+        if session_id is None:
+            session_id = preview.json()["session_id"]
+        else:
+            assert preview.json()["session_id"] == session_id
+    assert session_id is not None
 
     # Detach WITHOUT a rows list — the server rebuilds them from the session.
     detach = await authenticated_client.post(
         _preview_session_path(workspace_id, sample_node_id, "/detachments"),
-        json={"annotation_column": "annotation"},
+        json={"session_id": session_id, "annotation_column": "annotation"},
     )
     assert detach.status_code == 200
     assert detach.json()["detached_rows"] == 4
@@ -773,19 +1022,31 @@ async def test_detach_previewed_rows_dry_run_probes_store_without_materialising(
         authenticated_client, workspace_id, sample_node_id, "annotation"
     )
 
-    async def fake_annotate_batch(wire, model, api_key, instruction, classes, texts, config=None):
+    async def fake_annotate_batch(
+        wire, model, api_key, instruction, classes, texts, config=None
+    ):
         return [f"c-{text[:4]}" for text in texts]
 
     monkeypatch.setattr(annotation_workflows, "annotate_batch", fake_annotate_batch)
 
+    session_id: str | None = None
     for page in (1, 2):
         preview = await authenticated_client.post(
             _preview_sessions_path(workspace_id),
             json=_preview_body(
-                sample_node_id, class_id, annotation_column="annotation", page=page, page_size=2
+                sample_node_id,
+                class_id,
+                annotation_column="annotation",
+                page=page,
+                page_size=2,
             ),
         )
         assert preview.status_code == 200
+        if session_id is None:
+            session_id = preview.json()["session_id"]
+        else:
+            assert preview.json()["session_id"] == session_id
+    assert session_id is not None
 
     workspace = workspace_manager.get_current_workspace(test_user["id"])
     assert workspace is not None
@@ -794,6 +1055,7 @@ async def test_detach_previewed_rows_dry_run_probes_store_without_materialising(
     probe = await authenticated_client.post(
         _preview_session_path(workspace_id, sample_node_id, "/detachments"),
         json={
+            "session_id": session_id,
             "annotation_column": "annotation",
             "dry_run": True,
         },
@@ -809,14 +1071,25 @@ async def test_detach_previewed_rows_dry_run_probes_store_without_materialising(
 async def test_detach_previewed_rows_dry_run_returns_zero_for_empty_session(
     authenticated_client, workspace_id, sample_node_id
 ):
-    """A ``dry_run`` probe on a node with no preview session reports zero, not 400.
+    """A ``dry_run`` probe on an expected empty generation reports zero.
 
-    That lets the panel simply disable its Detach button on an empty/cleared session
-    instead of treating the probe as an error.
+    The probe still names the exact session; only the row set is empty.
     """
+    class_id = await _make_class_node(authenticated_client, workspace_id)
+    await _add_annotation_column(
+        authenticated_client, workspace_id, sample_node_id, "annotation"
+    )
+    session_id = await _start_empty_preview_session(
+        authenticated_client,
+        workspace_id,
+        sample_node_id,
+        class_id,
+        annotation_column="annotation",
+    )
     response = await authenticated_client.post(
         _preview_session_path(workspace_id, sample_node_id, "/detachments"),
         json={
+            "session_id": session_id,
             "annotation_column": "annotation",
             "dry_run": True,
         },
@@ -836,7 +1109,9 @@ async def test_annotate_ai_annotate_all_reuses_cached_labels(
         authenticated_client, workspace_id, sample_node_id, "annotation"
     )
 
-    async def fake_annotate_batch(wire, model, api_key, instruction, classes, texts, config=None):
+    async def fake_annotate_batch(
+        wire, model, api_key, instruction, classes, texts, config=None
+    ):
         # Only the first two rows are previewed (page 1, size 2).
         return ["support", "critical"][: len(texts)]
 
@@ -853,15 +1128,20 @@ async def test_annotate_ai_annotate_all_reuses_cached_labels(
     monkeypatch.setattr(annotation_workflows, "annotate_batch", fake_annotate_batch)
     monkeypatch.setattr(annotation_workflows, "annotate_all", fake_annotate_all)
 
-    await authenticated_client.post(
+    preview = await authenticated_client.post(
         _preview_sessions_path(workspace_id),
         json=_preview_body(
-            sample_node_id, class_id, annotation_column="annotation", page=1, page_size=2
+            sample_node_id,
+            class_id,
+            annotation_column="annotation",
+            page=1,
+            page_size=2,
         ),
     )
     response = await authenticated_client.post(
         _preview_session_path(workspace_id, sample_node_id, "/annotations"),
         json={
+            "session_id": preview.json()["session_id"],
             "text_column": "document",
             "annotation_column": "annotation",
             "class_node_id": class_id,
@@ -889,7 +1169,9 @@ async def test_annotate_ai_preview_clear_drops_cached_session(
     """
     class_id = await _make_class_node(authenticated_client, workspace_id)
 
-    async def fake_annotate_batch(wire, model, api_key, instruction, classes, texts, config=None):
+    async def fake_annotate_batch(
+        wire, model, api_key, instruction, classes, texts, config=None
+    ):
         return ["support" for _ in texts]
 
     monkeypatch.setattr(annotation_workflows, "annotate_batch", fake_annotate_batch)
@@ -908,11 +1190,12 @@ async def test_annotate_ai_preview_clear_drops_cached_session(
 
     cleared = await authenticated_client.delete(
         _preview_session_path(workspace_id, sample_node_id),
+        params={"session_id": preview.json()["session_id"]},
     )
     assert cleared.status_code == 200
     assert cleared.json()["ok"] is True
 
-    # State no longer hydrates anything, and a detach probe finds nothing to detach.
+    # State no longer hydrates anything, and the old generation cannot be probed.
     state = await authenticated_client.get(
         _preview_session_path(workspace_id, sample_node_id),
         params=_preview_state_params(_preview_body(sample_node_id, class_id)),
@@ -920,17 +1203,503 @@ async def test_annotate_ai_preview_clear_drops_cached_session(
     assert state.json()["rows"] == []
     probe = await authenticated_client.post(
         _preview_session_path(workspace_id, sample_node_id, "/detachments"),
-        json={"annotation_column": "annotation", "dry_run": True},
+        json={
+            "session_id": preview.json()["session_id"],
+            "annotation_column": "document",
+            "dry_run": True,
+        },
     )
-    assert probe.json()["detached_rows"] == 0
+    assert probe.status_code == 409
 
 
-async def test_annotate_ai_preview_clear_without_session_is_noop(
+async def test_annotate_ai_preview_clear_without_session_conflicts(
     authenticated_client, workspace_id, sample_node_id
 ):
-    """Clearing a node that was never previewed succeeds (idempotent no-op)."""
+    """Clearing a node that was never previewed reports a stale generation."""
     response = await authenticated_client.delete(
         _preview_session_path(workspace_id, sample_node_id),
+        params={"session_id": "missing"},
     )
+    assert response.status_code == 409
+    assert response.json()["error"] == "annotation_preview_session_conflict"
+
+
+async def test_late_preview_completion_cannot_write_new_target_session(
+    authenticated_client,
+    workspace_id,
+    sample_node_id,
+    monkeypatch,
+):
+    """A provider response from a superseded target returns 409, not new writes."""
+
+    class_id = await _make_class_node(authenticated_client, workspace_id)
+    await _add_annotation_column(
+        authenticated_client, workspace_id, sample_node_id, "annotation_a"
+    )
+    await _add_annotation_column(
+        authenticated_client, workspace_id, sample_node_id, "annotation_b"
+    )
+    old_provider_started = asyncio.Event()
+    release_old_provider = asyncio.Event()
+    calls = 0
+
+    async def fake_annotate_batch(
+        wire, model, api_key, instruction, classes, texts, config=None
+    ):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            old_provider_started.set()
+            await release_old_provider.wait()
+            return ["old" for _ in texts]
+        return ["current" for _ in texts]
+
+    monkeypatch.setattr(annotation_workflows, "annotate_batch", fake_annotate_batch)
+    old_request = asyncio.create_task(
+        authenticated_client.post(
+            _preview_sessions_path(workspace_id),
+            json=_preview_body(
+                sample_node_id,
+                class_id,
+                annotation_column="annotation_a",
+                page=1,
+                page_size=1,
+            ),
+        )
+    )
+    await old_provider_started.wait()
+
+    current = await authenticated_client.post(
+        _preview_sessions_path(workspace_id),
+        json=_preview_body(
+            sample_node_id,
+            class_id,
+            annotation_column="annotation_b",
+            page=1,
+            page_size=1,
+        ),
+    )
+    assert current.status_code == 200
+    release_old_provider.set()
+    old = await old_request
+    assert old.status_code == 409
+    assert old.json()["error"] == "annotation_preview_session_conflict"
+
+    state = await authenticated_client.get(
+        _preview_session_path(workspace_id, sample_node_id),
+        params=_preview_state_params(
+            _preview_body(
+                sample_node_id,
+                class_id,
+                annotation_column="annotation_b",
+            )
+        ),
+    )
+    assert state.json()["session_id"] == current.json()["session_id"]
+    assert state.json()["annotation_column"] == "annotation_b"
+    assert state.json()["rows"][0]["ai"] == "current"
+
+
+async def test_annotate_all_claim_rejects_in_flight_page_completion(
+    authenticated_client,
+    workspace_id,
+    sample_node_id,
+    test_user,
+    monkeypatch,
+):
+    """A page provider already in flight cannot write after full materialisation."""
+
+    class_id = await _make_class_node(authenticated_client, workspace_id)
+    await _add_annotation_column(
+        authenticated_client, workspace_id, sample_node_id, "annotation"
+    )
+    page_provider_started = asyncio.Event()
+    release_page_provider = asyncio.Event()
+
+    async def blocked_page_provider(
+        wire, model, api_key, instruction, classes, texts, config=None
+    ):
+        page_provider_started.set()
+        await release_page_provider.wait()
+        return ["late-page" for _ in texts]
+
+    async def full_provider(*args, **kwargs):
+        return ["support", None, "critical", None]
+
+    monkeypatch.setattr(annotation_workflows, "annotate_batch", blocked_page_provider)
+    monkeypatch.setattr(annotation_workflows, "annotate_all", full_provider)
+    page_request = asyncio.create_task(
+        authenticated_client.post(
+            _preview_sessions_path(workspace_id),
+            json=_preview_body(
+                sample_node_id,
+                class_id,
+                annotation_column="annotation",
+                page=1,
+                page_size=1,
+            ),
+        )
+    )
+    await page_provider_started.wait()
+    state = await authenticated_client.get(
+        _preview_session_path(workspace_id, sample_node_id),
+        params=_preview_state_params(
+            _preview_body(
+                sample_node_id,
+                class_id,
+                annotation_column="annotation",
+            )
+        ),
+    )
+    session_id = state.json()["session_id"]
+    assert session_id is not None
+
+    materialized = await authenticated_client.post(
+        _preview_session_path(workspace_id, sample_node_id, "/annotations"),
+        json={
+            "session_id": session_id,
+            "text_column": "document",
+            "annotation_column": "annotation",
+            "class_node_id": class_id,
+            "provider_id": "openrouter",
+            "model": "some/model",
+            "instruction": "Classify the stance.",
+        },
+    )
+    assert materialized.status_code == 200
+    release_page_provider.set()
+    late_page = await page_request
+    assert late_page.status_code == 409
+
+    workspace = workspace_manager.get_current_workspace(test_user["id"])
+    assert workspace is not None
+    assert workspace.nodes[sample_node_id].data.collect()["annotation"].to_list() == [
+        "support",
+        None,
+        "critical",
+        None,
+    ]
+
+
+async def test_stale_override_and_clear_leave_new_generation_unchanged(
+    authenticated_client,
+    workspace_id,
+    sample_node_id,
+    monkeypatch,
+):
+    """Delayed panel operations cannot edit or delete a replacement session."""
+
+    class_id = await _make_class_node(authenticated_client, workspace_id)
+    await _add_annotation_column(
+        authenticated_client, workspace_id, sample_node_id, "annotation_a"
+    )
+    await _add_annotation_column(
+        authenticated_client, workspace_id, sample_node_id, "annotation_b"
+    )
+
+    async def fake_annotate_batch(
+        wire, model, api_key, instruction, classes, texts, config=None
+    ):
+        return ["support" for _ in texts]
+
+    monkeypatch.setattr(annotation_workflows, "annotate_batch", fake_annotate_batch)
+    old = await authenticated_client.post(
+        _preview_sessions_path(workspace_id),
+        json=_preview_body(
+            sample_node_id,
+            class_id,
+            annotation_column="annotation_a",
+            page=1,
+            page_size=1,
+        ),
+    )
+    current = await authenticated_client.post(
+        _preview_sessions_path(workspace_id),
+        json=_preview_body(
+            sample_node_id,
+            class_id,
+            annotation_column="annotation_b",
+            page=1,
+            page_size=1,
+        ),
+    )
+    old_id = old.json()["session_id"]
+    current_id = current.json()["session_id"]
+    assert current_id != old_id
+
+    stale_override = await authenticated_client.patch(
+        _preview_session_path(workspace_id, sample_node_id, "/rows/0"),
+        json={"session_id": old_id, "label": "critical"},
+    )
+    assert stale_override.status_code == 409
+    stale_clear = await authenticated_client.delete(
+        _preview_session_path(workspace_id, sample_node_id),
+        params={"session_id": old_id},
+    )
+    assert stale_clear.status_code == 409
+
+    state = await authenticated_client.get(
+        _preview_session_path(workspace_id, sample_node_id),
+        params=_preview_state_params(
+            _preview_body(
+                sample_node_id,
+                class_id,
+                annotation_column="annotation_b",
+            )
+        ),
+    )
+    assert state.json()["session_id"] == current_id
+    assert state.json()["rows"][0]["has_override"] is False
+
+
+async def test_override_rejects_unpreviewed_row(
+    authenticated_client,
+    workspace_id,
+    sample_node_id,
+):
+    """A valid session id cannot inject an arbitrary row into detach state."""
+
+    class_id = await _make_class_node(authenticated_client, workspace_id)
+    session_id = await _start_empty_preview_session(
+        authenticated_client,
+        workspace_id,
+        sample_node_id,
+        class_id,
+    )
+    response = await authenticated_client.patch(
+        _preview_session_path(workspace_id, sample_node_id, "/rows/99"),
+        json={"session_id": session_id, "label": "support"},
+    )
+    assert response.status_code == 400
+
+
+async def test_stale_detach_and_annotate_all_conflict(
+    authenticated_client,
+    workspace_id,
+    sample_node_id,
+):
+    """Materialising actions validate the expected id before using cached rows."""
+
+    class_id = await _make_class_node(authenticated_client, workspace_id)
+    await _add_annotation_column(
+        authenticated_client, workspace_id, sample_node_id, "annotation"
+    )
+    old_id = await _start_empty_preview_session(
+        authenticated_client,
+        workspace_id,
+        sample_node_id,
+        class_id,
+        annotation_column="annotation",
+    )
+    current_id = await _start_empty_preview_session(
+        authenticated_client,
+        workspace_id,
+        sample_node_id,
+        class_id,
+        annotation_column="document",
+    )
+    assert current_id != old_id
+
+    detach = await authenticated_client.post(
+        _preview_session_path(workspace_id, sample_node_id, "/detachments"),
+        json={
+            "session_id": old_id,
+            "annotation_column": "annotation",
+            "dry_run": True,
+        },
+    )
+    assert detach.status_code == 409
+
+    annotate = await authenticated_client.post(
+        _preview_session_path(workspace_id, sample_node_id, "/annotations"),
+        json={
+            "session_id": old_id,
+            "text_column": "document",
+            "annotation_column": "annotation",
+            "class_node_id": class_id,
+            "provider_id": "openrouter",
+            "model": "some/model",
+            "instruction": "Classify the stance.",
+        },
+    )
+    assert annotate.status_code == 409
+
+
+async def test_annotate_all_claim_blocks_session_work_until_completion(
+    authenticated_client,
+    workspace_id,
+    sample_node_id,
+    test_user,
+    monkeypatch,
+):
+    """The claimed row snapshot cannot change during annotate-all inference."""
+
+    class_id = await _make_class_node(authenticated_client, workspace_id)
+    await _add_annotation_column(
+        authenticated_client, workspace_id, sample_node_id, "annotation"
+    )
+    old_id = await _start_empty_preview_session(
+        authenticated_client,
+        workspace_id,
+        sample_node_id,
+        class_id,
+        annotation_column="annotation",
+    )
+    provider_started = asyncio.Event()
+    release_provider = asyncio.Event()
+
+    async def blocked_annotate_all(*args, **kwargs):
+        provider_started.set()
+        await release_provider.wait()
+        return ["support", None, "critical", None]
+
+    monkeypatch.setattr(annotation_workflows, "annotate_all", blocked_annotate_all)
+    request = asyncio.create_task(
+        authenticated_client.post(
+            _preview_session_path(workspace_id, sample_node_id, "/annotations"),
+            json={
+                "session_id": old_id,
+                "text_column": "document",
+                "annotation_column": "annotation",
+                "class_node_id": class_id,
+                "provider_id": "openrouter",
+                "model": "some/model",
+                "instruction": "Classify the stance.",
+            },
+        )
+    )
+    await provider_started.wait()
+
+    page = await authenticated_client.post(
+        _preview_sessions_path(workspace_id),
+        json=_preview_body(
+            sample_node_id,
+            class_id,
+            annotation_column="annotation",
+            page=999,
+        ),
+    )
+    override = await authenticated_client.patch(
+        _preview_session_path(workspace_id, sample_node_id, "/rows/0"),
+        json={"session_id": old_id, "label": "critical"},
+    )
+    clear = await authenticated_client.delete(
+        _preview_session_path(workspace_id, sample_node_id),
+        params={"session_id": old_id},
+    )
+    replacement = await authenticated_client.post(
+        _preview_sessions_path(workspace_id),
+        json=_preview_body(
+            sample_node_id,
+            class_id,
+            annotation_column="document",
+            page=999,
+        ),
+    )
+    for blocked in (page, override, clear, replacement):
+        assert blocked.status_code == 409
+        assert blocked.json()["error"] == "annotation_preview_session_busy"
+
+    release_provider.set()
+    response = await request
     assert response.status_code == 200
-    assert response.json()["ok"] is True
+
+    workspace = workspace_manager.get_current_workspace(test_user["id"])
+    assert workspace is not None
+    assert workspace.nodes[sample_node_id].data.collect()["annotation"].to_list() == [
+        "support",
+        None,
+        "critical",
+        None,
+    ]
+
+
+async def test_preview_validates_target_column_type_and_existence(
+    authenticated_client,
+    workspace_id,
+    sample_node_id,
+    test_user,
+):
+    """No session is created for a missing, blank, or non-text write target."""
+
+    class_id = await _make_class_node(authenticated_client, workspace_id)
+    workspace = workspace_manager.get_current_workspace(test_user["id"])
+    assert workspace is not None
+    node = workspace.nodes[sample_node_id]
+    node.data = node.data.with_columns(pl.lit(1, dtype=pl.Int64).alias("numeric"))
+
+    for annotation_column in ("", "missing", "numeric"):
+        response = await authenticated_client.post(
+            _preview_sessions_path(workspace_id),
+            json=_preview_body(
+                sample_node_id,
+                class_id,
+                annotation_column=annotation_column,
+                page=999,
+            ),
+        )
+        assert response.status_code == 400
+
+
+async def test_deleted_target_can_hydrate_and_clear_but_not_materialise(
+    authenticated_client,
+    workspace_id,
+    sample_node_id,
+    test_user,
+):
+    """State/close can retire an orphaned session; new work rejects its target."""
+
+    class_id = await _make_class_node(authenticated_client, workspace_id)
+    await _add_annotation_column(
+        authenticated_client, workspace_id, sample_node_id, "annotation"
+    )
+    session_id = await _start_empty_preview_session(
+        authenticated_client,
+        workspace_id,
+        sample_node_id,
+        class_id,
+        annotation_column="annotation",
+    )
+    workspace = workspace_manager.get_current_workspace(test_user["id"])
+    assert workspace is not None
+    node = workspace.nodes[sample_node_id]
+    node.data = node.data.drop("annotation")
+
+    state = await authenticated_client.get(
+        _preview_session_path(workspace_id, sample_node_id),
+        params=_preview_state_params(
+            _preview_body(
+                sample_node_id,
+                class_id,
+                annotation_column="annotation",
+            )
+        ),
+    )
+    assert state.status_code == 200
+    assert state.json()["session_id"] == session_id
+    assert state.json()["annotation_column"] == "annotation"
+
+    preview = await authenticated_client.post(
+        _preview_sessions_path(workspace_id),
+        json=_preview_body(
+            sample_node_id,
+            class_id,
+            annotation_column="annotation",
+            page=999,
+        ),
+    )
+    assert preview.status_code == 400
+    detach = await authenticated_client.post(
+        _preview_session_path(workspace_id, sample_node_id, "/detachments"),
+        json={
+            "session_id": session_id,
+            "annotation_column": "annotation",
+            "dry_run": True,
+        },
+    )
+    assert detach.status_code == 400
+    cleared = await authenticated_client.delete(
+        _preview_session_path(workspace_id, sample_node_id),
+        params={"session_id": session_id},
+    )
+    assert cleared.status_code == 200

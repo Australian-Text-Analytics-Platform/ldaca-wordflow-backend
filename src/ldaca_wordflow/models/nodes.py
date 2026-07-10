@@ -11,7 +11,6 @@ from pydantic import BaseModel, Field, model_validator
 
 from .analysis_common import (
     AnalysisSorting,
-    AnalysisTaskState,
     NodeDataFiltering,
     PaginationInfo,
 )
@@ -245,10 +244,6 @@ class CastNodeResponse(BaseModel):
     message: str
 
 
-ColumnScalarValue = str | int | float | bool
-AnalysisTaskState = Literal["pending", "running", "successful", "failed", "cancelled"]
-
-
 class NodeDataResponse(BaseModel):
     """Response schema returned by API routes and consumed by generated clients for node data response.
 
@@ -261,6 +256,7 @@ class NodeDataResponse(BaseModel):
     """
 
     data: list[dict[str, Any]]
+    revision: str
     pagination: PaginationInfo
     columns: list[str]
     dtypes: dict[str, str]
