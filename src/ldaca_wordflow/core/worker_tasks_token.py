@@ -22,6 +22,8 @@ from .worker_utils import worker_task
 
 logger = logging.getLogger(__name__)
 
+_PLAIN_WORDS_EN_MODEL = "native:plain_words_en"
+
 
 @worker_task
 def run_token_frequencies_task(
@@ -118,6 +120,28 @@ def run_token_frequencies_task(
                     raise ValueError(f"Missing token-frequency column for node {node_id}")
                 display_names[node_id] = snapshot_node.name
                 node = snapshot_node.to_node()
+
+                def collect_source_corpus() -> list[str]:
+                    """Collect raw source text for direct token-frequency counting.
+
+                    Called by:
+                    - The snapshot-input preparation branch in this worker
+                      because raw text inputs and stateless plain-English
+                      tokenizer preferences should use the direct frequency
+                      counter instead of materializing temporary token streams.
+                    """
+
+                    docs_df = cast(
+                        pl.DataFrame,
+                        snapshot_node.data.select(
+                            pl.col(source_column).alias("__doc_col__")
+                        ).collect(),
+                    )
+                    return [
+                        str(value) if value is not None else ""
+                        for value in docs_df["__doc_col__"].to_list()
+                    ]
+
                 tokenization_col = node.find_tokenization_column(source_column)
                 if tokenization_col is not None:
                     tokenization_meta = node.tokenization.get(source_column, {})
@@ -126,8 +150,18 @@ def run_token_frequencies_task(
                         if isinstance(tokenization_meta, dict)
                         else None
                     )
-                    if isinstance(model, str) and model.strip():
-                        requested_node_tokenizer_models[node_id] = model.strip()
+                    tokenization_model = (
+                        model.strip() if isinstance(model, str) and model.strip() else None
+                    )
+                    if tokenization_model is not None:
+                        requested_node_tokenizer_models[node_id] = tokenization_model
+                    if tokenization_model == _PLAIN_WORDS_EN_MODEL:
+                        # Plain words is stateless and cheap to count directly.
+                        # Hydrating the tokenization preference would build
+                        # offset structs, touch DuckDB, and spill an exploded
+                        # token stream before doing the same frequency count.
+                        corpora[node_id] = collect_source_corpus()
+                        continue
                     node_data = hydrate_tokenization_lazyframe(
                         node=node,
                         source_column=source_column,
@@ -149,16 +183,7 @@ def run_token_frequencies_task(
                     )
                     token_streams[node_id] = str(stream_path)
                 else:
-                    docs_df = cast(
-                        pl.DataFrame,
-                        snapshot_node.data.select(
-                            pl.col(source_column).alias("__doc_col__")
-                        ).collect(),
-                    )
-                    corpora[node_id] = [
-                        str(value) if value is not None else ""
-                        for value in docs_df["__doc_col__"].to_list()
-                    ]
+                    corpora[node_id] = collect_source_corpus()
 
         def tokenizer_model_for_node(node_id: str) -> str | None:
             """Support token-frequency worker helpers with a tokenizer model for node helper.

@@ -242,8 +242,12 @@ The analysis routes live under `api/workspaces/analyses/`.
   model from `Node.tokenization` when submitting worker jobs. Token-frequency
   requests still include `node_tokenizer_models` as task/snapshot settings and
   as a short-lived fallback while a preference write is in flight.
-  `Node.tokenization` metadata is hydrated from the per-user DuckDB token cache
-  when an existing workspace node carries cached token specs.
+  `Node.tokenization` metadata is usually hydrated from the per-user DuckDB
+  token cache when an existing workspace node carries cached token specs. Token
+  frequency intentionally bypasses that hydration for `native:plain_words_en`
+  and counts the raw source column directly, because the plain tokenizer is
+  stateless and the cache-backed token-stream path adds fixed offset/cache/spill
+  overhead that dominates small English tables.
 
 Shared helpers in `cleanup.py`, `current_tasks.py`, `generated_columns.py`,
 `page_size_estimation.py`, and core cache modules keep route code smaller.

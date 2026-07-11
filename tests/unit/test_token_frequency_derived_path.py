@@ -9,6 +9,9 @@ from typing import Any, cast
 
 import polars as pl
 import pytest
+from docworkspace import Node
+from ldaca_wordflow.core.tokenization import tokenise_column
+from ldaca_wordflow.core.worker_input_snapshots import create_worker_input_snapshot
 from ldaca_wordflow.core.worker_tasks_token import run_token_frequencies_task
 
 
@@ -89,6 +92,63 @@ def test_worker_mixes_token_stream_and_text_paths(tmp_path, monkeypatch):
     }
     assert text_counts == {"alpha": 2, "beta": 1}
     assert tokens_counts == {"beta": 1, "gamma": 2}
+
+
+def test_worker_plain_words_tokenization_preference_uses_raw_text_fast_path(
+    tmp_path, monkeypatch
+):
+    requested_models = _stub_polars_text(monkeypatch)
+
+    class Workspace:
+        def __init__(self, node: Node) -> None:
+            self.nodes = {node.id: node}
+
+    node = Node(
+        data=pl.DataFrame({"document": ["alpha beta alpha", "beta"]}).lazy(),
+        name="EN Corpus",
+        id="node-1",
+    )
+    tokenise_column(
+        node,
+        source_column="document",
+        model="native:plain_words_en",
+        language=None,
+    )
+    snapshot_dir = create_worker_input_snapshot(
+        workspace_id="ws-1",
+        task_id="task-1",
+        node_ids=["node-1"],
+        workspace=Workspace(node),
+        artifact_dir=tmp_path,
+    )
+
+    import ldaca_wordflow.core.tokens_cache as tokens_cache
+
+    def _fail_hydrate(*_args, **_kwargs):
+        raise AssertionError("plain words token frequency should not hydrate tokens")
+
+    monkeypatch.setattr(tokens_cache, "hydrate_tokenization_lazyframe", _fail_hydrate)
+
+    result = run_token_frequencies_task(
+        configure_worker_environment=lambda: None,
+        user_id="user-1",
+        workspace_id="ws-1",
+        node_corpora={},
+        node_display_names={},
+        artifact_dir=str(tmp_path),
+        artifact_prefix="token_freq_plain_preference",
+        input_snapshot_dir=str(snapshot_dir),
+        node_ids=["node-1"],
+        node_columns={"node-1": "document"},
+        node_tokenizer_models={"node-1": "native:plain_words_en"},
+    )
+
+    assert result["state"] == "successful"
+    assert requested_models == ["native:plain_words_en"]
+    parquet_path = Path(result["artifacts"]["nodes"][0]["token_parquet_path"])
+    counts = pl.read_parquet(parquet_path).to_dicts()
+    counts_map = {row["token"]: row["frequency"] for row in counts}
+    assert counts_map == {"alpha": 2, "beta": 2}
 
 
 def test_worker_raw_text_path_requires_tokenizer_model(tmp_path, monkeypatch):
