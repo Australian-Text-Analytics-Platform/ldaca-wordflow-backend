@@ -1,6 +1,7 @@
-# LDaCA Web App
+# LDaCA Wordflow Backend
 
-All-in-one Python package for the LDaCA platform: a FastAPI backend with a bundled production React frontend. Install once, run with a single command.
+FastAPI service for LDaCA Wordflow. The package can run the API by itself or
+serve the bundled production frontend from the same process.
 
 ## Quick start
 
@@ -15,8 +16,11 @@ uvx ldaca-wordflow --backend
 uvx ldaca-wordflow --port 9000
 ```
 
-## Start here
+## Development
 
-- Full docs: `docs/index.md`
-- Run locally: `docs/user-guide/running-locally.md`
-- Configuration: `docs/reference/configuration.md`
+- Backend architecture: [`../docs/architecture/backend/overview.md`](../docs/architecture/backend/overview.md)
+- HTTP endpoint inventory: [`../docs/reference/backend-api.md`](../docs/reference/backend-api.md)
+- Settings reference: [`../docs/reference/backend-settings.md`](../docs/reference/backend-settings.md)
+- Type check: `uvx ty check`
+- Tests: `uv run pytest -q`
+- OpenAPI export: `uv run python scripts/export_openapi.py --output <path>`
