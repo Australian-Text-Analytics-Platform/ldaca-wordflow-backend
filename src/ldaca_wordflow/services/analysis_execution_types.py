@@ -8,6 +8,10 @@ from datetime import datetime
 from typing import Protocol
 
 
+class AnalysisSchedulingStopped(RuntimeError):
+    """The process-local scheduler no longer accepts durable Analyses."""
+
+
 @dataclass(frozen=True, slots=True)
 class AnalysisExecutionKey:
     """Deployment identity used only by the process-local execution runtime."""
@@ -46,4 +50,5 @@ __all__ = [
     "AnalysisExecutionControl",
     "AnalysisExecutionKey",
     "AnalysisInvocation",
+    "AnalysisSchedulingStopped",
 ]

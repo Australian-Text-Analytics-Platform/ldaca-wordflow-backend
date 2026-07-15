@@ -10,7 +10,11 @@ from datetime import datetime
 import anyio
 from anyio.abc import TaskGroup
 
-from .analysis_execution_types import AnalysisExecutionControl, AnalysisExecutionKey
+from .analysis_execution_types import (
+    AnalysisExecutionControl,
+    AnalysisExecutionKey,
+    AnalysisSchedulingStopped,
+)
 from .fair_queue import FairUserQueue
 
 logger = logging.getLogger(__name__)
@@ -75,7 +79,9 @@ class AnalysisScheduler(AnalysisExecutionControl):
         item = ScheduledAnalysis(key, created_at, credential)
         async with self._lock:
             if not self._accepting or self._task_group is None:
-                raise RuntimeError("Analysis scheduler is not accepting work")
+                raise AnalysisSchedulingStopped(
+                    "Analysis scheduler is not accepting work"
+                )
             if key in self._active or any(
                 queued.key == key
                 for queued in self._pending.values()

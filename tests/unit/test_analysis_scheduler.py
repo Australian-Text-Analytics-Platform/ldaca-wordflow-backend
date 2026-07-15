@@ -7,7 +7,10 @@ from datetime import UTC, datetime, timedelta
 import anyio
 import pytest
 
-from ldaca_wordflow.services.analysis_execution_types import AnalysisExecutionKey
+from ldaca_wordflow.services.analysis_execution_types import (
+    AnalysisExecutionKey,
+    AnalysisSchedulingStopped,
+)
 from ldaca_wordflow.services.analysis_scheduler import (
     AnalysisScheduler,
     ScheduledAnalysis,
@@ -20,6 +23,30 @@ def _key(user_id: str, analysis_id: str) -> AnalysisExecutionKey:
 
 async def _ignore_key(_key: AnalysisExecutionKey) -> None:
     return
+
+
+@pytest.mark.anyio
+async def test_scheduler_rejects_work_before_start_and_after_stop() -> None:
+    async def runner(_item: ScheduledAnalysis) -> None:
+        return
+
+    scheduler = AnalysisScheduler(
+        capacity=1,
+        runner=runner,
+        cancel_running=_ignore_key,
+        work_removed=_ignore_key,
+    )
+    now = datetime.now(UTC)
+    with pytest.raises(AnalysisSchedulingStopped):
+        await scheduler.enqueue(_key("user", "before"), created_at=now, credential=None)
+
+    async with anyio.create_task_group() as task_group:
+        scheduler.start(task_group)
+        await scheduler.stop_dispatch()
+        with pytest.raises(AnalysisSchedulingStopped):
+            await scheduler.enqueue(
+                _key("user", "after"), created_at=now, credential=None
+            )
 
 
 @pytest.mark.anyio
