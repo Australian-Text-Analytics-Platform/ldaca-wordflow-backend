@@ -1,10 +1,8 @@
 from pathlib import Path
-from typing import cast
-
 import polars as pl
-from ldaca_wordflow.core.worker_tasks_concordance import (
+from ldaca_wordflow.workers.concordance import (
     _aggregate_hits_per_document,
-    run_concordance_dispersion_detach_task,
+    run_concordance_dispersion_detachment,
 )
 
 
@@ -188,95 +186,20 @@ def test_aggregate_hits_per_document_strips_internal_newlines_from_extracts():
     assert row["CONC_extraction"].startswith("- ")
 
 
-def test_dispersion_detach_slow_path_writes_materialised_parquet(tmp_path):
-    """Regression for the bin-fetch chain after a no-selection detach.
-
-    The dispersion view's "page above / whole data block" dropdown only
-    enables when the bin endpoint successfully returns rows, which in turn
-    requires the slow-path detach to (a) write the flat materialised
-    parquet at the standard location and (b) surface the path back to the
-    dispatcher so it can update `parent_task.request.materialized_paths`.
-    """
-    result = run_concordance_dispersion_detach_task(
-        configure_worker_environment=lambda: None,
-        workspace_dir=str(tmp_path),
-        node_corpus=["alpha beta gamma alpha", "beta gamma alpha"],
-        parent_node_id="source-node-1",
-        document_column="document",
-        search_word="alpha",
-        num_left_tokens=1,
-        num_right_tokens=1,
-        regex=False,
-        whole_word=False,
-        case_sensitive=False,
-        new_node_name="alpha_conc_aggregated",
-        child_task_id="11111111-1111-4111-8111-111111111111",
-        parent_task_id="concordance-task-42",
-    )
-
-    assert result["state"] == "successful", result
-    payload = result["result"]
-    # Slow path with parent_task_id must report materialised_path + counts.
-    assert "materialized_path" in payload
-    assert payload["parent_task_id"] == "concordance-task-42"
-    assert payload["parent_node_id"] == "source-node-1"
-    assert payload["record_count"] >= 0
-    assert payload["unique_documents_with_hits"] >= 1
-    assert payload["total_source_documents"] == 2
-
-    # Parquet exists at the canonical naming pattern under data/artifacts/.
-    # The artifacts subdir keeps caches out of reach of docworkspace's GC
-    # at `workspace.save()` time — see `core.analysis_cache` for the
-    # rationale.
-    materialised_path = Path(payload["materialized_path"])
-    assert materialised_path.exists()
-    assert materialised_path.parent == tmp_path / "data" / "artifacts"
-    assert materialised_path.name == (
-        "materialized_concordance_11111111-1111-4111-8111-111111111111_source-node-1.parquet"
-    )
-
-    # Schema must carry the document column + concordance start_idx so the
-    # bin endpoint's `read_dispersion_bins` can compute positions.
-    schema = pl.read_parquet(materialised_path).schema
-    assert "document" in schema
-    assert "CONC_start_idx" in schema
-    assert "CONC_matched_text" in schema
-
-
-def test_dispersion_detach_slow_path_skips_materialise_without_parent_task_id(
-    tmp_path,
+def test_run_concordance_dispersion_detachment_writes_node_payload(
+    tmp_path, worker_snapshot
 ):
-    """No parent_task_id → no side-effect (can't route the analysis event)."""
-    result = run_concordance_dispersion_detach_task(
-        configure_worker_environment=lambda: None,
-        workspace_dir=str(tmp_path),
-        node_corpus=["alpha beta", "beta alpha"],
-        parent_node_id="source-node-1",
-        document_column="document",
-        search_word="alpha",
-        num_left_tokens=1,
-        num_right_tokens=1,
-        regex=False,
-        whole_word=False,
-        case_sensitive=False,
-        new_node_name="alpha_conc_aggregated",
-        parent_task_id=None,
-    )
-
-    assert result["state"] == "successful", result
-    payload = result["result"]
-    assert "materialized_path" not in payload
-    assert "parent_task_id" not in payload
-
-
-def test_run_concordance_dispersion_detach_task_writes_node_payload(tmp_path):
     progress_updates: list[tuple[float, str]] = []
 
-    result = run_concordance_dispersion_detach_task(
-        configure_worker_environment=lambda: None,
+    result = run_concordance_dispersion_detachment(
         workspace_dir=str(tmp_path),
-        node_corpus=["alpha beta gamma alpha", "beta gamma alpha"],
-        parent_node_id="parent-1",
+        input_snapshot_dir=str(
+            worker_snapshot(
+                node_id="11111111-1111-4111-8111-111111111111",
+                columns={"document": ["alpha beta gamma alpha", "beta gamma alpha"]},
+            )
+        ),
+        parent_node_id="11111111-1111-4111-8111-111111111111",
         document_column="document",
         search_word="alpha",
         num_left_tokens=1,
@@ -291,14 +214,13 @@ def test_run_concordance_dispersion_detach_task_writes_node_payload(tmp_path):
     )
 
     assert result["state"] == "successful", result
-    payload = result["result"]["node_payload"]
-    assert payload["data_path"].startswith("data/")
+    payload = result["result"]
+    assert payload["parquet_path"].startswith("data/")
 
-    data_file = tmp_path / Path(payload["data_path"])
+    data_file = tmp_path / Path(payload["parquet_path"])
     assert data_file.exists()
 
-    restored = pl.LazyFrame.deserialize(data_file.open("rb"), format="binary")
-    df = cast(pl.DataFrame, restored.collect())
+    df = pl.read_parquet(data_file)
     assert df.height >= 1
     # Per-document output shape — CONC_extraction is a string, others are
     # List<T>. The per-hit start/end indices and L/R contexts are dropped.
@@ -309,4 +231,4 @@ def test_run_concordance_dispersion_detach_task_writes_node_payload(tmp_path):
     assert "CONC_start_idx" not in df.columns
     assert "CONC_end_idx" not in df.columns
 
-    assert progress_updates[-1] == (1.0, "Concordance dispersion detach completed")
+    assert progress_updates[-1] == (0.95, "Publishing dispersion Data Block...")

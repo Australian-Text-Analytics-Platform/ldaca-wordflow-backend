@@ -1,21 +1,25 @@
 from pathlib import Path
-from typing import cast
-
 import polars as pl
-from ldaca_wordflow.api.workspaces.analyses.generated_columns import (
-    MATERIALIZED_CONCORDANCE_COLUMNS,
+from ldaca_wordflow.analysis.generated_columns import (
+    DETACHABLE_CONCORDANCE_COLUMNS,
 )
-from ldaca_wordflow.core.worker_tasks_concordance import run_concordance_detach_task
+from ldaca_wordflow.workers.concordance import run_concordance_detachment
 
 
-def test_concordance_detach_task_writes_node_payload_under_workspace_data(tmp_path):
+def test_concordance_detach_task_writes_node_payload_under_workspace_data(
+    tmp_path, worker_snapshot
+):
     progress_updates: list[tuple[float, str]] = []
 
-    result = run_concordance_detach_task(
-        configure_worker_environment=lambda: None,
+    result = run_concordance_detachment(
         workspace_dir=str(tmp_path),
-        node_corpus=["alpha beta", "beta gamma"],
-        parent_node_id="parent-1",
+        input_snapshot_dir=str(
+            worker_snapshot(
+                node_id="11111111-1111-4111-8111-111111111111",
+                columns={"document": ["alpha beta", "beta gamma"]},
+            )
+        ),
+        parent_node_id="11111111-1111-4111-8111-111111111111",
         document_column="document",
         search_word="alpha",
         num_left_tokens=1,
@@ -25,7 +29,7 @@ def test_concordance_detach_task_writes_node_payload_under_workspace_data(tmp_pa
         case_sensitive=False,
         new_node_name="detached_concordance",
         include_document_column=True,
-        selected_generated_columns=list(MATERIALIZED_CONCORDANCE_COLUMNS),
+        selected_generated_columns=list(DETACHABLE_CONCORDANCE_COLUMNS),
         progress_callback=lambda progress, message: progress_updates.append(
             (
                 progress,
@@ -35,15 +39,14 @@ def test_concordance_detach_task_writes_node_payload_under_workspace_data(tmp_pa
     )
 
     assert result["state"] == "successful"
-    payload = result["result"]["node_payload"]
-    assert payload["data_path"].startswith("data/")
-    assert "artifacts" not in payload["data_path"]
+    payload = result["result"]
+    assert payload["parquet_path"].startswith("data/")
+    assert "artifacts" not in payload["parquet_path"]
 
-    data_file = tmp_path / Path(payload["data_path"])
+    data_file = tmp_path / Path(payload["parquet_path"])
     assert data_file.exists()
 
-    restored = pl.LazyFrame.deserialize(data_file.open("rb"), format="binary")
-    restored_df = cast(pl.DataFrame, restored.collect())
+    restored_df = pl.read_parquet(data_file)
     assert restored_df.height >= 1
     # CONC_extraction is opt-in; the default (`include_extraction=False`)
     # call above must NOT include it.
@@ -52,18 +55,24 @@ def test_concordance_detach_task_writes_node_payload_under_workspace_data(tmp_pa
     assert any(
         "Preparing text data" in message for _progress, message in progress_updates
     )
-    assert progress_updates[-1] == (1.0, "Concordance detach completed")
+    assert progress_updates[-1] == (0.95, "Publishing concordance Data Block...")
 
 
-def test_concordance_detach_includes_extraction_when_opted_in(tmp_path):
+def test_concordance_detach_includes_extraction_when_opted_in(
+    tmp_path, worker_snapshot
+):
     """When `include_extraction=True`, the per-hit detach output keeps the
     `CONC_extraction` raw-window column.
     """
-    result = run_concordance_detach_task(
-        configure_worker_environment=lambda: None,
+    result = run_concordance_detachment(
         workspace_dir=str(tmp_path),
-        node_corpus=["alpha beta gamma", "beta gamma alpha"],
-        parent_node_id="parent-1",
+        input_snapshot_dir=str(
+            worker_snapshot(
+                node_id="11111111-1111-4111-8111-111111111111",
+                columns={"document": ["alpha beta gamma", "beta gamma alpha"]},
+            )
+        ),
+        parent_node_id="11111111-1111-4111-8111-111111111111",
         document_column="document",
         search_word="alpha",
         num_left_tokens=1,
@@ -74,15 +83,12 @@ def test_concordance_detach_includes_extraction_when_opted_in(tmp_path):
         new_node_name="detached_with_extract",
         include_document_column=True,
         include_extraction=True,
-        selected_generated_columns=list(MATERIALIZED_CONCORDANCE_COLUMNS),
+        selected_generated_columns=list(DETACHABLE_CONCORDANCE_COLUMNS),
     )
     assert result["state"] == "successful"
-    payload = result["result"]["node_payload"]
-    data_file = tmp_path / Path(payload["data_path"])
-    restored_df = cast(
-        pl.DataFrame,
-        pl.LazyFrame.deserialize(data_file.open("rb"), format="binary").collect(),
-    )
+    payload = result["result"]
+    data_file = tmp_path / Path(payload["parquet_path"])
+    restored_df = pl.read_parquet(data_file)
     assert "CONC_extraction" in restored_df.columns
     assert restored_df.schema["CONC_extraction"] == pl.Utf8
     # Sanity check the slice matches what dispersion-detach would have

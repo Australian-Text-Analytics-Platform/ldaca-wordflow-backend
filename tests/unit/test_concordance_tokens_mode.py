@@ -12,30 +12,27 @@ should remain byte-identical since search_mode defaults to "regex".
 
 from __future__ import annotations
 
-from typing import Any, cast
 
 import polars as pl
-import pytest
-from ldaca_wordflow.api.workspaces.analyses.concordance_core import (
+from ldaca_wordflow.analysis.concordance_core import (
     compute_node_concordance_page,
 )
-from ldaca_wordflow.api.workspaces.analyses.concordance_tokens_mode import (
+from ldaca_wordflow.analysis.concordance_tokens import (
     build_token_hit,
     compute_tokens_concordance_page,
     find_token_matches,
     parse_tokens_mode_alternatives,
 )
-from ldaca_wordflow.api.workspaces.analyses.generated_columns import (
+from ldaca_wordflow.analysis.generated_columns import (
     CONC_END_IDX_COLUMN,
     CONC_LEFT_CONTEXT_COLUMN,
     CONC_MATCHED_TEXT_COLUMN,
     CONC_RIGHT_CONTEXT_COLUMN,
     CONC_START_IDX_COLUMN,
 )
-from ldaca_wordflow.core import tokens_cache as tc
-from ldaca_wordflow.core.tokenization import tokenise_column
+from ldaca_wordflow.analysis.tokenization import tokenise_column
 
-from docworkspace import Node
+from ldaca_wordflow.domain.workspace import Node
 
 # Toy Chinese document tokenised by lindera:jieba-style segmentation. Offsets are
 # char positions in the original text.
@@ -151,11 +148,8 @@ def test_compute_tokens_page_groups_hits_per_row() -> None:
     assert sample_hit[CONC_MATCHED_TEXT_COLUMN] == "今天"
 
 
-def test_token_mode_hydrates_only_requested_page_slice(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_token_mode_hydrates_only_requested_page_slice(tmp_path) -> None:
     cache_file = tmp_path / "tokens.duckdb"
-    monkeypatch.setattr(tc, "tokens_cache_path", lambda _user_id: cache_file)
     node = Node(
         data=pl.DataFrame({"text": [f"hello {index}" for index in range(5)]}).lazy(),
         name="probe",
@@ -175,7 +169,7 @@ def test_token_mode_hydrates_only_requested_page_slice(
             "tokenization_column": tokenization_col,
             "language": "en",
             "node": node,
-            "user_id": "lazy-user",
+            "token_cache_path": cache_file,
         },
         {
             "search_word": "hello",
@@ -238,8 +232,12 @@ def test_compute_tokens_page_with_english_word_aware_context() -> None:
     # 2 actual tokens of left context = "brown " + ""? The slice rule keeps
     # the original separators in the raw text — let's check by reconstructing.
     # tokens[1..3] -> "quick brown" → context = en_text[tokens[1].start : tokens[3].start]
-    expected_left = en_text[en_tokens[1]["start"] : en_tokens[3]["start"]]
-    expected_right = en_text[en_tokens[3]["end"] : en_tokens[5]["end"]]
+    expected_left = en_text[
+        int(en_tokens[1]["start"]) : int(en_tokens[3]["start"])
+    ]
+    expected_right = en_text[
+        int(en_tokens[3]["end"]) : int(en_tokens[5]["end"])
+    ]
     assert hit[CONC_LEFT_CONTEXT_COLUMN] == expected_left
     assert hit[CONC_RIGHT_CONTEXT_COLUMN] == expected_right
 
