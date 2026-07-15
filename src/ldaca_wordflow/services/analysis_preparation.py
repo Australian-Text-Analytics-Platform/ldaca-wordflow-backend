@@ -109,16 +109,8 @@ class AnalysisExecutionPreparer:
         except BaseException:
             with anyio.CancelScope(shield=True):
                 await run_sync_in_worker_thread(
-                    shutil.rmtree,
-                    snapshot_dir,
-                    True,
-                    abandon_on_cancel=False,
-                    limiter=self._limiter,
-                )
-                await run_sync_in_worker_thread(
-                    shutil.rmtree,
-                    artifact_dir,
-                    True,
+                    _remove_execution_staging,
+                    execution_dir,
                     abandon_on_cancel=False,
                     limiter=self._limiter,
                 )
@@ -456,6 +448,16 @@ def _metadata_columns(
         for column in selected
         if column != document_column and column not in generated
     ]
+
+
+def _remove_execution_staging(path: Path) -> None:
+    try:
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        elif path.exists() or path.is_symlink():
+            path.unlink()
+    except FileNotFoundError:
+        return
 
 
 def resolve_analysis_quotation_engine(
