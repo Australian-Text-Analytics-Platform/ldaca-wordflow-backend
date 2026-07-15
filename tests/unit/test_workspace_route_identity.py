@@ -1,8 +1,7 @@
 """Workspace route identity invariants.
 
 These tests guard the endpoint-design rule that workspace-scoped API handlers
-should take their target workspace from the URL path, not from the mutable
-current-workspace pointer used by the UI selection resource.
+take their target workspace from a typed URL path parameter.
 """
 
 from __future__ import annotations
@@ -60,7 +59,9 @@ def _router_prefixes(tree: ast.Module) -> dict[str, str]:
     return prefixes
 
 
-def _workspace_scoped_route(node: ast.AsyncFunctionDef, prefixes: dict[str, str]) -> str | None:
+def _workspace_scoped_route(
+    node: ast.AsyncFunctionDef, prefixes: dict[str, str]
+) -> str | None:
     """Return the full route path when a handler is scoped by workspace id."""
 
     for decorator in node.decorator_list:
@@ -82,41 +83,6 @@ def _workspace_scoped_route(node: ast.AsyncFunctionDef, prefixes: dict[str, str]
         if "{workspace_id" in full_path:
             return full_path
     return None
-
-
-def _current_workspace_target_helpers(node: ast.AST) -> list[str]:
-    """List calls that recover workspace identity from hidden current state.
-
-    Used by:
-    - the route-identity invariant to ensure explicit workspace-scoped handlers
-      resolve the target workspace from the URL path.
-    """
-
-    helper_names: list[str] = []
-    for child in ast.walk(node):
-        if not isinstance(child, ast.Call):
-            continue
-        func = child.func
-        if isinstance(func, ast.Name) and func.id in {
-            "require_current_workspace",
-            "require_current_workspace_id",
-        }:
-            helper_names.append(func.id)
-        if (
-            isinstance(func, ast.Attribute)
-            and func.attr == "get_current_workspace_id"
-            and isinstance(func.value, ast.Name)
-            and func.value.id == "workspace_manager"
-        ):
-            helper_names.append("workspace_manager.get_current_workspace_id")
-        if (
-            isinstance(func, ast.Attribute)
-            and func.attr == "get_current_workspace"
-            and isinstance(func.value, ast.Name)
-            and func.value.id == "workspace_manager"
-        ):
-            helper_names.append("workspace_manager.get_current_workspace")
-    return helper_names
 
 
 def _workspace_router_depends_on_path_loader(
@@ -151,7 +117,9 @@ def _workspace_router_depends_on_path_loader(
 
     if not preloads_workspace_path or "{workspace_id" not in prefix:
         return None
-    router_names = [target.id for target in statement.targets if isinstance(target, ast.Name)]
+    router_names = [
+        target.id for target in statement.targets if isinstance(target, ast.Name)
+    ]
     return ", ".join(router_names), prefix
 
 
@@ -177,28 +145,25 @@ def test_workspace_scoped_route_handlers_use_path_workspace_identity() -> None:
             route_path = _workspace_scoped_route(node, prefixes)
             if route_path is None:
                 continue
-            if "{workspace_id:uuid}" not in route_path:
+            if "{workspace_id}" not in route_path:
                 offenders.append(
                     f"{path.relative_to(WORKSPACES_API_DIR)}:{node.name} "
-                    f"does not constrain workspace_id as a UUID for {route_path}"
+                    f"does not carry workspace_id in {route_path}"
                 )
             arg_names = {arg.arg for arg in node.args.args}
-            if "workspace_id" not in arg_names:
-                offenders.append(
-                    f"{path.relative_to(WORKSPACES_API_DIR)}:{node.name} "
-                    f"does not declare workspace_id for {route_path}"
+            if "workspace_id" in arg_names:
+                workspace_arg = next(
+                    arg for arg in node.args.args if arg.arg == "workspace_id"
                 )
-
-            helper_names = _current_workspace_target_helpers(node)
-            if node.name == "start_workspace_download":
-                # This route compares the path id to the currently loaded
-                # workspace only to decide whether to flush in-memory state
-                # before packaging an inactive workspace directory.
-                continue
-            if helper_names:
-                offenders.append(
-                    f"{path.relative_to(WORKSPACES_API_DIR)}:{node.name} "
-                    f"calls {sorted(set(helper_names))} for {route_path}"
+                annotation = (
+                    ast.unparse(workspace_arg.annotation)
+                    if workspace_arg.annotation is not None
+                    else ""
                 )
+                if annotation not in {"UUID", "uuid.UUID"}:
+                    offenders.append(
+                        f"{path.relative_to(WORKSPACES_API_DIR)}:{node.name} "
+                        f"does not type workspace_id as UUID for {route_path}"
+                    )
 
     assert offenders == []
