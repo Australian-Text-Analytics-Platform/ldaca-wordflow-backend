@@ -11,6 +11,8 @@ from ldaca_wordflow.domain.workspace import Node, Workspace
 from ldaca_wordflow.workers.input_snapshots import create_worker_input_snapshot
 from ldaca_wordflow.workers.sequential import run_sequential_analysis
 
+NODE_ID = "00000000-0000-0000-0000-000000000001"
+
 
 def _snapshot(tmp_path: Path) -> Path:
     data_root = tmp_path / "data"
@@ -18,7 +20,7 @@ def _snapshot(tmp_path: Path) -> Path:
     workspace = Workspace(name="sequential", workspace_id="workspace")
     workspace.add_node(
         Node(
-            id="node",
+            id=NODE_ID,
             name="Events",
             data=pl.DataFrame(
                 {
@@ -32,7 +34,7 @@ def _snapshot(tmp_path: Path) -> Path:
     )
     return create_worker_input_snapshot(
         workspace_id=workspace.id,
-        node_ids=["node"],
+        node_ids=[NODE_ID],
         workspace=workspace,
         workspace_data_dir=data_root,
         snapshot_dir=tmp_path / "snapshot",
@@ -47,10 +49,8 @@ def test_sequential_worker_validates_and_executes_the_typed_request(
         user_id="user",
         workspace_id="workspace",
         input_snapshot_dir=str(_snapshot(tmp_path)),
-        node_id="node",
+        node_id=NODE_ID,
         request_payload={
-            "kind": "sequential",
-            "node_id": "00000000-0000-0000-0000-000000000001",
             "time_column": "occurred_at",
             "frequency": "monthly",
         },
@@ -67,10 +67,8 @@ def test_sequential_worker_rejects_noncanonical_request_fields(tmp_path: Path) -
             user_id="user",
             workspace_id="workspace",
             input_snapshot_dir=str(_snapshot(tmp_path)),
-            node_id="node",
+            node_id=NODE_ID,
             request_payload={
-                "kind": "sequential",
-                "node_id": "00000000-0000-0000-0000-000000000001",
                 "time_column": "occurred_at",
                 "frequency": "monthly",
                 "legacy_frequency": "daily",

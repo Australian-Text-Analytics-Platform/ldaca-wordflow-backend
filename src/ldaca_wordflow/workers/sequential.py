@@ -46,8 +46,12 @@ def run_sequential_analysis(
         )
         from ..domain.workspace import SequentialAnalysisRequest
 
+        if "node_id" in request_payload:
+            raise ValueError("Sequential node_id must use the snapshot selector")
         snapshot_node = load_snapshot_node(input_snapshot_dir, node_id)
-        request = SequentialAnalysisRequest.model_validate(request_payload)
+        request = SequentialAnalysisRequest.model_validate(
+            {"node_id": node_id, **request_payload}
+        )
         if progress_callback:
             progress_callback(0.25, "Running sequential analysis...")
 
