@@ -1,19 +1,12 @@
-"""Unit tests for the node casting service.
-
-Used by:
-- workspace cast route refactoring because casting behavior should be tested at
-  the domain-service boundary, not only through the HTTP route.
-"""
+"""Unit tests for the cast operation used by immutable node derivations."""
 
 from __future__ import annotations
-
-from typing import cast
 
 import polars as pl
 import pytest
 
-from ldaca_wordflow.core.exceptions import InvalidInputError
-from ldaca_wordflow.core.node_casting import cast_lazyframe_column
+from ldaca_wordflow.shared.errors import InvalidInputError
+from ldaca_wordflow.services.node_casting import cast_lazyframe_column
 
 
 def test_cast_lazyframe_column_converts_integer_strings() -> None:
@@ -27,7 +20,7 @@ def test_cast_lazyframe_column_converts_integer_strings() -> None:
         target_type="integer",
     )
 
-    collected = cast(pl.DataFrame, result.lazyframe.collect())
+    collected = result.lazyframe.collect()
     assert str(collected.schema["value"]) == "Int64"
     assert collected["value"].to_list() == [1, 2, None]
     assert result.original_type == "String"
@@ -47,4 +40,4 @@ def test_cast_lazyframe_column_rejects_unsupported_target() -> None:
             target_type="boolean",
         )
 
-    assert "not yet supported" in str(exc_info.value.detail)
+    assert "not yet supported" in exc_info.value.message

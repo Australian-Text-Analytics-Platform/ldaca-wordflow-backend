@@ -1,0 +1,44 @@
+"""Project the Workspace aggregate's physical node state into API model input."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from ..domain.workspace import Node
+from ..domain.workspace.provenance import describe_provenance
+
+
+def canonical_node_info(node: Node) -> dict[str, Any]:
+    """Map one registered domain node into strict `WorkspaceNodeInfo` input."""
+    schema_obj = node.data.collect_schema()
+    columns = schema_obj.names()
+    schema = {column: str(dtype) for column, dtype in schema_obj.items()}
+
+    return {
+        "id": node.id,
+        "name": node.name,
+        "provenance": node.provenance,
+        "derivation_description": describe_provenance(
+            node.provenance,
+            resolve_name=lambda node_id: (
+                node.workspace.nodes[node_id].name
+                if node.workspace is not None and node_id in node.workspace.nodes
+                else None
+            ),
+        ),
+        "parent_ids": [parent.id for parent in node.parents],
+        "child_ids": [child.id for child in node.children],
+        "document": node.document,
+        "color": node.color,
+        "shape": (node.shape[0], len(columns)),
+        "columns": columns,
+        "dtypes": schema,
+        "tokenizer_models": {
+            source: str(meta["model"])
+            for source, meta in node.tokenization.items()
+            if meta.get("model")
+        },
+    }
+
+
+__all__ = ["canonical_node_info"]

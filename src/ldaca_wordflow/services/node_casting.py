@@ -1,9 +1,8 @@
-"""Polars column-casting service for workspace nodes.
+"""Polars column-casting use case for immutable Data Block derivations.
 
-Used by:
-- ``api.workspaces.base.cast_node`` because the route should only resolve HTTP
-  identity, persist the workspace, and shape the response while this module owns
-  the Polars expression workflow.
+Used by ``node_operations`` while it builds a derived lazy plan. This module
+owns the cast expression and validation details; ``NodeService`` owns workspace
+mutation and persistence.
 
 Flow:
 - Inspect the source LazyFrame schema to capture the original dtype.
@@ -19,7 +18,7 @@ from dataclasses import dataclass
 
 import polars as pl
 
-from .exceptions import AppError, InvalidInputError
+from ..shared.errors import AppError, InvalidInputError
 
 
 SUPPORTED_CAST_TARGETS = "string, integer, float, datetime, categorical"
@@ -30,10 +29,8 @@ TIMEZONE_FORMAT_TOKENS = ("%z", "%:z", "%#z")
 class CastLazyFrameColumnResult:
     """Result metadata for a successful lazy-frame column cast.
 
-    Used by:
-    - ``cast_lazyframe_column`` and the workspace cast route because the route
-      needs the new lazy frame and the before/after dtype metadata for its API
-      response.
+    Used by ``cast_lazyframe_column`` and the derivation builder, which needs
+    the new lazy frame and the before/after dtype metadata for provenance.
     """
 
     lazyframe: pl.LazyFrame
@@ -119,8 +116,14 @@ def _cast_expr(
     if target_lower == "float":
         return pl.col(column_name).cast(pl.Float64).alias(column_name)
     if target_lower == "categorical":
-        if any(token in orig_lower for token in ["utf8", "string", "str", "categorical"]):
-            return pl.col(column_name).cast(pl.Categorical, strict=False).alias(column_name)
+        if any(
+            token in orig_lower for token in ["utf8", "string", "str", "categorical"]
+        ):
+            return (
+                pl.col(column_name)
+                .cast(pl.Categorical, strict=False)
+                .alias(column_name)
+            )
         return (
             pl.col(column_name)
             .cast(pl.Utf8, strict=False)
@@ -143,10 +146,8 @@ def cast_lazyframe_column(
 ) -> CastLazyFrameColumnResult:
     """Return a new LazyFrame with one column cast to the requested dtype.
 
-    Used by:
-    - ``api.workspaces.base.cast_node`` because the route needs a single domain
-      operation that validates and builds the casted lazy plan before
-      persistence.
+    Used by ``node_operations`` as the single operation that validates and
+    builds a casted lazy plan before the new child is attached.
 
     Flow:
     - Capture source dtype metadata from the lazy schema.
