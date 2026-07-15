@@ -1,5 +1,5 @@
 import polars as pl
-from ldaca_wordflow.api.workspaces.analyses.quotation_core import (
+from ldaca_wordflow.analysis.quotation_core import (
     QUOTATION_GROUP_COLUMN,
     flatten_grouped_quotation_dataframe,
     remote_payload_to_grouped_dataframe,

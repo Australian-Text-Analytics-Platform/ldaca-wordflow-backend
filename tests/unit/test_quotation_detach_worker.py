@@ -1,20 +1,21 @@
 from pathlib import Path
 
 import polars as pl
-from ldaca_wordflow.api.workspaces.analyses.generated_columns import QUOTE_COLUMN_NAMES
-from ldaca_wordflow.core.worker_tasks_quotation import run_quotation_detach_task
+from ldaca_wordflow.analysis.generated_columns import QUOTE_COLUMN_NAMES
+from ldaca_wordflow.workers.quotation import run_quotation_detachment
 
 
 def test_quotation_detach_task_writes_node_payload_without_internal_source_column(
     tmp_path,
     monkeypatch,
+    worker_snapshot,
 ):
     progress_updates: list[tuple[float, str]] = []
 
     def fake_quotation_groups_via_quote_extractor(
         input_df: pl.DataFrame, source_column: str
     ):
-        assert source_column == "__quotation_source__"
+        assert source_column == "document"
         # Mirror the real `quotation_groups_for_dataframe`: it preserves
         # every input column and adds a `quotation` group column. The
         # worker pipeline relies on that contract (e.g. for QUOTE_extraction
@@ -45,21 +46,30 @@ def test_quotation_detach_task_writes_node_payload_without_internal_source_colum
         )
 
     monkeypatch.setattr(
-        "ldaca_wordflow.api.workspaces.analyses.quotation_core.quotation_groups_via_quote_extractor",
+        "ldaca_wordflow.analysis.quotation_core.quotation_groups_via_quote_extractor",
         fake_quotation_groups_via_quote_extractor,
     )
 
-    result = run_quotation_detach_task(
-        configure_worker_environment=lambda: None,
+    result = run_quotation_detachment(
         workspace_dir=str(tmp_path),
-        node_corpus=['Ada said "Hello"'],
-        parent_node_id="parent-1",
+        input_snapshot_dir=str(
+            worker_snapshot(
+                node_id="11111111-1111-4111-8111-111111111111",
+                columns={
+                    "document": ['Ada said "Hello"'],
+                    "speaker_label": ["narrator"],
+                },
+            )
+        ),
+        parent_node_id="11111111-1111-4111-8111-111111111111",
         document_column="document",
-        engine_config={},
+        engine={"type": "local"},
+        quotation_service_max_batch_size=100,
+        quotation_service_timeout=30,
         new_node_name="detached_quotation",
         include_document_column=True,
         selected_generated_columns=list(QUOTE_COLUMN_NAMES),
-        extra_columns_data={"speaker_label": ["narrator"]},
+        extra_column_names=["speaker_label"],
         progress_callback=lambda progress, message: progress_updates.append(
             (
                 progress,
@@ -69,11 +79,11 @@ def test_quotation_detach_task_writes_node_payload_without_internal_source_colum
     )
 
     assert result["state"] == "successful"
-    payload = result["result"]["node_payload"]
-    data_file = tmp_path / Path(payload["data_path"])
+    payload = result["result"]
+    data_file = tmp_path / Path(payload["parquet_path"])
     assert data_file.exists()
 
-    restored = pl.LazyFrame.deserialize(data_file.open("rb"), format="binary")
+    restored = pl.scan_parquet(data_file)
     assert restored.collect_schema().names() == [
         "document",
         "speaker_label",
@@ -114,4 +124,4 @@ def test_quotation_detach_task_writes_node_payload_without_internal_source_colum
     assert any(
         "Extracting quotations" in message for _progress, message in progress_updates
     )
-    assert progress_updates[-1] == (1.0, "Quotation detach completed")
+    assert progress_updates[-1] == (0.95, "Publishing quotation Data Block...")

@@ -1,34 +1,84 @@
-from types import SimpleNamespace
+import uuid
 
 import polars as pl
 import pytest
-from ldaca_wordflow.api.workspaces.analyses.quotation_core import (
+from ldaca_wordflow.analysis.quotation_core import (
     compute_quote_dataframe,
+    compute_on_demand_page,
     prepare_documents_payload,
 )
-from ldaca_wordflow.core.services.quotation_client import (
+from ldaca_wordflow.infrastructure.providers.quotation_client import (
+    QuotationProviderClient,
     QuotationServiceError,
-    extract_remote_quotations,
     normalise_engine_base_url,
 )
-from ldaca_wordflow.models.quotation import QuotationEngineConfig, QuotationEngineType
-from ldaca_wordflow.settings import settings
-from pydantic import AnyHttpUrl, TypeAdapter
+from ldaca_wordflow.domain.workspace import (
+    Node,
+    QuotationAnalysisRequest,
+    QuotationEngineSelection,
+    QuotationEngineType,
+)
+from ldaca_wordflow.models.quotation import ResolvedQuotationEngine
+from ldaca_wordflow.infrastructure.providers.quotation_engines import (
+    resolve_quotation_engine,
+)
+from ldaca_wordflow.settings import RemoteQuotationEngineSetting, Settings
+from ldaca_wordflow.shared.errors import InvalidInputError
+from pydantic import AnyHttpUrl, TypeAdapter, ValidationError
 
 HTTP_URL = TypeAdapter(AnyHttpUrl).validate_python
 
 
-def test_engine_config_local_clears_url():
-    cfg = QuotationEngineConfig(
-        type=QuotationEngineType.LOCAL, url=HTTP_URL("http://example.com")
-    )
-    assert cfg.type is QuotationEngineType.LOCAL
-    assert cfg.url is None
+async def _run_inline(function, *args):
+    return function(*args)
+
+
+def test_resolved_local_engine_rejects_a_url():
+    with pytest.raises(ValidationError):
+        ResolvedQuotationEngine(
+            type=QuotationEngineType.LOCAL,
+            url=HTTP_URL("http://example.com"),
+        )
 
 
 def test_engine_config_remote_requires_url():
     with pytest.raises(ValueError):
-        QuotationEngineConfig(type=QuotationEngineType.REMOTE)
+        ResolvedQuotationEngine(type=QuotationEngineType.REMOTE)
+
+
+def test_public_remote_selection_cannot_supply_an_arbitrary_url():
+    with pytest.raises(ValidationError):
+        QuotationAnalysisRequest.model_validate(
+            {
+                "kind": "quotation",
+                "node_id": str(uuid.uuid4()),
+                "column": "text",
+                "engine": {
+                    "type": "remote",
+                    "engine_id": "approved",
+                    "url": "http://127.0.0.1/admin",
+                },
+            }
+        )
+
+
+def test_remote_selection_resolves_only_operator_owned_engine():
+    settings = Settings(
+        quotation_remote_engines=(
+            RemoteQuotationEngineSetting(
+                id="approved",
+                url=HTTP_URL("https://quotation.example/api/v1/quotation"),
+            ),
+        )
+    )
+    resolved = resolve_quotation_engine(
+        QuotationEngineSelection(
+            type=QuotationEngineType.REMOTE,
+            engine_id="approved",
+        ),
+        settings,
+    )
+    assert str(resolved.url).startswith("https://quotation.example/")
 
 
 def test_normalise_engine_base_url_variants():
@@ -48,9 +98,13 @@ def test_normalise_engine_base_url_variants():
 
 @pytest.mark.asyncio
 async def test_extract_remote_requires_remote_engine():
-    cfg = QuotationEngineConfig()
-    with pytest.raises(QuotationServiceError):
-        await extract_remote_quotations(cfg, {})
+    cfg = ResolvedQuotationEngine()
+    client = QuotationProviderClient(default_timeout=1)
+    try:
+        with pytest.raises(QuotationServiceError):
+            await client.extract(cfg, {})
+    finally:
+        await client.close()
 
 
 def test_prepare_documents_payload_stable_order():
@@ -61,13 +115,34 @@ def test_prepare_documents_payload_stable_order():
 
 
 @pytest.mark.asyncio
+async def test_quotation_page_rejects_an_unknown_sort_column() -> None:
+    node = Node(data=pl.DataFrame({"body": ["text"]}).lazy(), name="Documents")
+
+    async def unused_compute(*_args, **_kwargs):
+        raise AssertionError("quotation computation must not start")
+
+    with pytest.raises(InvalidInputError, match="Sort column"):
+        await compute_on_demand_page(
+            node,
+            "body",
+            ResolvedQuotationEngine(),
+            page=1,
+            page_size=10,
+            sort_by="missing",
+            descending=False,
+            compute_quote_dataframe_fn=unused_compute,
+            run_blocking=_run_inline,
+        )
+
+
+@pytest.mark.asyncio
 async def test_remote_compute_chunks_based_on_settings(monkeypatch):
-    engine = QuotationEngineConfig(
+    engine = ResolvedQuotationEngine(
         type=QuotationEngineType.REMOTE,
         url=HTTP_URL("http://engine"),
     )
     df = pl.DataFrame({"body": [f"doc-{i}" for i in range(5)]})
-    node = SimpleNamespace(data=df)
+    node = Node(data=df.lazy(), name="Documents")
 
     calls = []
 
@@ -96,7 +171,7 @@ async def test_remote_compute_chunks_based_on_settings(monkeypatch):
             ]
         }
 
-    monkeypatch.setattr(settings, "quotation_service_max_batch_size", 2)
+    test_settings = Settings(quotation_service_max_batch_size=2)
 
     result = await compute_quote_dataframe(
         node,
@@ -104,8 +179,9 @@ async def test_remote_compute_chunks_based_on_settings(monkeypatch):
         "body",
         engine,
         extract_remote_fn=fake_extract,
-        quotation_service_max_batch_size=settings.quotation_service_max_batch_size,
-        quotation_service_timeout=settings.quotation_service_timeout,
+        quotation_service_max_batch_size=test_settings.quotation_service_max_batch_size,
+        quotation_service_timeout=test_settings.quotation_service_timeout,
+        run_blocking=_run_inline,
     )
 
     assert len(calls) == 3  # 5 docs -> batches of 2,2,1
