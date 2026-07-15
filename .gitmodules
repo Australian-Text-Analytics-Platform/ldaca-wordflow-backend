@@ -1,6 +1,0 @@
-[submodule "src/ldaca_wordflow/_vendor/GenderGapTracker"]
-	path = src/ldaca_wordflow/_vendor/GenderGapTracker
-	url = https://github.com/sfu-discourse-lab/GenderGapTracker.git
-[submodule "src/ldaca_wordflow/_vendor/rocrate-tabular"]
-	path = src/ldaca_wordflow/_vendor/rocrate-tabular
-	url = https://github.com/Sydney-Informatics-Hub/rocrate-tabular.git
