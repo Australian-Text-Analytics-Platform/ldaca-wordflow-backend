@@ -35,6 +35,7 @@ from ..analysis.generated_columns import (
     concordance_struct_projection,
 )
 from ..domain.workspace import (
+    ConcordanceAnalysisRequest,
     ConcordanceDetachmentDerivation,
     ConcordanceDispersionDetachmentDerivation,
     DerivationInput,
@@ -181,31 +182,22 @@ def _build_concordance_response_from_snapshot(
     """
 
     from ..analysis.concordance_core import (
-        DEFAULT_CONCORDANCE_DESCENDING,
-        DEFAULT_CONCORDANCE_PAGE,
         _resolve_page_size,
         compute_node_concordance_page,
     )
     from .input_snapshots import load_snapshot_node
 
-    page = int(request_payload.get("page") or DEFAULT_CONCORDANCE_PAGE)
-    raw_page_size = request_payload.get("page_size")
-    page_size = (
-        int(raw_page_size)
-        if raw_page_size is not None and int(raw_page_size) > 0
-        else None
-    )
-    sort_by = request_payload.get("sort_by")
-    descending = bool(request_payload.get("descending", DEFAULT_CONCORDANCE_DESCENDING))
-    node_ids = list(request_payload.get("node_ids") or [])
-    node_columns = dict(request_payload.get("node_columns") or {})
+    request = ConcordanceAnalysisRequest.model_validate(request_payload)
+    canonical_payload = request.model_dump(mode="json", exclude={"kind"})
+    node_ids = [str(node_id) for node_id in request.node_ids]
+    node_columns = {
+        str(node_id): column for node_id, column in request.node_columns.items()
+    }
 
     node_sources: dict[str, dict[str, Any]] = {}
     label_to_node_map: dict[str, str] = {}
     for node_id in node_ids:
-        column = node_columns.get(node_id)
-        if not column:
-            continue
+        column = node_columns[node_id]
         snapshot_node = load_snapshot_node(input_snapshot_dir, node_id)
         node = snapshot_node.to_node()
         node_label = snapshot_node.name or node_id
@@ -220,45 +212,35 @@ def _build_concordance_response_from_snapshot(
             "token_cache_path": token_cache_path,
         }
 
-    if page_size is None:
-        estimates: list[int] = []
-        for node_id in node_ids:
-            src = node_sources.get(node_id)
-            if not src:
-                continue
-            estimates.append(
-                _resolve_page_size(
-                    src["lf"],
-                    src["column"],
-                    request_payload,
-                    None,
-                    tokenization_column=src.get("tokenization_column"),
-                )
-            )
-        if estimates:
-            page_size = max(estimates)
+    estimates = [
+        _resolve_page_size(
+            node_sources[node_id]["lf"],
+            node_sources[node_id]["column"],
+            canonical_payload,
+            None,
+            tokenization_column=node_sources[node_id]["tokenization_column"],
+        )
+        for node_id in node_ids
+    ]
+    page_size = max(estimates)
 
-    result_node_id = request_payload.get("result_node_id")
-    scoped_node_ids = (
-        [result_node_id] if result_node_id and result_node_id in node_ids else node_ids
-    )
     data: dict[str, Any] = {}
-    for node_id in scoped_node_ids:
-        src = node_sources.get(node_id)
-        if not src:
-            continue
+    for node_id in node_ids:
+        src = node_sources[node_id]
         data[node_id] = compute_node_concordance_page(
             src,
-            request_payload,
-            page=page,
+            canonical_payload,
+            page=1,
             page_size=page_size,
-            sort_by=sort_by,
-            descending=descending,
+            sort_by=None,
+            descending=False,
         )
 
-    analysis_params = dict(request_payload)
-    if label_to_node_map:
-        analysis_params["label_to_node_map"] = label_to_node_map
+    analysis_params = {
+        **canonical_payload,
+        "page": 1,
+        "label_to_node_map": label_to_node_map,
+    }
 
     return {
         "state": "successful",
