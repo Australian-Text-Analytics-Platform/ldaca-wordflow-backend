@@ -1,116 +1,23 @@
-"""Workspace, node, and tokenizer models.
-
-Split from models/__init__.py.
-"""
+"""Strict canonical workspace, graph, and node resources."""
 
 from __future__ import annotations
 
-from typing import Literal
+import uuid
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
-from .files import FilesTaskMetadataResponse
-
-
-class WorkspaceInfo(BaseModel):
-    """Metadata schema used by API responses to describe workspace info.
-
-    Used by:
-    - backend API routes, backend request/response models because they need a stable JSON
-      contract shared by route handlers, generated clients, and tests.
-
-    Flow: resolve the user workspace directory, refresh cached path indexes, coordinate task
-        cleanup, and return stable workspace metadata to callers.
-    """
-
-    id: str
-    name: str
-    description: str = ""
-    created_at: str | None = None
-    modified_at: str | None = None
-    total_nodes: int
-    root_nodes: int = 0
-    leaf_nodes: int = 0
+from .tokenization import TokenizationMetadata
+from .names import NodeName
+from ..domain.workspace import NodeProvenance, Tab
 
 
-class WorkspaceSummary(BaseModel):
-    """Summary metadata for a workspace row in list responses.
-
-    Used by:
-    - backend API routes, backend request/response models, core workspace and worker
-      services because they need a stable JSON contract shared by route handlers, generated
-      clients, and tests.
-
-    Flow: resolve the user workspace directory, refresh cached path indexes, coordinate task
-        cleanup, and return stable workspace metadata to callers.
-    """
-
-    id: str
-    name: str
-    description: str = ""
-    created_at: str = ""
-    modified_at: str = ""
-    total_nodes: int = 0
-    root_nodes: int = 0
-    leaf_nodes: int = 0
-    workspace_size_Byte: int = 0
-    folder_name: str | None = None
+class _StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
 
-class CurrentWorkspaceResponse(BaseModel):
-    """Response schema returned by API routes and consumed by generated clients for current workspace response.
-
-    Used by:
-    - backend API routes, backend request/response models because they need a stable JSON
-      contract shared by route handlers, generated clients, and tests.
-
-    Flow: resolve the user workspace directory, refresh cached path indexes, coordinate task
-        cleanup, and return stable workspace metadata to callers.
-    """
-
-    id: str | None = None
-
-
-class CurrentWorkspaceUpdateRequest(BaseModel):
-    """Request body for updating the user's selected workspace pointer.
-
-    Used by:
-    - ``PUT /users/me/current-workspace`` because current workspace is UI
-      session state owned by the authenticated user, not an implicit target
-      selector for workspace-scoped data APIs.
-
-    Flow: accept a workspace id to select that workspace, or ``null`` to clear
-        the user's current workspace pointer.
-    """
-
-    workspace_id: str | None = None
-
-
-class SetCurrentWorkspaceResponse(BaseModel):
-    """Response schema returned by API routes and consumed by generated clients for set current workspace response.
-
-    Used by:
-    - backend API routes, backend request/response models because they need a stable JSON
-      contract shared by route handlers, generated clients, and tests.
-
-    Flow: resolve the user workspace directory, refresh cached path indexes, coordinate task
-        cleanup, and return stable workspace metadata to callers.
-    """
-
-    state: Literal["successful"]
-    id: str | None = None
-
-
-class DtypeNormalizationChange(BaseModel):
-    """API schema used by routes and generated clients for dtype normalization change.
-
-    Used by:
-    - backend request/response models because they need a stable JSON contract shared by
-      route handlers, generated clients, and tests.
-
-    Flow: validate incoming API fields, apply defaults or validators, and serialize route
-        responses in the shape expected by frontend clients and tests.
-    """
+class DtypeNormalizationChange(_StrictModel):
+    """One source-file dtype normalization applied during node creation."""
 
     column: str
     from_dtype: str
@@ -118,306 +25,117 @@ class DtypeNormalizationChange(BaseModel):
     reason: str
 
 
-class WorkspaceNodeInfo(BaseModel):
-    """Metadata schema used by API responses to describe workspace node info.
+class WorkspaceNodeInfo(_StrictModel):
+    """Complete addressable node metadata returned by node routes."""
 
-    Used by:
-    - backend API routes, backend request/response models because they need a stable JSON
-      contract shared by route handlers, generated clients, and tests.
-
-    Flow: resolve the user workspace directory, refresh cached path indexes, coordinate task
-        cleanup, and return stable workspace metadata to callers.
-    """
-
-    model_config = ConfigDict(extra="allow", populate_by_name=True)
-
-    id: str
-    name: str
-    operation: str | None = None
-    parent_ids: list[str] = Field(default_factory=list)
-    child_ids: list[str] = Field(default_factory=list)
+    id: uuid.UUID
+    name: NodeName
+    provenance: NodeProvenance
+    derivation_description: str
+    parent_ids: list[uuid.UUID] = Field(default_factory=list)
+    child_ids: list[uuid.UUID] = Field(default_factory=list)
     document: str | None = None
     color: str | None = None
     shape: tuple[int | None, int | None] = (None, None)
-    column_schema: dict[str, str] = Field(default_factory=dict, alias="schema")
+    dtypes: dict[str, str] = Field(default_factory=dict)
     columns: list[str] = Field(default_factory=list)
-    can_undo: bool | None = None
-    can_redo: bool | None = None
     dtype_normalization: list[DtypeNormalizationChange] | None = None
     tokenizer_models: dict[str, str] = Field(default_factory=dict)
 
 
-class WorkspaceNodeInfoRequest(BaseModel):
-    """Request schema for fetching node-info metadata for one or many nodes.
+class WorkspaceResource(_StrictModel):
+    """Lightweight Workspace metadata plus process-local runtime state."""
 
-    Used by:
-    - the workspace node-info collection route and generated frontend clients
-      because graph responses carry only lightweight topology while schema,
-      columns, shape, and tokenizer metadata are fetched on demand.
-
-    Flow: validate the requested node id list, preserving caller order so the
-        response can line up with the submitted ids.
-    """
-
-    nodes: list[str] = Field(default_factory=list)
-
-
-class WorkspaceNodeInfoResponse(BaseModel):
-    """Response schema for collection-level workspace node-info metadata.
-
-    Used by:
-    - the workspace node-info collection route and generated frontend clients
-      because single-node and batch metadata reads share one typed contract.
-
-    Flow: serialize the requested node-info payloads in request order.
-    """
-
-    nodes: list[WorkspaceNodeInfo]
-
-
-class NodeDocumentColumnUpdateRequest(BaseModel):
-    """Request schema used by API routes and generated clients for node document column update request.
-
-    Used by:
-    - backend API routes, backend request/response models because they need a stable JSON
-      contract shared by route handlers, generated clients, and tests.
-
-    Flow: validate incoming API fields, apply defaults or validators, and serialize route
-        responses in the shape expected by frontend clients and tests.
-    """
-
-    document_column: str | None = None
-
-
-class NodeColorUpdateRequest(BaseModel):
-    """Request schema used by API routes and generated clients for node colour updates.
-
-    Used by:
-    - backend API routes and frontend node selectors because source-node visualisation
-      colours are durable workspace-node metadata.
-
-    Flow: validate one CSS hex colour string before the node route normalizes and
-    persists it on the selected workspace node.
-    """
-
-    color: str = Field(pattern=r"^#[0-9a-fA-F]{6}$")
-
-
-class NodeTokenizationPreferenceRequest(BaseModel):
-    """Request schema used by API routes and generated clients for node tokenization preference request.
-
-    Used by:
-    - backend API routes, backend request/response models because they need a stable JSON
-      contract shared by route handlers, generated clients, and tests.
-
-    Flow: resolve tokenization preferences, hydrate or create token columns, aggregate
-        frequencies, and persist derived artifacts for result queries.
-    """
-
-    source_column: str
-    model: str | None = None
-    language: str | None = None
-
-
-class TokenizerModelInfo(BaseModel):
-    """Metadata schema used by API responses to describe tokenizer model info.
-
-    Used by:
-    - backend request/response models because they need a stable JSON contract shared by
-      route handlers, generated clients, and tests.
-
-    Flow: validate incoming API fields, apply defaults or validators, and serialize route
-        responses in the shape expected by frontend clients and tests.
-    """
-
-    model: str
-    label: str
-    languages: list[str]
-
-
-class TokenizerModelsResponse(BaseModel):
-    """Response schema returned by API routes and consumed by generated clients for tokenizer models response.
-
-    Used by:
-    - backend API routes, backend request/response models because they need a stable JSON
-      contract shared by route handlers, generated clients, and tests.
-
-    Flow: validate incoming API fields, apply defaults or validators, and serialize route
-        responses in the shape expected by frontend clients and tests.
-    """
-
-    models: list[TokenizerModelInfo]
-
-
-class WorkspaceGraphEdge(BaseModel):
-    """API schema used by routes and generated clients for workspace graph edge.
-
-    Used by:
-    - backend request/response models because they need a stable JSON contract shared by
-      route handlers, generated clients, and tests.
-
-    Flow: resolve the user workspace directory, refresh cached path indexes, coordinate task
-        cleanup, and return stable workspace metadata to callers.
-    """
-
-    model_config = ConfigDict(extra="allow")
-
-    source: str
-    target: str
-    label: str | None = None
-
-
-class WorkspaceGraphNode(BaseModel):
-    """Lightweight node summary used by workspace graph/topology responses.
-
-    Used by:
-    - workspace graph routes and generated frontend graph/list clients because
-      graph rendering needs node identity and display/action state, while full
-      schema metadata belongs to ``WorkspaceNodeInfo`` through the collection
-      node-info route.
-
-    Flow: serialize only graph-facing fields so the graph endpoint does not
-        collect or duplicate per-node schema, columns, shape, tokenizer, or
-        dtype-normalization metadata.
-    """
-
-    model_config = ConfigDict(extra="allow")
-
-    id: str
+    id: uuid.UUID
     name: str
-    operation: str | None = None
-    parent_ids: list[str] = Field(default_factory=list)
-    child_ids: list[str] = Field(default_factory=list)
+    description: str
+    created_at: AwareDatetime
+    modified_at: AwareDatetime
+    total_nodes: int = Field(ge=0)
+    root_nodes: int = Field(ge=0)
+    leaf_nodes: int = Field(ge=0)
+    revision: int = Field(ge=0)
+    runtime_state: Literal["closed", "open", "closing"]
+
+
+class WorkspaceNodeReorderRequest(_StrictModel):
+    """Complete desired workspace node order."""
+
+    ordered_ids: list[uuid.UUID]
+
+
+class WorkspaceCreateRequest(_StrictModel):
+    """Create one workspace resource."""
+
+    name: str = Field(min_length=1, max_length=500)
+    description: str = Field(default="", max_length=10_000)
+
+
+class WorkspaceUpdateRequest(_StrictModel):
+    """Partial workspace metadata update."""
+
+    name: str | None = Field(default=None, min_length=1, max_length=500)
+    description: str | None = Field(default=None, max_length=10_000)
+
+    @model_validator(mode="after")
+    def validate_patch(self) -> "WorkspaceUpdateRequest":
+        if not self.model_fields_set:
+            raise ValueError("Workspace patch must contain at least one field")
+        if "name" in self.model_fields_set and self.name is None:
+            raise ValueError("Workspace name cannot be null")
+        return self
+
+
+class WorkspaceArchiveMetadata(_StrictModel):
+    """Safe portable workspace metadata stored in archive manifest version 3."""
+
+    id: uuid.UUID
+    name: str = Field(min_length=1, max_length=500)
+    description: str = Field(default="", max_length=10_000)
+    created_at: AwareDatetime | None = None
+    modified_at: AwareDatetime | None = None
+
+    @model_validator(mode="after")
+    def validate_timestamp_order(self) -> "WorkspaceArchiveMetadata":
+        if (
+            self.created_at is not None
+            and self.modified_at is not None
+            and self.modified_at < self.created_at
+        ):
+            raise ValueError("Workspace modified_at cannot precede created_at")
+        return self
+
+
+class WorkspaceArchiveNode(_StrictModel):
+    """Declarative materialized node entry with no executable plan payload."""
+
+    id: uuid.UUID
+    name: NodeName
+    provenance: NodeProvenance
     document: str | None = None
     color: str | None = None
-    can_undo: bool | None = None
-    can_redo: bool | None = None
+    tokenization: dict[
+        Annotated[str, Field(min_length=1, max_length=500)],
+        TokenizationMetadata,
+    ] = Field(default_factory=dict, max_length=500)
+    data_file: str = Field(min_length=1)
 
 
-class WorkspaceGraphResponse(BaseModel):
-    """Response schema returned by API routes and consumed by generated clients for workspace graph response.
+class WorkspaceArchiveManifest(_StrictModel):
+    """Only accepted client workspace archive manifest."""
 
-    Used by:
-    - backend API routes, backend request/response models because they need a stable JSON
-      contract shared by route handlers, generated clients, and tests.
-
-    Flow: resolve the user workspace directory, refresh cached path indexes, coordinate task
-        cleanup, and return stable workspace metadata to callers.
-    """
-
-    model_config = ConfigDict(extra="allow")
-
-    nodes: list[WorkspaceGraphNode]
-    edges: list[WorkspaceGraphEdge]
+    format: Literal["wordflow-materialized-workspace"]
+    version: Literal[3]
+    workspace: WorkspaceArchiveMetadata
+    nodes: list[WorkspaceArchiveNode]
+    tabs: list[Tab]
 
 
-class WorkspaceNodeReorderRequest(BaseModel):
-    """Request body for persisting a new workspace node order.
-
-    Used by:
-    - backend ``reorder_workspace_nodes`` route and the generated client because the
-      list-view drag-to-reorder gesture commits the full node id sequence.
-
-    Flow: the route validates the active workspace, applies ``ordered_ids`` via
-        ``Workspace.reorder_nodes``, persists, and returns the rebuilt graph.
-    """
-
-    ordered_ids: list[str]
-
-
-class WorkspaceCreateRequest(BaseModel):
-    """Request schema used by API routes and generated clients for workspace create request.
-
-    Used by:
-    - backend API routes, backend request/response models because they need a stable JSON
-      contract shared by route handlers, generated clients, and tests.
-
-    Flow: resolve the user workspace directory, refresh cached path indexes, coordinate task
-        cleanup, and return stable workspace metadata to callers.
-    """
-
-    name: str
-    description: str | None = None
-
-
-class WorkspaceUpdateRequest(BaseModel):
-    """Request body for updating explicit workspace metadata.
-
-    Used by:
-    - ``PATCH /workspaces/{workspace_id}`` because callers should name the
-      target workspace in the URL and send mutable metadata in the body.
-
-    Flow: accept partial name/description updates so route handlers can apply
-        only the fields the caller intentionally supplied.
-    """
-
-    name: str | None = None
-    description: str | None = None
-
-
-class WorkspaceSaveRequest(BaseModel):
-    """Request schema used by API routes and generated clients for workspace save request.
-
-    Used by:
-    - backend request/response models because they need a stable JSON contract shared by
-      route handlers, generated clients, and tests.
-
-    Flow: resolve the user workspace directory, refresh cached path indexes, coordinate task
-        cleanup, and return stable workspace metadata to callers.
-    """
-
-    workspace_id: str
-    name: str | None = None
-    description: str | None = None
-
-
-class WorkspaceActionResponse(BaseModel):
-    """Response schema returned by API routes and consumed by generated clients for workspace action response.
-
-    Used by:
-    - backend API routes, backend request/response models because they need a stable JSON
-      contract shared by route handlers, generated clients, and tests.
-
-    Flow: resolve the user workspace directory, refresh cached path indexes, coordinate task
-        cleanup, and return stable workspace metadata to callers.
-    """
-
-    state: Literal["successful"]
-    message: str
-    id: str | None = None
-
-
-class WorkspaceTaskStartResponse(BaseModel):
-    """Response schema returned by API routes and consumed by generated clients for workspace task start response.
-
-    Used by:
-    - backend API routes, backend request/response models because they need a stable JSON
-      contract shared by route handlers, generated clients, and tests.
-
-    Flow: resolve the user workspace directory, refresh cached path indexes, coordinate task
-        cleanup, and return stable workspace metadata to callers.
-    """
-
-    state: Literal["running"]
-    message: str
-    metadata: FilesTaskMetadataResponse
-
-
-class WorkspaceUploadResponse(BaseModel):
-    """Response schema returned by API routes and consumed by generated clients for workspace upload response.
-
-    Used by:
-    - backend API routes, backend request/response models because they need a stable JSON
-      contract shared by route handlers, generated clients, and tests.
-
-    Flow: resolve the user workspace directory, refresh cached path indexes, coordinate task
-        cleanup, and return stable workspace metadata to callers.
-    """
-
-    state: Literal["successful"]
-    workspace: WorkspaceSummary
-
-
-# =============================================================================
-# DATAFRAME MODELS
-# =============================================================================
+__all__ = [
+    "WorkspaceCreateRequest",
+    "WorkspaceArchiveManifest",
+    "WorkspaceNodeInfo",
+    "WorkspaceNodeReorderRequest",
+    "WorkspaceResource",
+    "WorkspaceUpdateRequest",
+]

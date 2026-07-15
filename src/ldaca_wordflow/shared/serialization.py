@@ -1,4 +1,4 @@
-"""Safe-integer serialization helpers.
+"""JSON-safe integer serialization helpers.
 
 Used by:
 - backend API routes, core workspace and worker services because they need a backend
