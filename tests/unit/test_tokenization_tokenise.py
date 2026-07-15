@@ -3,17 +3,15 @@
 from __future__ import annotations
 
 import os
-from typing import cast
-
 import polars as pl
 import pytest
-from ldaca_wordflow.api.workspaces.analyses.generated_columns import (
+from ldaca_wordflow.analysis.generated_columns import (
     tokenization_column_name,
 )
-from ldaca_wordflow.core.tokenization import tokenise_column
-from ldaca_wordflow.core.tokens_cache import hydrate_tokenization_lazyframe
+from ldaca_wordflow.analysis.tokenization import tokenise_column
+from ldaca_wordflow.analysis.token_cache import hydrate_tokenization_lazyframe
 
-from docworkspace import Node
+from ldaca_wordflow.domain.workspace import Node
 
 _LINDERA_JIEBA_TESTS_ENV = "POLARS_TEXT_RUN_LINDERA_JIEBA_TESTS"
 
@@ -133,7 +131,7 @@ def test_tokenise_with_different_source_preserves_existing_token_specs() -> None
     assert node.find_tokenization_column("value") == value_name
 
 
-def test_tokenise_does_not_touch_undo_stack() -> None:
+def test_tokenise_does_not_mutate_node_data() -> None:
     node = _make_node()
     schema_before = set(node.data.collect_schema().names())
 
@@ -143,7 +141,6 @@ def test_tokenise_does_not_touch_undo_stack() -> None:
         model="huggingface:bert-base-uncased",
         language="en",
     )
-    assert not node.can_undo
     assert set(node.data.collect_schema().names()) == schema_before
 
 
@@ -158,9 +155,9 @@ def test_tokenise_rejects_missing_source_column() -> None:
         )
 
 
-def test_tokenise_emits_canonical_struct_dtype() -> None:
+def test_tokenise_emits_canonical_struct_dtype(tmp_path) -> None:
     """Hydrated tokenization columns use the canonical struct dtype."""
-    from ldaca_wordflow.api.workspaces.analyses.generated_columns import (
+    from ldaca_wordflow.analysis.generated_columns import (
         tokens_struct_dtype,
     )
 
@@ -174,7 +171,7 @@ def test_tokenise_emits_canonical_struct_dtype() -> None:
     hydrated = hydrate_tokenization_lazyframe(
         node=node,
         source_column="text",
-        user_id="test_user",
+        cache_path=tmp_path / "tokens.duckdb",
     )
     schema = hydrated.collect_schema()
     assert schema[tokenization_name] == tokens_struct_dtype()
@@ -187,7 +184,7 @@ def test_tokenise_emits_canonical_struct_dtype() -> None:
         "lindera:jieba dictionary archive to run Jieba download tests."
     ),
 )
-def test_tokenise_chinese_via_jieba_produces_word_level_tokens() -> None:
+def test_tokenise_chinese_via_jieba_produces_word_level_tokens(tmp_path) -> None:
     """lindera:jieba is reachable through tokenise_column and produces word-level tokens."""
     df = pl.DataFrame({"text": ["今天天气很好"]}).lazy()
     node = Node(data=df, name="zh_root")
@@ -202,9 +199,9 @@ def test_tokenise_chinese_via_jieba_produces_word_level_tokens() -> None:
     hydrated = hydrate_tokenization_lazyframe(
         node=node,
         source_column="text",
-        user_id="test_user",
+        cache_path=tmp_path / "tokens.duckdb",
     )
-    collected = cast(pl.DataFrame, hydrated.collect())
+    collected = hydrated.collect()
     tokens_lists = collected[tokenization_name].to_list()
     assert len(tokens_lists) == 1
     tokens = [entry["token"] for entry in tokens_lists[0]]

@@ -18,7 +18,7 @@ from typing import Any, cast
 
 import polars as pl
 import polars_text  # noqa: F401
-from ldaca_wordflow.api.workspaces.analyses.generated_columns import (
+from ldaca_wordflow.analysis.generated_columns import (
     TOKENS_END_FIELD,
     TOKENS_START_FIELD,
     TOKENS_TOKEN_FIELD,
@@ -29,7 +29,7 @@ from ldaca_wordflow.api.workspaces.analyses.generated_columns import (
     tokens_struct_projection,
 )
 
-from docworkspace import Node
+from ldaca_wordflow.domain.workspace import Node
 
 # Test fixture: canonical (source, model) we use throughout this module.
 _TEXT_COLUMN = "text"

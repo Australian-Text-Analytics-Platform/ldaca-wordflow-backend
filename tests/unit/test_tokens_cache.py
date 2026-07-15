@@ -9,13 +9,13 @@ import duckdb
 import polars as pl
 import polars_text  # noqa: F401
 import pytest
-from ldaca_wordflow.api.workspaces.analyses.generated_columns import (
+from ldaca_wordflow.analysis.generated_columns import (
     tokenization_column_name,
 )
-from ldaca_wordflow.core import tokens_cache as tc
-from ldaca_wordflow.core.tokenization import tokenise_column
+from ldaca_wordflow.analysis import token_cache as tc
+from ldaca_wordflow.analysis.tokenization import tokenise_column
 
-from docworkspace import Node
+from ldaca_wordflow.domain.workspace import Node
 
 TEST_USER = "test_user"
 
@@ -91,9 +91,9 @@ def test_hydrate_tokenization_adds_tokens_column() -> None:
     hydrated = tc.hydrate_tokenization_lazyframe(
         node=node,
         source_column="text",
-        user_id=TEST_USER,
+        cache_path=tc.tokens_cache_path(TEST_USER),
     )
-    hydrated_df = cast(pl.DataFrame, hydrated.collect())
+    hydrated_df = hydrated.collect()
 
     assert tokenization_name in hydrated_df.columns
     assert tokenization_name not in node.data.collect_schema().names()
