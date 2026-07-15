@@ -10,7 +10,7 @@ from leaving too few visible words per topic.
 
 from __future__ import annotations
 
-from ldaca_wordflow.core.worker_tasks_topic_pipeline import (
+from ldaca_wordflow.workers.topic_pipeline import (
     _LINDERA_JA_VECTORIZER,
     _LINDERA_KO_VECTORIZER,
     _LINDERA_ZH_VECTORIZER,

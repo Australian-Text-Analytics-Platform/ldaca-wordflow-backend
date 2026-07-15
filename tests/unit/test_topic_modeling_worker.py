@@ -6,11 +6,11 @@ experiment harness, not here -- its output is non-deterministic. These tests
 cover only the deterministic Python glue:
 
 - corpus sampling and the c-TF-IDF vectorizer/stopword heuristics
-  (``worker_tasks_topic_pipeline``),
+  (``workers.topic_pipeline``),
 - the reconstruction of the result dict from the ``.text.topic_modeling``
   expression (``_run_rust_topic_modeling``), with the expression itself faked,
 - the payload/parquet assembly and meta in the orchestrator
-  (``run_topic_modeling_task``) and the exact-count re-aggregation path, with
+  (``_compute_topic_modeling``) and the exact-count re-aggregation path, with
   ``_run_rust_topic_modeling`` faked to a canned result.
 """
 
@@ -20,11 +20,8 @@ from typing import Any
 
 import polars as pl
 import pytest
-from ldaca_wordflow.core import (
-    worker_tasks_topic,
-    worker_tasks_topic_pipeline,
-)
-from ldaca_wordflow.core.worker_tasks_topic_pipeline import (
+from ldaca_wordflow.workers import topic_modeling, topic_pipeline
+from ldaca_wordflow.workers.topic_pipeline import (
     _sample_corpus,
 )
 
@@ -162,7 +159,7 @@ def test_run_rust_topic_modeling_reconstructs_result_dict(monkeypatch):
         ),
     )
 
-    result = worker_tasks_topic_pipeline._run_rust_topic_modeling(
+    result = topic_pipeline._run_rust_topic_modeling(
         all_docs=["d0", "d1", "d2", "d3"],
         seed=42,
         top_k=50,
@@ -255,7 +252,7 @@ def _node_info(node_id: str = "node-1") -> dict[str, Any]:
     }
 
 
-def test_run_topic_modeling_task_writes_parquet_and_meaning_lists(
+def test__compute_topic_modeling_writes_parquet_and_meaning_lists(
     tmp_path, monkeypatch
 ):
     progress: list[tuple[float, str]] = []
@@ -290,23 +287,17 @@ def test_run_topic_modeling_task_writes_parquet_and_meaning_lists(
             ],
         )
 
-    monkeypatch.setattr(worker_tasks_topic, "_run_rust_topic_modeling", fake_run)
+    monkeypatch.setattr(topic_modeling, "_run_rust_topic_modeling", fake_run)
     embedding_cache_path = tmp_path / "embeddings.duckdb"
-    monkeypatch.setattr(
-        worker_tasks_topic,
-        "embeddings_cache_path",
-        lambda _user_id: embedding_cache_path,
-    )
 
-    result = worker_tasks_topic.run_topic_modeling_task(
-        configure_worker_environment=lambda: None,
-        user_id="u",
+    result = topic_modeling._compute_topic_modeling(
         workspace_id="w",
         corpora=[["doc one", "doc two"]],
         node_infos=[_node_info()],
         artifact_dir=str(tmp_path),
         artifact_prefix="tm_test",
         representative_words_count=3,
+        embedding_cache_path=str(embedding_cache_path),
         progress_callback=lambda p, m: progress.append((p, m)),
     )
 
@@ -343,14 +334,15 @@ def test_run_topic_modeling_task_writes_parquet_and_meaning_lists(
 
     assert result["meta"]["engine"] == "rust"
     assert result["meta"]["embedding_backend"] == "ort"
-    assert seen_run_kwargs["embedding_cache"] == embedding_cache_path
+    assert seen_run_kwargs["embedding_cache"] == str(embedding_cache_path)
     assert result["meta"]["n_chunks"] == 7
     assert result["meta"]["stage_timings_ms"] == _STAGE_TIMINGS
     assert progress[0][1].startswith("Loading topic modeling")
-    assert progress[-1] == (1.0, "Topic modeling completed")
+    assert progress[-1] == (0.9, "Writing topic-modeling results...")
+    assert all(0.0 <= fraction < 1.0 for fraction, _message in progress)
 
 
-def test_run_topic_modeling_task_payload_caps_words_but_keeps_headroom(
+def test__compute_topic_modeling_payload_caps_words_but_keeps_headroom(
     tmp_path, monkeypatch
 ):
     """The payload carries up to the headroom cap; the meaning column respects
@@ -364,16 +356,15 @@ def test_run_topic_modeling_task_payload_caps_words_but_keeps_headroom(
             topics=[{"id": 0, "representative_words": many_words, "x": 0.0, "y": 0.0}],
         )
 
-    monkeypatch.setattr(worker_tasks_topic, "_run_rust_topic_modeling", fake_run)
+    monkeypatch.setattr(topic_modeling, "_run_rust_topic_modeling", fake_run)
 
-    result = worker_tasks_topic.run_topic_modeling_task(
-        configure_worker_environment=lambda: None,
-        user_id="u",
+    result = topic_modeling._compute_topic_modeling(
         workspace_id="w",
         corpora=[["only doc"]],
         node_infos=[_node_info()],
         artifact_dir=str(tmp_path),
         artifact_prefix="tm_cap",
+        embedding_cache_path=str(tmp_path / "embeddings.duckdb"),
         representative_words_count=5,
     )
 
@@ -384,7 +375,7 @@ def test_run_topic_modeling_task_payload_caps_words_but_keeps_headroom(
     assert meanings.to_dicts()[0]["TOPIC_topic_meaning"] == many_words[:5]
 
 
-def test_run_topic_modeling_task_sampling_records_before_after_sizes(
+def test__compute_topic_modeling_sampling_records_before_after_sizes(
     tmp_path, monkeypatch
 ):
     seen_docs: dict[str, int] = {}
@@ -399,17 +390,16 @@ def test_run_topic_modeling_task_sampling_records_before_after_sizes(
             topics=[{"id": 0, "representative_words": ["x"], "x": 0.0, "y": 0.0}],
         )
 
-    monkeypatch.setattr(worker_tasks_topic, "_run_rust_topic_modeling", fake_run)
+    monkeypatch.setattr(topic_modeling, "_run_rust_topic_modeling", fake_run)
 
     corpus = [f"doc {i}" for i in range(20)]
-    result = worker_tasks_topic.run_topic_modeling_task(
-        configure_worker_environment=lambda: None,
-        user_id="u",
+    result = topic_modeling._compute_topic_modeling(
         workspace_id="w",
         corpora=[corpus],
         node_infos=[_node_info("n1")],
         artifact_dir=str(tmp_path),
         artifact_prefix="tm_sample",
+        embedding_cache_path=str(tmp_path / "embeddings.duckdb"),
         sample_fractions=[0.5],
     )
 
@@ -418,7 +408,7 @@ def test_run_topic_modeling_task_sampling_records_before_after_sizes(
     assert result["meta"]["corpus_sizes_after_sample"] == [10]
 
 
-def test_run_topic_modeling_task_passes_min_topic_size_as_cluster_size(
+def test__compute_topic_modeling_passes_min_topic_size_as_cluster_size(
     tmp_path, monkeypatch
 ):
     """``min_topic_size`` is forwarded to the expression as ``min_cluster_size``
@@ -438,16 +428,15 @@ def test_run_topic_modeling_task_passes_min_topic_size_as_cluster_size(
             ],
         )
 
-    monkeypatch.setattr(worker_tasks_topic, "_run_rust_topic_modeling", fake_run)
+    monkeypatch.setattr(topic_modeling, "_run_rust_topic_modeling", fake_run)
 
-    result = worker_tasks_topic.run_topic_modeling_task(
-        configure_worker_environment=lambda: None,
-        user_id="u",
+    result = topic_modeling._compute_topic_modeling(
         workspace_id="w",
         corpora=[["doc one", "doc two"]],
         node_infos=[_node_info("n1")],
         artifact_dir=str(tmp_path),
         artifact_prefix="tm_min",
+        embedding_cache_path=str(tmp_path / "embeddings.duckdb"),
         min_topic_size=15,
     )
 
@@ -458,37 +447,3 @@ def test_run_topic_modeling_task_passes_min_topic_size_as_cluster_size(
     # No exact re-aggregation context is persisted; manifest stays at version 1.
     assert not (tmp_path / "tm_min_exact_reduction.json").exists()
     assert result["artifacts"]["version"] == 1
-
-
-def test_run_topic_modeling_task_loads_corpora_from_workspace(tmp_path, monkeypatch):
-    captured: dict[str, Any] = {}
-
-    def fake_run(*, all_docs, **_kwargs):
-        captured["docs"] = list(all_docs)
-        return _canned_rust_result(
-            documents=[
-                {"doc_index": i, "dominant_topic": 0} for i in range(len(all_docs))
-            ],
-            topics=[{"id": 0, "representative_words": ["w"], "x": 0.0, "y": 0.0}],
-        )
-
-    def fake_load(workspace_dir, node_payloads, user_id):
-        captured["workspace_dir"] = workspace_dir
-        return [["loaded one", "loaded two", "loaded three"]]
-
-    monkeypatch.setattr(worker_tasks_topic, "_run_rust_topic_modeling", fake_run)
-    monkeypatch.setattr(worker_tasks_topic, "_load_corpora_from_workspace", fake_load)
-
-    worker_tasks_topic.run_topic_modeling_task(
-        configure_worker_environment=lambda: None,
-        user_id="u",
-        workspace_id="w",
-        corpora=None,
-        workspace_dir=str(tmp_path / "ws"),
-        node_infos=[_node_info("n1")],
-        artifact_dir=str(tmp_path),
-        artifact_prefix="tm_ws",
-    )
-
-    assert captured["docs"] == ["loaded one", "loaded two", "loaded three"]
-    assert captured["workspace_dir"] == str(tmp_path / "ws")
