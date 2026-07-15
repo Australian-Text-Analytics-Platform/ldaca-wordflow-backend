@@ -9,10 +9,10 @@ from typing import Any, cast
 
 import polars as pl
 import pytest
-from docworkspace import Node
-from ldaca_wordflow.core.tokenization import tokenise_column
-from ldaca_wordflow.core.worker_input_snapshots import create_worker_input_snapshot
-from ldaca_wordflow.core.worker_tasks_token import run_token_frequencies_task
+from ldaca_wordflow.domain.workspace import Node, Workspace
+from ldaca_wordflow.analysis.tokenization import tokenise_column
+from ldaca_wordflow.workers.input_snapshots import create_worker_input_snapshot
+from ldaca_wordflow.workers.token_frequency import _compute_token_frequencies
 
 
 def _stub_polars_text(monkeypatch) -> list[str | None]:
@@ -38,15 +38,13 @@ def _stub_polars_text(monkeypatch) -> list[str | None]:
 def test_worker_raw_text_path_unchanged_when_no_tokens(tmp_path, monkeypatch):
     requested_models = _stub_polars_text(monkeypatch)
 
-    result = run_token_frequencies_task(
-        configure_worker_environment=lambda: None,
-        user_id="user-1",
+    result = _compute_token_frequencies(
         workspace_id="ws-1",
         node_corpora={"node-1": ["alpha beta alpha", "alpha"]},
         node_display_names={"node-1": "EN Corpus"},
         artifact_dir=str(tmp_path),
         artifact_prefix="token_freq_text",
-        tokenizer_model="native:plain_words_en",
+        node_tokenizer_models={"node-1": "native:plain_words_en"},
     )
 
     assert result["state"] == "successful"
@@ -64,16 +62,14 @@ def test_worker_mixes_token_stream_and_text_paths(tmp_path, monkeypatch):
     stream_path = tmp_path / "tokens-side-stream.parquet"
     pl.DataFrame({"token": ["beta", "gamma", "gamma"]}).write_parquet(stream_path)
 
-    result = run_token_frequencies_task(
-        configure_worker_environment=lambda: None,
-        user_id="user-1",
+    result = _compute_token_frequencies(
         workspace_id="ws-1",
         node_corpora={"text-side": ["alpha beta alpha"]},
         node_token_streams={"tokens-side": str(stream_path)},
         node_display_names={"text-side": "EN", "tokens-side": "ZH"},
         artifact_dir=str(tmp_path),
         artifact_prefix="token_freq_mixed",
-        tokenizer_model="native:plain_words_en",
+        node_tokenizer_models={"text-side": "native:plain_words_en"},
     )
 
     assert result["state"] == "successful"
@@ -99,10 +95,6 @@ def test_worker_plain_words_tokenization_preference_uses_raw_text_fast_path(
 ):
     requested_models = _stub_polars_text(monkeypatch)
 
-    class Workspace:
-        def __init__(self, node: Node) -> None:
-            self.nodes = {node.id: node}
-
     node = Node(
         data=pl.DataFrame({"document": ["alpha beta alpha", "beta"]}).lazy(),
         name="EN Corpus",
@@ -114,24 +106,25 @@ def test_worker_plain_words_tokenization_preference_uses_raw_text_fast_path(
         model="native:plain_words_en",
         language=None,
     )
+    workspace = Workspace(name="tokens", workspace_id="ws-1")
+    workspace.add_node(node)
     snapshot_dir = create_worker_input_snapshot(
-        workspace_id="ws-1",
-        task_id="task-1",
+        workspace_id=workspace.id,
         node_ids=["node-1"],
-        workspace=Workspace(node),
-        artifact_dir=tmp_path,
+        workspace=workspace,
+        workspace_data_dir=tmp_path,
+        snapshot_dir=tmp_path / "snapshots" / "input",
+        max_snapshot_bytes=1024 * 1024,
     )
 
-    import ldaca_wordflow.core.tokens_cache as tokens_cache
+    import ldaca_wordflow.analysis.token_cache as tokens_cache
 
     def _fail_hydrate(*_args, **_kwargs):
         raise AssertionError("plain words token frequency should not hydrate tokens")
 
     monkeypatch.setattr(tokens_cache, "hydrate_tokenization_lazyframe", _fail_hydrate)
 
-    result = run_token_frequencies_task(
-        configure_worker_environment=lambda: None,
-        user_id="user-1",
+    result = _compute_token_frequencies(
         workspace_id="ws-1",
         node_corpora={},
         node_display_names={},
@@ -155,9 +148,7 @@ def test_worker_raw_text_path_requires_tokenizer_model(tmp_path, monkeypatch):
     _stub_polars_text(monkeypatch)
 
     with pytest.raises(ValueError, match="node_tokenizer_models must include"):
-        run_token_frequencies_task(
-            configure_worker_environment=lambda: None,
-            user_id="user-1",
+        _compute_token_frequencies(
             workspace_id="ws-1",
             node_corpora={"node-1": ["alpha beta"]},
             node_display_names={"node-1": "EN Corpus"},
@@ -180,9 +171,7 @@ def test_worker_uses_node_token_streams_when_provided(tmp_path, monkeypatch):
         {"token": ["alpha", "beta", "alpha", "alpha", "gamma", "gamma"]}
     ).write_parquet(stream_path)
 
-    result = run_token_frequencies_task(
-        configure_worker_environment=lambda: None,
-        user_id="user-1",
+    result = _compute_token_frequencies(
         workspace_id="ws-1",
         node_corpora={},
         node_token_streams={"node-1": str(stream_path)},
@@ -215,9 +204,7 @@ def test_worker_token_stream_matches_manual_explode(tmp_path, monkeypatch):
     stream_path = tmp_path / "stream.parquet"
     exploded_df.rename({"tokens": "token"}).select("token").write_parquet(stream_path)
 
-    result = run_token_frequencies_task(
-        configure_worker_environment=lambda: None,
-        user_id="user-1",
+    result = _compute_token_frequencies(
         workspace_id="ws-1",
         node_corpora={},
         node_token_streams={"node-1": str(stream_path)},

@@ -3,7 +3,7 @@ from types import ModuleType
 from typing import Any, cast
 
 import polars as pl
-from ldaca_wordflow.core.worker_tasks_token import run_token_frequencies_task
+from ldaca_wordflow.workers.token_frequency import _compute_token_frequencies
 
 
 def test_token_frequency_worker_emits_early_progress_updates(tmp_path, monkeypatch):
@@ -36,9 +36,7 @@ def test_token_frequency_worker_emits_early_progress_updates(tmp_path, monkeypat
     )
     monkeypatch.setitem(sys.modules, "polars_text", fake_polars_text)
 
-    result = run_token_frequencies_task(
-        configure_worker_environment=lambda: None,
-        user_id="user-1",
+    result = _compute_token_frequencies(
         workspace_id="ws-1",
         node_corpora={
             "node-1": ["alpha beta alpha"],
@@ -53,7 +51,10 @@ def test_token_frequency_worker_emits_early_progress_updates(tmp_path, monkeypat
                 message,
             )
         ),
-        tokenizer_model="lindera:jieba",
+        node_tokenizer_models={
+            "node-1": "lindera:jieba",
+            "node-2": "lindera:jieba",
+        },
     )
 
     assert result["state"] == "successful"
@@ -62,7 +63,8 @@ def test_token_frequency_worker_emits_early_progress_updates(tmp_path, monkeypat
     assert any(
         "Preparing text data" in message for _progress, message in progress_updates
     )
-    assert progress_updates[-1] == (1.0, "Token frequency analysis completed")
+    assert progress_updates[-1] == (0.85, "Writing token-frequency results...")
+    assert all(0.0 <= fraction < 1.0 for fraction, _message in progress_updates)
 
 
 def test_token_frequency_worker_uses_per_node_tokenizer_models(tmp_path, monkeypatch):
@@ -94,9 +96,7 @@ def test_token_frequency_worker_uses_per_node_tokenizer_models(tmp_path, monkeyp
     )
     monkeypatch.setitem(sys.modules, "polars_text", fake_polars_text)
 
-    result = run_token_frequencies_task(
-        configure_worker_environment=lambda: None,
-        user_id="user-1",
+    result = _compute_token_frequencies(
         workspace_id="ws-1",
         node_corpora={
             "node-en": ["alpha beta"],
@@ -116,4 +116,4 @@ def test_token_frequency_worker_uses_per_node_tokenizer_models(tmp_path, monkeyp
         "node-en": "native:plain_words_en",
         "node-ja": "lindera:ja-ipadic",
     }
-    assert result["analysis_params"]["tokenizer_model"] is None
+    assert "tokenizer_model" not in result["analysis_params"]
