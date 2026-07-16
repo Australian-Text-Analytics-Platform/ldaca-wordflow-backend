@@ -1,4 +1,4 @@
-from ldaca_wordflow.core.ldaca_tabular_config import (
+from ldaca_wordflow.infrastructure.providers.tabular_config import (
     _safe_corpus_config_filename,
     load_tabular_config,
 )
