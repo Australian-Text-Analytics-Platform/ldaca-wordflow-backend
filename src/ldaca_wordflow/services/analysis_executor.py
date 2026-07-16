@@ -67,7 +67,7 @@ def _run_analysis_process(
         result_connection.send(("ok", result))
     except BaseException as exc:
         result_connection.send(
-            ("error", type(exc).__name__, str(exc), traceback.format_exc())
+            ("error", type(exc).__name__, traceback.format_tb(exc.__traceback__))
         )
     finally:
         result_connection.close()
@@ -149,7 +149,7 @@ class AnalysisProcessExecutor:
                 report_progress,
                 invocation,
             )
-        except anyio.get_cancelled_exc_class():
+        except BaseException:
             if started:
                 await self._terminate(process)
             raise
@@ -245,9 +245,9 @@ class AnalysisProcessExecutor:
                     raise AnalysisProcessError("Analysis returned an invalid envelope")
                 if envelope[0] == "ok" and len(envelope) == 2:
                     return cast(object, envelope[1])
-                if envelope[0] == "error" and len(envelope) == 4:
+                if envelope[0] == "error" and len(envelope) == 3:
                     raise AnalysisProcessError(
-                        f"{envelope[1]}: {envelope[2]}\n{envelope[3]}"
+                        f"{envelope[1]}\n{''.join(envelope[2])}"
                     )
                 raise AnalysisProcessError("Analysis returned an invalid envelope")
 
@@ -325,8 +325,9 @@ class AnalysisProcessExecutor:
                 else max(0.0, deadline - anyio.current_time())
             )
             if kill_timeout == 0:
-                await self._join(process, timeout=0.0)
-                return
+                if await self._join(process, timeout=0.0):
+                    return
+                raise RuntimeError("Analysis process did not terminate")
             if not await self._join(process, timeout=kill_timeout):
                 raise RuntimeError("Analysis process did not terminate")
 
@@ -372,7 +373,7 @@ def _storage_usage(roots: tuple[str, ...]) -> tuple[int, int]:
                 try:
                     resolved = candidate.resolve(strict=True)
                     metadata = resolved.stat()
-                except OSError:
+                except FileNotFoundError:
                     continue
                 if resolved in seen:
                     continue

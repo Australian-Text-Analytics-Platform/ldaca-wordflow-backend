@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 from typing import Any, cast
 
 import anyio
@@ -32,6 +33,13 @@ def _echo_worker(*, value: str, progress_queue: Any) -> str:
 
 def _immediate_invalid_progress_worker(*, progress_queue: Any) -> str:
     progress_queue.put({"fraction": 1.0, "message": "Premature completion"})
+    return "result"
+
+
+def _report_then_write(*, destination: str, progress_queue: Any) -> str:
+    progress_queue.put({"fraction": 0.5, "message": "Working"})
+    time.sleep(0.5)
+    Path(destination).write_text("orphaned", encoding="utf-8")
     return "result"
 
 
@@ -136,6 +144,34 @@ async def test_result_cannot_overtake_a_flushed_progress_report() -> None:
 
     assert reports == [{"fraction": 1.0, "message": "Premature completion"}]
     assert result == "result"
+    await executor.close(anyio.current_time() + 1)
+
+
+@pytest.mark.anyio
+async def test_progress_failure_terminates_the_owned_process(tmp_path: Path) -> None:
+    executor = AnalysisProcessExecutor()
+    key = _key("progress-failure")
+    destination = tmp_path / "orphan.txt"
+
+    async def reject_progress(_payload: object) -> None:
+        raise ValueError("invalid progress")
+
+    await executor.reserve(key)
+    with pytest.raises(ValueError, match="invalid progress"):
+        await executor.execute_reserved(
+            key,
+            AnalysisInvocation(
+                function=_report_then_write,
+                kwargs={"destination": str(destination)},
+                storage_roots=(str(tmp_path),),
+                max_storage_bytes=1024,
+                max_storage_files=10,
+            ),
+            reject_progress,
+        )
+
+    await anyio.sleep(0.6)
+    assert not destination.exists()
     await executor.close(anyio.current_time() + 1)
 
 
