@@ -1,59 +1,32 @@
-"""Centralized logging configuration for the LDaCA backend.
+"""Process-owned logging configuration for the Wordflow backend."""
 
-Provides:
-- Human-readable console logging (always active)
-- Optional structured JSON file logging via ``LOG_FILE`` setting
-- Per-module loggers via ``logging.getLogger(__name__)``
-- ``setup_logging()`` to configure the root ``ldaca_wordflow`` logger
-- ``setup_file_logging()`` for TeeOutput-based log capture in packaged builds
+from __future__ import annotations
 
-Used by:
-- Backend package imports, application startup, and backend tests because tests need the
-  same observable contract that production routes and workers rely on.
-
-Flow: normalize inputs, delegate to the owning backend state or service boundary, and
-    return serialized values or existing domain errors to callers.
-"""
-
+import json
 import logging
-import logging.handlers
-import os
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import IO
+from typing import Literal
+
+from .infrastructure.storage.durable_fs import mkdir_durable
 
 PACKAGE_LOGGER_NAME = "ldaca_wordflow"
-
-# Sentinel to avoid double-configuring
-_logging_configured = False
+_OWNED_HANDLER_NAME = "wordflow-bootstrap"
+LogLevelName = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+_LOG_LEVELS: dict[LogLevelName, int] = {
+    "DEBUG": logging.DEBUG,
+    "INFO": logging.INFO,
+    "WARNING": logging.WARNING,
+    "ERROR": logging.ERROR,
+    "CRITICAL": logging.CRITICAL,
+}
 
 
 class _StructuredFormatter(logging.Formatter):
-    """Emit log records as structured JSON lines for machine consumption.
-
-    Called by:
-    - Local helpers, route handlers, or service methods in this module because they need a
-      backend boundary that validates inputs before delegating to workspace or worker state.
-
-    Flow: normalize inputs, delegate to the owning backend state or service boundary, and
-        return serialized values or existing domain errors to callers.
-    """
+    """Emit one machine-readable JSON object per log record."""
 
     def format(self, record: logging.LogRecord) -> str:
-        """Format log records for packaged-runtime logging setup.
-
-        Called by:
-        - `_StructuredFormatter` instances owned by backend services, routes, and tests because
-          they need a backend boundary that validates inputs before delegating to workspace or
-          worker state.
-
-        Flow: normalize inputs, delegate to the owning backend state or service boundary, and
-            return serialized values or existing domain errors to callers.
-        """
-
-        import json
-
         payload = {
             "timestamp": datetime.fromtimestamp(record.created, tz=UTC).isoformat(),
             "level": record.levelname,
@@ -68,226 +41,58 @@ class _StructuredFormatter(logging.Formatter):
 
 
 class _ConsoleFormatter(logging.Formatter):
-    """Human-readable console format: ``TIMESTAMP LEVEL [logger] message``.
-
-    Called by:
-    - Local helpers, route handlers, or service methods in this module because they need a
-      backend boundary that validates inputs before delegating to workspace or worker state.
-
-    Flow: normalize inputs, delegate to the owning backend state or service boundary, and
-        return serialized values or existing domain errors to callers.
-    """
-
     def __init__(self) -> None:
-        """Initialize _ConsoleFormatter state used by packaged-runtime logging setup.
-
-        Called by:
-        - `_ConsoleFormatter` construction in backend services and tests because tests need the
-          same observable contract that production routes and workers rely on.
-
-        Flow: normalize inputs, delegate to the owning backend state or service boundary, and
-            return serialized values or existing domain errors to callers.
-        """
-
         super().__init__(
             fmt="%(asctime)s %(levelname)-8s [%(name)s] %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
         )
 
 
-def setup_logging(*, level: str | int | None = None) -> None:
-    """Configure the ``ldaca_wordflow`` logger hierarchy.
-
-    Safe to call multiple times; only the first invocation takes effect.
-
-    Args:
-        level: Explicit log level override.  When ``None`` the level is read
-            from ``settings.log_level`` (env ``LOG_LEVEL``), defaulting to
-            ``INFO``.
-
-    Used by:
-    - FastAPI application startup, backend package imports, local helpers in this module
-      because they need a backend boundary that validates inputs before delegating to
-      workspace or worker state.
-
-    Flow: normalize inputs, delegate to the owning backend state or service boundary, and
-        return serialized values or existing domain errors to callers.
-    """
-    global _logging_configured
-    if _logging_configured:
-        return
-    _logging_configured = True
-
-    if level is None:
-        try:
-            from .settings import settings
-
-            level = settings.log_level
-        except Exception:
-            level = "INFO"
-
-    numeric_level = (
-        level
-        if isinstance(level, int)
-        else getattr(logging, str(level).upper(), logging.INFO)
-    )
-
-    root_logger = logging.getLogger(PACKAGE_LOGGER_NAME)
-    root_logger.setLevel(numeric_level)
-
-    # Avoid duplicate handlers when the function is called in odd import scenarios
-    if not root_logger.handlers:
-        console_handler = logging.StreamHandler(sys.stderr)
-        console_handler.setLevel(numeric_level)
-        console_handler.setFormatter(_ConsoleFormatter())
-        root_logger.addHandler(console_handler)
-
-    # Optional file logging when LOG_FILE is configured
-    try:
-        from .settings import settings
-
-        if settings.log_file:
-            log_path = Path(settings.data_root) / settings.log_file
-            log_path.parent.mkdir(parents=True, exist_ok=True)
-            file_handler = logging.FileHandler(log_path, encoding="utf-8")
-            file_handler.setLevel(numeric_level)
-            file_handler.setFormatter(_StructuredFormatter())
-            root_logger.addHandler(file_handler)
-    except Exception:
-        pass
-
-    # Also configure uvicorn loggers to use the same level so startup noise
-    # respects the user's chosen verbosity.
-    for uvicorn_logger_name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
-        uv_logger = logging.getLogger(uvicorn_logger_name)
-        uv_logger.setLevel(numeric_level)
+def _mark_owned(handler: logging.Handler) -> None:
+    handler.set_name(_OWNED_HANDLER_NAME)
 
 
-class TeeOutput:
-    """Duplicate writes to both a file and the original stream.
-
-    Handles Windows console UnicodeEncodeError by replacing
-    problematic characters with ASCII equivalents.
-
-    Used by:
-    - local helpers in this module because the local shared backend behavior flow needs this
-      step kept close to the code that consumes it.
-
-    Flow: normalize inputs, delegate to the owning backend state or service boundary, and
-        return serialized values or existing domain errors to callers.
-    """
-
-    def __init__(self, file_obj: IO[str], original: IO[str]):
-        """Initialize TeeOutput state used by packaged-runtime logging setup.
-
-        Called by:
-        - `TeeOutput` construction in backend services and tests because tests need the same
-          observable contract that production routes and workers rely on.
-
-        Flow: normalize inputs, delegate to the owning backend state or service boundary, and
-            return serialized values or existing domain errors to callers.
-        """
-
-        self.file = file_obj
-        self.original = original
-
-    def write(self, data: str) -> int:
-        """Forward captured stream text into packaged-runtime logging setup.
-
-        Called by:
-        - `TeeOutput` instances owned by backend services, routes, and tests because they need a
-          backend boundary that validates inputs before delegating to workspace or worker state.
-
-        Flow: normalize inputs, delegate to the owning backend state or service boundary, and
-            return serialized values or existing domain errors to callers.
-        """
-
-        try:
-            self.original.write(data)
-            self.original.flush()
-        except UnicodeEncodeError:
-            safe_data = data.encode("ascii", "replace").decode("ascii")
-            self.original.write(safe_data)
-            self.original.flush()
-        if self.file:
-            self.file.write(data)
-            self.file.flush()
-        return len(data)
-
-    def flush(self) -> None:
-        """Satisfy stream consumers that flush captured packaged-runtime logging setup output.
-
-        Called by:
-        - `TeeOutput` instances owned by backend services, routes, and tests because they need a
-          backend boundary that validates inputs before delegating to workspace or worker state.
-
-        Flow: normalize inputs, delegate to the owning backend state or service boundary, and
-            return serialized values or existing domain errors to callers.
-        """
-
-        self.original.flush()
-        if self.file:
-            self.file.flush()
-
-    def isatty(self) -> bool:
-        """Report terminal capability for stream consumers using packaged-runtime logging setup.
-
-        Called by:
-        - `TeeOutput` instances owned by backend services, routes, and tests because they need a
-          backend boundary that validates inputs before delegating to workspace or worker state.
-
-        Flow: normalize inputs, delegate to the owning backend state or service boundary, and
-            return serialized values or existing domain errors to callers.
-        """
-
-        return False
+def _is_owned(handler: logging.Handler) -> bool:
+    return handler.get_name() == _OWNED_HANDLER_NAME
 
 
-def setup_file_logging(prefix: str) -> IO[str] | None:
-    """Redirect stdout/stderr to a timestamped log file when running inside a
-    packaged backend runtime (``LDACA_BACKEND_RUNTIME`` is set).
+def setup_logging(
+    *,
+    level: LogLevelName | int = "INFO",
+    log_file: str | None = None,
+    data_root: Path | None = None,
+) -> None:
+    """Replace this package's process-owned console and optional file handlers."""
 
-    Also attaches a JSON file handler to the package logger so that structured
-    records are captured alongside the tee'd stdout/stderr output.
+    numeric_level = level if isinstance(level, int) else _LOG_LEVELS[level]
+    package_logger = logging.getLogger(PACKAGE_LOGGER_NAME)
+    package_logger.setLevel(numeric_level)
+    package_logger.propagate = False
 
-    Returns the opened log file handle (caller should close it on shutdown),
-    or ``None`` when file logging is not applicable.
+    for handler in list(package_logger.handlers):
+        if _is_owned(handler):
+            package_logger.removeHandler(handler)
+            handler.close()
 
-    Used by:
-    - FastAPI application startup, backend package imports, local helpers in this module
-      because they need a backend boundary that validates inputs before delegating to
-      workspace or worker state.
+    console_handler = logging.StreamHandler(sys.stderr)
+    console_handler.setLevel(numeric_level)
+    console_handler.setFormatter(_ConsoleFormatter())
+    _mark_owned(console_handler)
+    package_logger.addHandler(console_handler)
 
-    Flow: normalize inputs, delegate to the owning backend state or service boundary, and
-        return serialized values or existing domain errors to callers.
-    """
-    logger = logging.getLogger(PACKAGE_LOGGER_NAME)
-
-    try:
-        backend_runtime = os.environ.get("LDACA_BACKEND_RUNTIME")
-        if not backend_runtime:
-            return None
-
-        log_dir = Path(backend_runtime) / "logs"
-        log_dir.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_file_path = log_dir / f"{prefix}_startup_{timestamp}.log"
-        log_file = open(log_file_path, "w", encoding="utf-8", buffering=1)
-
-        original_stdout = sys.__stdout__ or sys.stdout
-        original_stderr = sys.__stderr__ or sys.stderr
-        sys.stdout = TeeOutput(log_file, original_stdout)
-        sys.stderr = TeeOutput(log_file, original_stderr)
-
-        # Attach a structured JSON file handler for the package logger
-        json_log_path = log_dir / f"{prefix}_{timestamp}.jsonl"
-        file_handler = logging.FileHandler(json_log_path, encoding="utf-8")
+    if log_file is not None:
+        if data_root is None:
+            raise ValueError("data_root is required when log_file is configured")
+        log_path = data_root / log_file
+        mkdir_durable(log_path.parent)
+        file_handler = logging.FileHandler(log_path, encoding="utf-8")
+        file_handler.setLevel(numeric_level)
         file_handler.setFormatter(_StructuredFormatter())
-        logger.addHandler(file_handler)
+        _mark_owned(file_handler)
+        package_logger.addHandler(file_handler)
 
-        logger.info("Log file created: %s", log_file_path)
-        logger.info("Structured log file: %s", json_log_path)
-        return log_file
-    except Exception as e:
-        logger.warning("Failed to setup file logging: %s", e)
-        return None
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        logging.getLogger(name).setLevel(numeric_level)
+
+
+__all__ = ["PACKAGE_LOGGER_NAME", "setup_logging"]
