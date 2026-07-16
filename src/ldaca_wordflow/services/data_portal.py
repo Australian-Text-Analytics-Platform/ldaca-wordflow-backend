@@ -98,10 +98,13 @@ class DataPortalService:
             items=[DataPortalRecord.model_validate(record) for record in records],
         )
 
-    async def featured(self, api_token: str | None) -> DataPortalSearchResource:
+    async def featured(
+        self,
+        api_token: SecretStr | None,
+    ) -> DataPortalSearchResource:
         """Read configured featured collections outside all workspace gates."""
 
-        client = self._client(api_token)
+        client = self._client(_secret(api_token))
         try:
             records = await client.featured_collections(
                 list(self._settings.ldaca_oni_featured_collection_ids)
