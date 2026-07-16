@@ -1,354 +1,173 @@
-"""File CRUD endpoints and tree/folder helpers.
+"""Thin direct-resource adapters for runtime-owned user file storage."""
 
-Used by:
-- FastAPI router aggregation in ``__init__.py``.
+from typing import Annotated
 
-Flow:
-- Routes validate user paths, delegate filesystem operations to core utils,
-  and return file-tree or response payloads.
-"""
+from fastapi import APIRouter, Depends, Query, Request, Response, Security, status
 
-import logging
-from pathlib import Path
-from typing import Any
-
-from fastapi import APIRouter, Depends, Query, UploadFile
-
-from ...core.auth import get_current_user
-from ...core.exceptions import AccessDeniedError, FileNotFoundError, InternalServiceError, InvalidInputError, NotFoundError, ResourceConflictError
-from ...core.utils import (
-    detect_file_type,
-    get_user_data_folder,
-    validate_file_path,
-    validate_workspace_name,
-)
 from ...models.files import (
     CreateFolderRequest,
-    CreateFolderResponse,
-    FileTreeNodeResponse,
-    FileUploadResponse,
-    MessageResponse,
+    FileResource,
     MoveFileRequest,
 )
+from ...services.sessions import SessionPrincipal
+from ...services.user_files import UserFileStore
+from ...shared.errors import UnsupportedMediaTypeError
+from ..request_stream import RequestByteStream
+from ..responses import api_errors, route_path_with_query
+from ..security import get_current_session
+from .dependencies import get_user_file_store
 
 router = APIRouter()
-logger = logging.getLogger(__name__)
-
-README_FILENAME = "README.md"
-
-
-def _relative_path_for_api(path: Path) -> str:
-    """Normalize relative paths for API responses using forward slashes.
-
-    Called by:
-    - ``_build_file_tree``, ``create_folder``, ``move_file``.
-    """
-    return path.as_posix()
-
-
-def _visible_entry_names(names: list[str]) -> list[str]:
-    """Return sorted non-hidden directory entries.
-
-    Called by:
-    - ``_build_file_tree``.
-    """
-    return sorted(name for name in names if not name.startswith("."))
-
-
-def _build_file_tree(data_folder: Path) -> list[dict[str, Any]]:
-    """Build a nested file tree rooted at the user's data directory.
-
-    Steps:
-    - Walk the data folder top-down, filtering out hidden entries.
-    - Accumulate directory and file nodes keyed by relative path.
-
-    Called by:
-    - ``get_user_files``.
-    """
-    root_children: list[dict[str, Any]] = []
-    directory_nodes: dict[str, dict[str, Any]] = {"": {"children": root_children}}
-
-    for current_dir, dirnames, filenames in data_folder.walk(top_down=True):
-        dirnames[:] = _visible_entry_names(dirnames)
-        visible_filenames = _visible_entry_names(filenames)
-
-        relative_dir = current_dir.relative_to(data_folder)
-        relative_dir_str = (
-            "" if relative_dir == Path(".") else _relative_path_for_api(relative_dir)
-        )
-        current_children = directory_nodes[relative_dir_str]["children"]
-
-        for dirname in dirnames:
-            directory_path = (
-                Path(relative_dir_str, dirname) if relative_dir_str else Path(dirname)
-            )
-            directory_rel = _relative_path_for_api(directory_path)
-            directory_node = {
-                "name": dirname,
-                "path": directory_rel,
-                "type": "directory",
-                "children": [],
-            }
-            current_children.append(directory_node)
-            directory_nodes[directory_rel] = directory_node
-
-        for filename in visible_filenames:
-            file_rel_path = (
-                Path(relative_dir_str, filename) if relative_dir_str else Path(filename)
-            )
-            absolute_file_path = current_dir / filename
-            current_children.append(
-                {
-                    "name": filename,
-                    "path": _relative_path_for_api(file_rel_path),
-                    "type": "file",
-                    "size": absolute_file_path.stat().st_size,
-                }
-            )
-
-    return root_children
-
-
-def _resolve_user_file_path(relative_path: str, data_folder: Path) -> Path:
-    """Resolve and validate an API-supplied path inside the user's data folder.
-
-    Steps:
-    - Join the relative path to the data folder root.
-    - Validate that the resolved path stays inside the allowed directory.
-
-    Called by:
-    - ``create_folder``, ``move_file``, and ``get_raw_file`` (in
-      ``preview.py``).
-    """
-    file_path = data_folder / relative_path
-    if not validate_file_path(file_path, data_folder):
-        raise InvalidInputError("Invalid file path")
-    return file_path
-
-
-def _delete_parent_folder_if_redundant(file_path: Path, data_folder: Path) -> None:
-    """Delete the file's parent folder when it becomes empty or README-only.
-
-    Steps:
-    - Check whether the parent is a valid subdirectory of the data folder.
-    - Remove it if empty, or if it only contains a README.md file.
-
-    Used by:
-    - ``delete_file`` and ``move_file``.
-
-    Why:
-    - Imported datasets often live in their own wrapper folder with a data file
-      plus ``README.md``. When the data file is deleted, removing the now-empty
-      wrapper avoids leaving behind dead folders in the file browser.
-    """
-    parent = file_path.parent
-    if parent == data_folder or not parent.exists() or not parent.is_dir():
-        return
-
-    if not validate_file_path(parent, data_folder):
-        return
-
-    remaining_entries = list(parent.iterdir())
-    if not remaining_entries:
-        parent.rmdir()
-        return
-
-    if len(remaining_entries) != 1:
-        return
-
-    remaining_entry = remaining_entries[0]
-    if (
-        remaining_entry.is_file()
-        and remaining_entry.name.lower() == README_FILENAME.lower()
-    ):
-        remaining_entry.unlink()
-        parent.rmdir()
 
 
 @router.get(
-    "/", response_model=list[FileTreeNodeResponse], response_model_exclude_none=True
+    "",
+    response_model=list[FileResource],
+    responses=api_errors(403, 413, 422),
 )
-async def get_user_files(current_user: dict = Depends(get_current_user)):
-    """List user-visible files as a nested tree.
+async def list_user_files(
+    principal: Annotated[SessionPrincipal, Security(get_current_session)],
+    file_store: UserFileStore = Depends(get_user_file_store),
+) -> list[FileResource]:
+    """Return the complete deterministic User File tree."""
 
-    Flow:
-    - Resolve authentication and request parameters from FastAPI dependencies.
-    - Delegate validation, manager calls, artifacts, or state changes to the
-      owning helper.
-    - Shape the response payload or raise the HTTP error the client should see.
-
-    Used by:
-    - frontend file browser panel.
-
-    Why:
-    - The frontend consumes the directory structure directly instead of
-      reconstructing it from a flat file listing.
-    """
-    user_id = current_user["id"]
-    data_folder = get_user_data_folder(user_id)
-    return _build_file_tree(data_folder)
+    return [
+        FileResource.model_validate(resource)
+        for resource in await file_store.list_tree(principal.user.id)
+    ]
 
 
-@router.post("/folders", response_model=CreateFolderResponse)
+@router.get(
+    "/resource",
+    response_model=FileResource,
+    responses=api_errors(400, 403, 404, 422),
+)
+async def get_user_file_resource(
+    principal: Annotated[SessionPrincipal, Security(get_current_session)],
+    path: Annotated[str, Query(min_length=1)],
+    file_store: UserFileStore = Depends(get_user_file_store),
+) -> FileResource:
+    """Return one direct file-or-directory resource."""
+
+    return FileResource.model_validate(
+        await file_store.resource(principal.user.id, path)
+    )
+
+
+@router.post(
+    "/folders",
+    response_model=FileResource,
+    status_code=status.HTTP_201_CREATED,
+    responses=api_errors(400, 403, 404, 409, 422, 507),
+)
 async def create_folder(
     request: CreateFolderRequest,
-    current_user: dict = Depends(get_current_user),
-):
-    """Create a folder inside the user's data directory.
+    http_request: Request,
+    response: Response,
+    principal: Annotated[SessionPrincipal, Security(get_current_session)],
+    file_store: UserFileStore = Depends(get_user_file_store),
+) -> FileResource:
+    """Create one addressable directory and return its direct resource."""
 
-    Flow:
-    - Resolve authentication and request parameters from FastAPI dependencies.
-    - Delegate validation, manager calls, artifacts, or state changes to the
-      owning helper.
-    - Shape the response payload or raise the HTTP error the client should see.
-
-    Used by:
-    - Frontend and API clients through the FastAPI POST /folders route.
-    """
-    user_id = current_user["id"]
-    data_folder = get_user_data_folder(user_id)
-
-    is_valid, reason = validate_workspace_name(request.name)
-    if not is_valid:
-        raise InvalidInputError(f"Invalid folder name: {reason}")
-    parent_path = request.parent_path.strip()
-    parent_folder = (
-        data_folder
-        if not parent_path
-        else _resolve_user_file_path(parent_path, data_folder)
+    resource = FileResource.model_validate(
+        await file_store.create_folder(
+            principal.user.id,
+            name=request.name,
+            parent_path=request.parent_path,
+        )
     )
-
-    if not parent_folder.exists() or not parent_folder.is_dir():
-        raise NotFoundError(f"Folder {parent_path or '.'} not found")
-    folder_path = parent_folder / request.name.strip()
-    if not validate_file_path(folder_path, data_folder):
-        raise InvalidInputError("Invalid file path")
-    if folder_path.exists():
-        raise InvalidInputError(f"Folder {request.name.strip()} already exists")
-    try:
-        folder_path.mkdir(parents=False, exist_ok=False)
-    except OSError as exc:
-        raise InternalServiceError(f"Failed to create folder: {str(exc)}") from exc
-    relative_path = folder_path.relative_to(data_folder)
-    return {
-        "message": "Folder created",
-        "path": _relative_path_for_api(relative_path),
-    }
+    response.headers["Location"] = route_path_with_query(
+        http_request,
+        "get_user_file_resource",
+        path=resource.path,
+    )
+    return resource
 
 
-@router.post("/move", response_model=CreateFolderResponse)
+@router.patch(
+    "",
+    response_model=FileResource,
+    responses=api_errors(400, 403, 404, 409, 422),
+)
 async def move_file(
     request: MoveFileRequest,
-    current_user: dict = Depends(get_current_user),
-):
-    """Move a file into another directory inside the user's data folder.
+    http_request: Request,
+    response: Response,
+    principal: Annotated[SessionPrincipal, Security(get_current_session)],
+    file_store: UserFileStore = Depends(get_user_file_store),
+) -> FileResource:
+    """Move one existing file without replacement."""
 
-    Flow:
-    - Resolve authentication and request parameters from FastAPI dependencies.
-    - Delegate validation, manager calls, artifacts, or state changes to the
-      owning helper.
-    - Shape the response payload or raise the HTTP error the client should see.
-
-    Used by:
-    - Frontend and API clients through the FastAPI POST /move route.
-    """
-    user_id = current_user["id"]
-    data_folder = get_user_data_folder(user_id)
-
-    source_path = _resolve_user_file_path(request.source_path, data_folder)
-    target_directory = (
-        data_folder
-        if not request.target_directory_path.strip()
-        else _resolve_user_file_path(request.target_directory_path, data_folder)
+    resource = FileResource.model_validate(
+        await file_store.move(
+            principal.user.id,
+            source_path=request.source_path,
+            target_directory_path=request.target_directory_path,
+        )
     )
-
-    if not source_path.exists() or not source_path.is_file():
-        raise FileNotFoundError(f"File {request.source_path} not found")
-    if not target_directory.exists() or not target_directory.is_dir():
-        raise NotFoundError(f"Folder {request.target_directory_path} not found",)
-    destination_path = target_directory / source_path.name
-    if not validate_file_path(destination_path, data_folder):
-        raise InvalidInputError("Invalid file path")
-    if destination_path.exists():
-        raise InvalidInputError(f"File {destination_path.name} already exists in destination",)
-    original_source_path = source_path
-    try:
-        source_path.rename(destination_path)
-        _delete_parent_folder_if_redundant(original_source_path, data_folder)
-    except OSError as exc:
-        raise InternalServiceError(f"Failed to move file: {str(exc)}") from exc
-    return {
-        "message": "File moved",
-        "path": _relative_path_for_api(destination_path.relative_to(data_folder)),
-    }
+    response.headers["Location"] = route_path_with_query(
+        http_request,
+        "get_user_file_resource",
+        path=resource.path,
+    )
+    return resource
 
 
-@router.post("/upload", response_model=FileUploadResponse)
-async def upload_file(file: UploadFile, current_user: dict = Depends(get_current_user)):
-    """Upload file to user's data folder.
+@router.post(
+    "/uploads",
+    response_model=FileResource,
+    status_code=status.HTTP_201_CREATED,
+    responses=api_errors(400, 403, 409, 413, 415, 422, 507),
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/octet-stream": {
+                    "schema": {"type": "string", "format": "binary"}
+                }
+            },
+        }
+    },
+)
+async def upload_file(
+    request: Request,
+    response: Response,
+    principal: Annotated[SessionPrincipal, Security(get_current_session)],
+    path: Annotated[str, Query(min_length=1)],
+    file_store: UserFileStore = Depends(get_user_file_store),
+) -> FileResource:
+    """Admit and stream one raw body before any framework multipart spooling."""
 
-    Flow:
-    - Resolve authentication and request parameters from FastAPI dependencies.
-    - Delegate validation, manager calls, artifacts, or state changes to the
-      owning helper.
-    - Shape the response payload or raise the HTTP error the client should see.
-
-    Used by:
-    - Frontend and API clients through the FastAPI POST /upload route.
-    """
-    user_id = current_user["id"]
-    data_folder = get_user_data_folder(user_id)
-
-    if not file.filename:
-        raise InvalidInputError("No filename provided")
-    file_path = data_folder / file.filename
-
-    if file_path.exists():
-        raise ResourceConflictError(f"File {file.filename} already exists")
-    with open(file_path, "wb") as buffer:
-        content = await file.read()
-        buffer.write(content)
-
-    file_type = detect_file_type(file.filename)
-
-    return {
-        "filename": file.filename,
-        "size": len(content),
-        "upload_time": str(file_path.stat().st_ctime),
-        "file_type": file_type,
-        "preview_available": file_type in ["csv", "json", "parquet"],
-    }
+    if (
+        request.headers.get("content-type", "").split(";", 1)[0].strip().casefold()
+        != "application/octet-stream"
+    ):
+        raise UnsupportedMediaTypeError("File uploads require application/octet-stream")
+    stored = await file_store.upload(
+        principal.user.id,
+        path,
+        RequestByteStream(request),
+    )
+    resource = FileResource.model_validate(stored)
+    response.headers["Location"] = route_path_with_query(
+        request,
+        "get_user_file_resource",
+        path=resource.path,
+    )
+    return resource
 
 
-@router.delete("/", response_model=MessageResponse)
+@router.delete(
+    "",
+    status_code=status.HTTP_204_NO_CONTENT,
+    responses=api_errors(400, 403, 404, 422),
+)
 async def delete_file(
+    principal: Annotated[SessionPrincipal, Security(get_current_session)],
     path: str = Query(..., description="Path relative to the user's data directory"),
-    current_user: dict = Depends(get_current_user),
-):
-    """Delete a file or directory inside the user's data folder.
+    file_store: UserFileStore = Depends(get_user_file_store),
+) -> Response:
+    """Delete one file/directory and return an empty body."""
 
-    Flow:
-    - Resolve authentication and request parameters from FastAPI dependencies.
-    - Delegate validation, manager calls, artifacts, or state changes to the
-      owning helper.
-    - Shape the response payload or raise the HTTP error the client should see.
-
-    Used by:
-    - frontend file browser delete actions because path-bearing file operations
-      use the same query-parameter contract as raw-content reads.
-    """
-    user_id = current_user["id"]
-    data_folder = get_user_data_folder(user_id)
-    file_path = data_folder / path
-
-    if not validate_file_path(file_path, data_folder):
-        raise AccessDeniedError("Access denied: file outside allowed directory")
-    if not file_path.exists():
-        raise FileNotFoundError(f"File {path} not found")
-    if file_path.is_dir():
-        import shutil
-        shutil.rmtree(file_path)
-    else:
-        file_path.unlink()
-    _delete_parent_folder_if_redundant(file_path, data_folder)
-    return {"message": f"File {path} deleted successfully"}
+    await file_store.delete(principal.user.id, path)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
