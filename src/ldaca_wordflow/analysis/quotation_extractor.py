@@ -12,14 +12,10 @@ Flow: normalize source text, run local or remote quotation extraction, preserve
 
 from __future__ import annotations
 
-import importlib.util
-import logging
 import re
 import shutil
-import sys
 import tarfile
 import tempfile
-import types
 from pathlib import Path
 from typing import Any
 
@@ -35,54 +31,6 @@ _nlp_model = None
 _extractor = None
 
 QUOTATION_GROUP_COLUMN = "quotation"
-
-
-def _ensure_stubs():
-    """Install the minimal bson stub required by quote_extractor.py."""
-    if "bson" not in sys.modules:
-        sys.modules["bson"] = types.ModuleType("bson")
-    bson = sys.modules["bson"]
-    if not hasattr(bson, "ObjectId"):
-        setattr(bson, "ObjectId", str)
-
-
-def _load_module(module_name: str, file_path: Path):
-    """Load a vendored Python module from an explicit file path."""
-    if module_name in sys.modules:
-        return sys.modules[module_name]
-
-    spec = importlib.util.spec_from_file_location(module_name, file_path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Could not load module {module_name} from {file_path}")
-
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-def _install_quote_extractor_utils_stub():
-    """Provide the minimal utils module required by quote_extractor.py.
-
-    The original module creates a file logger at import time. We only need a
-    quiet in-memory logger because the backend uses `QuoteExtractor.extract_quotes`
-    directly and does not call the script entrypoints.
-    """
-    if "utils" in sys.modules:
-        return
-
-    stub = types.ModuleType("utils")
-
-    def create_logger(*_args, **_kwargs):
-        """Support quotation extraction logging with a create logger helper."""
-
-        logger = logging.getLogger("ldaca_wordflow.quotation_tool")
-        if not logger.handlers:
-            logger.addHandler(logging.NullHandler())
-        return logger
-
-    setattr(stub, "create_logger", create_logger)
-    sys.modules["utils"] = stub
 
 
 def _get_cached_spacy_model_dir() -> Path:
@@ -193,25 +141,10 @@ def _get_extractor():
     if _extractor is not None:
         return _extractor
 
-    _ensure_stubs()
-    _install_quote_extractor_utils_stub()
-
-    quote_extractor_module = _load_module(
-        "ldaca_vendor_quote_extractor",
-        _ENGLISH_DIR / "quote_extractor.py",
-    )
-    QuoteExtractor = quote_extractor_module.QuoteExtractor
+    from .._vendor.gender_gap_tracker.quote_extractor import QuoteExtractor
 
     _nlp_model = _load_spacy_model()
-
-    config = {
-        "spacy_lang": _nlp_model,
-        "NLP": {
-            "MAX_BODY_LENGTH": 20000,
-            "QUOTE_VERBS": str(_QUOTE_VERBS_PATH),
-        },
-    }
-    _extractor = QuoteExtractor(config)
+    _extractor = QuoteExtractor(_QUOTE_VERBS_PATH)
     return _extractor
 
 

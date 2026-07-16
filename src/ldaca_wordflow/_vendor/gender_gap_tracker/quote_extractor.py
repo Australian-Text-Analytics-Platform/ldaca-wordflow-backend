@@ -1,65 +1,12 @@
-import argparse
-import importlib
-import logging
-import traceback
-from bson import ObjectId
+from pathlib import Path
 from statistics import mean
-from datetime import datetime, timedelta
-from multiprocessing import Pool, cpu_count
 
 import spacy
-import utils
-
-logger = utils.create_logger(
-    "quote_extractor",
-    log_dir="logs",
-    logger_level=logging.INFO,
-    file_log_level=logging.INFO,
-)
-
-
-def chunker(iterable, chunksize):
-    """Yield a smaller chunk of a large iterable"""
-    for i in range(0, len(iterable), chunksize):
-        yield iterable[i : i + chunksize]
-
-
-def process_chunks(chunk):
-    """Pass through a chunk of document IDs and extract quotes"""
-    db_client = utils.init_client(MONGO_ARGS)
-    collection = db_client[DB_NAME][READ_COL]
-    for idx in chunk:
-        mongo_doc = collection.find_one({"_id": idx})
-        extractor.run(collection, mongo_doc)
-
-
-def run_pool(poolsize, chunksize):
-    """Concurrently perform quote extraction based on a filter query"""
-    # Find ALL ids in the database within the query bounds (one-time only)
-    client = utils.init_client(MONGO_ARGS)
-    id_collection = client[DB_NAME][READ_COL]
-    query = utils.prepare_query(filters)
-    document_ids = id_collection.find(query).distinct("_id")
-    logger.info(f"Obtained ID list for {len(document_ids)} articles.")
-
-    # Check for doc limit
-    if DOC_LIMIT > 0:
-        document_ids = document_ids[:DOC_LIMIT]
-    logger.info(f"Processing {len(document_ids)} articles...")
-
-    # Process quotes using a pool of executors
-    pool = Pool(processes=poolsize)
-    pool.map(process_chunks, chunker(document_ids, chunksize=chunksize))
-    pool.close()
 
 
 class QuoteExtractor:
-    def __init__(self, config) -> None:
-        self.config = config
-        self.nlp = config["spacy_lang"]
-        self.quote_verbs = [
-            verb for verb in open(config["NLP"]["QUOTE_VERBS"]).read().split()
-        ]
+    def __init__(self, quote_verbs_path: str | Path) -> None:
+        self.quote_verbs = Path(quote_verbs_path).read_text(encoding="utf-8").split()
 
     def get_pretty_index(self, key):
         """Format span/token indexes like (123,127)"""
@@ -69,31 +16,12 @@ class QuoteExtractor:
         elif isinstance(key, spacy.tokens.token.Token):
             return frmt.format(key.idx, key.idx + len(key.text))
 
-    def prettify(self, key):
-        """Format span/token like 'Book (7,11)'"""
-        frmt = "{0} ({1},{2})"
-        if isinstance(key, spacy.tokens.span.Span):
-            return frmt.format(str(key), key.start_char, key.end_char)
-        elif isinstance(key, spacy.tokens.token.Token):
-            return frmt.format(str(key), key.idx, key.idx + len(key.text))
-
     def is_quote_in_sent(self, quote_set, sent_set):
         """Check if a detected quote in an specific sentence."""
         quote_len = len(quote_set)
         sent_len = len(sent_set)
         threshold = min(quote_len, sent_len) / 2
         if len(quote_set.intersection(sent_set)) >= threshold:
-            return True
-        else:
-            return False
-
-    def sent_in_double_quotes(self, sent):
-        """Check whether the sentence is in double quotes (potential floating quote)."""
-        sent_string = str(sent)
-        sent_string = sent_string.replace(" ", "")
-        sent_string = sent_string.replace("\n", "")
-        sent_string = sent_string.replace("\\", "")
-        if '"' in sent_string[0:3] and '."' in sent_string[-3:]:
             return True
         else:
             return False
@@ -146,9 +74,7 @@ class QuoteExtractor:
             # at the beginning. Includes a catch for small closing sentences like: ".\n"
             next_sent_has_only_one_quote_at_end = (
                 (len(next_sent_string) < 3) and next_sent_string.count('"') == 1
-            ) or (
-                ('"' in next_sent_string[-3:]) and not ('"' in next_sent_string[0:-3])
-            )
+            ) or ('"' in next_sent_string[-3:] and '"' not in next_sent_string[0:-3])
             float_quote += str(next_sent)
             sents_processed += 1
             quote_token_count += len(next_sent)
@@ -303,7 +229,7 @@ class QuoteExtractor:
     def extract_syntactic_quotes(self, doc):
         quote_list = []
         for word in doc:
-            if word.dep_ in ("ccomp"):
+            if word.dep_ == "ccomp":
                 if (word.right_edge.i + 1) < len(doc):
                     subtree_span = doc[word.left_edge.i : word.right_edge.i + 1]
                     sent = subtree_span
@@ -322,7 +248,7 @@ class QuoteExtractor:
                                     child.left_edge.i : child.right_edge.i + 1
                                 ]
                                 speaker = subj_subtree_span
-                                if type(speaker) == spacy.tokens.span.Span:
+                                if isinstance(speaker, spacy.tokens.span.Span):
                                     # Get quote type
                                     quote_type = self.get_quote_type(
                                         doc, sent, verb, speaker, subtree_span
@@ -356,7 +282,7 @@ class QuoteExtractor:
                                         }
                                         quote_list.append(quote_obj)
                                     break
-            elif word.dep_ in ("prep"):
+            elif word.dep_ == "prep":
                 expression = doc[word.head.left_edge.i : word.i + 1]
                 if expression.text in ("according to", "According to"):
                     accnode = word.head
@@ -370,8 +296,7 @@ class QuoteExtractor:
                     else:
                         sent = doc[accnode.head.left_edge.i : accnode.i]
                         speaker = doc[tonode.i + 1 : accnode.head.right_edge.i + 1]
-                    # if is_valid_quote and is_valid_type and is_valid_speaker:
-                    # TODO: How to validate these quotes? what is the quote type?
+                    # "According to" clauses use their own explicit quote type.
                     quote_obj = {
                         "speaker": str(speaker),
                         "speaker_index": self.get_pretty_index(speaker),
@@ -485,201 +410,3 @@ class QuoteExtractor:
         all_quotes = syntactic_quotes + floating_quotes + heuristic_quotes
         final_quotes = self.find_global_duplicates(all_quotes)
         return final_quotes
-
-    def run(self, collection, mongo_doc):
-        """Run quote extraction on a MongoDB document, and write quotes to a specified collection in the database"""
-        try:
-            doc_id = str(mongo_doc["_id"])
-
-            if mongo_doc is None:
-                logger.error(f"Document '{doc_id}' not found.")
-            else:
-                text = mongo_doc["body"]
-                text_length = len(text)
-                if text_length > self.config["NLP"]["MAX_BODY_LENGTH"]:
-                    logger.warning(
-                        f"Skipping document {doc_id} due to long length {text_length} characters"
-                    )
-                    if not self.config["dry_run"]:
-                        collection.update_one(
-                            {"_id": ObjectId(doc_id)},
-                            {
-                                "$set": {
-                                    "lastModifier": "max_body_len",
-                                    "lastModified": datetime.now(),
-                                },
-                                "$unset": {"quotes": 1},
-                            },
-                            upsert=True,
-                        )
-                # Process document
-                doc_text = utils.preprocess_text(mongo_doc["body"])
-                spacy_doc = nlp(doc_text)
-
-                quotes = self.extract_quotes(spacy_doc)
-                if not self.config["dry_run"]:
-                    collection.update_one(
-                        {"_id": ObjectId(doc_id)},
-                        {
-                            "$set": {
-                                "quotes": quotes,
-                                "lastModifier": "quote_extractor",
-                                "lastModified": datetime.now(),
-                            }
-                        },
-                    )
-                else:
-                    # If dry run, then display extracted quotes (for testing)
-                    print("=" * 20, " Quotes ", "=" * 20)
-                    for q in quotes:
-                        print(q, "\n")
-        except:
-            logger.exception(
-                f"Failed to process {mongo_doc['_id']} due to runtime exception!"
-            )
-            traceback.print_exc()
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Extract quotes from doc(s) locally or push to db."
-    )
-    parser.add_argument(
-        "--config_file", type=str, default="config", help="Name of config file"
-    )
-    parser.add_argument("--db", type=str, default="mediaTracker", help="Database name")
-    parser.add_argument("--readcol", type=str, default="media", help="Collection name")
-    parser.add_argument(
-        "--dry_run",
-        action="store_true",
-        help="Do not write anything to database (dry run)",
-    )
-    parser.add_argument(
-        "--force_update",
-        action="store_true",
-        help="Overwrite already processed documents in database",
-    )
-    parser.add_argument(
-        "--in_dir",
-        type=str,
-        default="",
-        help="Path to read input text files from this directory.",
-    )
-    parser.add_argument(
-        "--out_dir",
-        type=str,
-        default="",
-        help="Path to write JSON quotes to this directory.",
-    )
-    parser.add_argument(
-        "--limit", type=int, default=0, help="Max. number of articles to process"
-    )
-    parser.add_argument(
-        "--begin_date", type=str, help="Start date of articles to process (YYYY-MM-DD)"
-    )
-    parser.add_argument(
-        "--end_date", type=str, help="End date of articles to process (YYYY-MM-DD)"
-    )
-    parser.add_argument(
-        "--outlets",
-        type=str,
-        help="Comma-separated list of news outlets to consider in query scope",
-    )
-    parser.add_argument(
-        "--ids",
-        type=str,
-        help="Comma-separated list of document ids to process. \
-                                               By default, all documents in the collection are processed.",
-    )
-    parser.add_argument(
-        "--spacy_model",
-        type=str,
-        default="en_core_web_lg",
-        help="spaCy language model to use for NLP",
-    )
-    parser.add_argument(
-        "--poolsize",
-        type=int,
-        default=cpu_count() + 1,
-        help="Size of the concurrent process pool for the given task",
-    )
-    parser.add_argument(
-        "--chunksize",
-        type=int,
-        default=20,
-        help="Number of articles IDs per chunk being processed concurrently",
-    )
-    dargs = parser.parse_args()
-    args = vars(dargs)
-
-    # ========== Parse config params and arguments ==========
-    config_file_name = args["config_file"]
-    config_file = importlib.import_module(config_file_name)
-    config = config_file.config
-
-    MONGO_ARGS = config["MONGO_ARGS"]
-
-    DB_NAME = args["db"]
-    READ_COL = args["readcol"]
-    DOC_LIMIT = args["limit"]
-    UPDATE_DB = not args["dry_run"]  # Do not update db when we request a dry run
-    FORCE_UPDATE = args["force_update"]
-    IN_DIR = args["in_dir"]
-    OUT_DIR = args["out_dir"]
-    POOLSIZE = args["poolsize"]
-    CHUNKSIZE = args["chunksize"]
-
-    date_begin = utils.convert_date(args["begin_date"]) if args["begin_date"] else None
-    date_end = utils.convert_date(args["end_date"]) if args["begin_date"] else None
-
-    date_filters = []
-    if date_begin:
-        date_filters.append({"publishedAt": {"$gte": date_begin}})
-    if date_end:
-        date_filters.append({"publishedAt": {"$lt": date_end + timedelta(days=1)}})
-
-    if FORCE_UPDATE:
-        other_filters = []
-    else:
-        other_filters = [
-            {"quotes": {"$exists": False}},
-            {"lastModifier": "mediaCollectors"},
-        ]
-
-    doc_id_list = args["ids"] if args["ids"] else None
-    outlet_list = args["outlets"] if args["outlets"] else None
-
-    filters = {
-        "doc_id_list": doc_id_list,
-        "outlets": outlet_list,
-        "force_update": FORCE_UPDATE,
-        "date_filters": date_filters,
-        "other_filters": other_filters,
-    }
-
-    print(f"Loading spaCy language model: {args['spacy_model']}...")
-    nlp = spacy.load(args["spacy_model"])
-    args["spacy_lang"] = nlp
-    config = {**args, **config}
-    print("Finished loading")
-
-    extractor = QuoteExtractor(config)
-    db_client = utils.init_client(MONGO_ARGS)
-    query = utils.prepare_query(filters)
-
-    if IN_DIR:
-        UPDATE_DB = False
-        # Add custom read/write logic for local machine here
-        file_dict = utils.get_files_from_folder(folder_path=IN_DIR, limit=DOC_LIMIT)
-        for idx, text in file_dict.items():
-            doc = {"_id": idx, "body": text}
-            doc_quotes = extractor.run(collection=None, mongo_doc=doc)
-            quote_dict = {idx: doc_quotes}
-            if OUT_DIR:
-                utils.write_quotes_local(quote_dict=quote_dict, output_dir=OUT_DIR)
-        print(f'Retrieveved {len(file_dict)} files from "{IN_DIR}"')
-
-    else:
-        # Directly parse documents from the db, and write back to db
-        run_pool(POOLSIZE, CHUNKSIZE)
-        logger.info("Finished processing quotes.")

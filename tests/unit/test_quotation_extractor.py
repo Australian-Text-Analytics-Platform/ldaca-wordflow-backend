@@ -2,6 +2,17 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 from ldaca_wordflow.analysis import quotation_extractor as qe
+from ldaca_wordflow._vendor.gender_gap_tracker.quote_extractor import QuoteExtractor
+
+
+def test_vendored_extractor_exposes_only_the_in_process_algorithm(tmp_path: Path):
+    verbs = tmp_path / "verbs.txt"
+    verbs.write_text("said\nreported\n", encoding="utf-8")
+
+    extractor = QuoteExtractor(verbs)
+
+    assert extractor.quote_verbs == ["said", "reported"]
+    assert not hasattr(extractor, "run")
 
 
 def test_load_spacy_model_downloads_to_cache_when_package_missing(
