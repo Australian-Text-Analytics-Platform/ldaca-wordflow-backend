@@ -25,24 +25,22 @@ classifiers = [
 dependencies = [
     "aiosqlite>=0.21.0",
     "duckdb>=1.4.0",
-    "fastapi[standard]>=0.138.0",               # Includes uvicorn, pydantic, starlette
+    "fastapi>=0.138.0",
     "fastexcel>=0.18.0",
-    "xlsxwriter>=3.2.0",                        # Required by polars DataFrame.write_excel for xlsx export
-    "google-auth-oauthlib>=1.2.2",              # Includes google-auth
+    "google-auth[requests]>=2.38.0",            # Google ID-token verification
     "httpx>=0.27.0",
     "pydantic-settings>=2.0.0",
+    "python-multipart>=0.0.20",                 # OAuth form callbacks
     "psutil>=6.1.0",                            # Process management for proper cleanup of child processes
-    "docworkspace>=0.3.0",
     "polars-text>=0.4.0",
-    "pyarrow>=16.0.0",
-    "rocrate-tabular>=0.2.0",
+    "polars-source-utils>=0.2.0",
     "tbb>=2022.3.1 ; sys_platform != 'darwin'",
     "openai>=2.26.0",                           # AsyncOpenAI: OpenAI/OpenRouter/OpenAI-compatible custom annotation calls
     "anthropic>=0.40.0",                        # AsyncAnthropic: server-side Claude annotation calls
     "google-genai>=1.0.0",                      # google-genai aio: server-side Gemini annotation calls
     "spacy>=3.7.0",
     "scikit-learn>=1.5.0",          # ENGLISH_STOP_WORDS for the Rust c-TF-IDF stoplist
-    "tomli-w>=1.2.0",
+    "uvicorn[standard]>=0.35.0",
 ]
 
 [project.optional-dependencies]
@@ -50,7 +48,6 @@ deploy = ["jupyter-server-proxy>=4.4.0", "ipython>=9.5.0"]
 
 [project.scripts]
 ldaca-wordflow = "ldaca_wordflow.cli:main"
-ldaca-web-app = "ldaca_wordflow.cli:main"
 
 [tool.pytest.ini_options]
 addopts = ["-ra", "--strict-markers", "--strict-config"]
@@ -71,7 +68,11 @@ build-backend = "hatchling.build"
 path = "scripts/hatch_build.py"
 
 [dependency-groups]
-dev = ["twine>=6.2.0", "pytest-asyncio>=0.23.0"]
+dev = [
+    "twine>=6.2.0",
+    "pytest-asyncio>=0.23.0",
+    "httpx2>=2.0.0",
+]
 
 [tool.ty.src]
 exclude = ["**/_vendor/"]
@@ -93,23 +94,19 @@ include = [
     "/src",
     "/scripts/hatch_build.py",
     "/src/ldaca_wordflow/resources/**",
-    "/src/ldaca_wordflow/_vendor/GenderGapTracker/**",
-    "/src/ldaca_wordflow/_vendor/rocrate-tabular/**",
+    "/src/ldaca_wordflow/_vendor/gender_gap_tracker/**",
 ]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ldaca_wordflow"]
 include = [
     "src/ldaca_wordflow/resources/**",
-    "src/ldaca_wordflow/_vendor/GenderGapTracker/**",
-    "src/ldaca_wordflow/_vendor/rocrate-tabular/**",
+    "src/ldaca_wordflow/_vendor/gender_gap_tracker/**",
 ]
 
 [tool.hatch.build.targets.wheel.sources]
 "src" = ""
 
 [tool.uv.sources]
-docworkspace = { path = "../docworkspace", editable = true }
 polars-text = { path = "../polars-text", editable = true }
 polars-source-utils = { path = "../polars-source-utils", editable = true }
-rocrate-tabular = { path = "src/ldaca_wordflow/_vendor/rocrate-tabular" }
