@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ldaca-web-app-ci-${{ github.ref }}
+  group: ldaca-wordflow-ci-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -32,8 +32,6 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
-        with:
-          submodules: recursive
 
       - name: Check out source dependencies
         shell: bash
@@ -54,9 +52,6 @@ jobs:
           }
 
           clone_source_dependency \
-            https://github.com/Australian-Text-Analytics-Platform/docworkspace.git \
-            "$GITHUB_WORKSPACE/../docworkspace"
-          clone_source_dependency \
             https://github.com/Australian-Text-Analytics-Platform/polars-text.git \
             "$GITHUB_WORKSPACE/../polars-text"
           clone_source_dependency \
@@ -66,10 +61,7 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@v8.2.0
         with:
-          # Standard (GIL) CPython 3.14: Polars ships only cp310-abi3 wheels, so a
-          # free-threaded "3.14t" interpreter has no matching wheel and would build
-          # polars-runtime from source on every run. The desktop bundle stays 3.14t on
-          # purpose; CI only needs to validate library logic, not the no-GIL runtime.
+          # Standard CPython 3.14 matches the desktop runtime and published wheels.
           python-version: "3.14"
           enable-cache: true
           cache-python: true
@@ -77,7 +69,7 @@ jobs:
       - name: Extract frontend build archive
         shell: bash
         run: |
-          FRONTEND_RES=src/ldaca_web_app/resources/frontend
+          FRONTEND_RES=src/ldaca_wordflow/resources/frontend
           if [ -f "$FRONTEND_RES/build.tar.gz" ]; then
             tar -xzf "$FRONTEND_RES/build.tar.gz" -C "$FRONTEND_RES"
             echo "Frontend build extracted"
@@ -91,8 +83,59 @@ jobs:
 
       - name: Run tests
         shell: bash
-        run: uv run pytest -q
+        run: |
+          uv run ruff check .
+          uv run ty check
+          uv run pytest -q
+
+      - name: Export OpenAPI without runtime startup
+        shell: bash
+        run: |
+          uv run python scripts/export_openapi.py --output "$RUNNER_TEMP/openapi.json"
+          python - <<'PY'
+          import json, os, pathlib
+
+          schema = json.loads(
+              (pathlib.Path(os.environ["RUNNER_TEMP"]) / "openapi.json").read_text()
+          )
+          operations = [
+              operation
+              for path in schema["paths"].values()
+              for method, operation in path.items()
+              if method in {"get", "post", "put", "patch", "delete"}
+          ]
+          operation_ids = [operation["operationId"] for operation in operations]
+          assert len(operation_ids) == len(set(operation_ids))
+          assert schema["paths"]["/health"]["get"]["responses"]["200"]["content"]
+          PY
 
       - name: Build distributions
         shell: bash
-        run: uv build
+        run: |
+          uv build
+          python - <<'PY'
+          import pathlib, zipfile
+
+          wheel = next(pathlib.Path("dist").glob("*.whl"))
+          with zipfile.ZipFile(wheel) as archive:
+              names = archive.namelist()
+              assert any("ldaca_wordflow/domain/workspace/analysis.py" in name for name in names)
+              assert any("ldaca_wordflow/infrastructure/storage/workspace_store.py" in name for name in names)
+              assert any("ldaca_wordflow/_vendor/gender_gap_tracker/quote_extractor.py" in name for name in names)
+              assert any("ldaca_wordflow/_vendor/gender_gap_tracker/LICENSE" in name for name in names)
+              assert not any(
+                  "docworkspace" in name.casefold() or "rocrate_tabular" in name
+                  for name in names
+              )
+              metadata_name = next(name for name in names if name.endswith(".dist-info/METADATA"))
+              metadata = archive.read(metadata_name).decode("utf-8")
+              for removed in (
+                  "docworkspace",
+                  "fastar",
+                  "pyarrow",
+                  "rocrate-tabular",
+                  "tomli-w",
+                  "xlsxwriter",
+              ):
+                  assert f"Requires-Dist: {removed}" not in metadata
+          PY
