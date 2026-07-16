@@ -73,6 +73,7 @@ dev = [
     "pytest-asyncio>=0.23.0",
     "httpx2>=2.0.0",
     "ruff>=0.15.1",
+    "ty>=0.0.59",
 ]
 
 [tool.ty.src]
