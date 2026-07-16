@@ -169,7 +169,9 @@ class OAuthService:
                     "code": code,
                     "redirect_uri": redirect_uri,
                     "client_id": self.settings.cilogon_client_id,
-                    "client_secret": self.settings.cilogon_client_secret,
+                    "client_secret": (
+                        self.settings.cilogon_client_secret.get_secret_value()
+                    ),
                     "code_verifier": code_verifier,
                 },
                 timeout=15,

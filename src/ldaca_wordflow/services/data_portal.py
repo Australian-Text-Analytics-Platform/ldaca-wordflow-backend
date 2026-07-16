@@ -156,7 +156,7 @@ class DataPortalService:
                         "requested_name": name,
                         "api_base_url": self._settings.ldaca_oni_api_base_url,
                         "api_token": _secret(request.api_token)
-                        or self._settings.ldaca_oni_api_token,
+                        or _secret(self._settings.ldaca_oni_api_token),
                         "timeout": self._settings.ldaca_oni_timeout,
                         "download_concurrency": (
                             self._settings.ldaca_oni_download_concurrency
@@ -246,7 +246,7 @@ class DataPortalService:
     def _client(self, token: str | None) -> OniClient:
         return OniClient(
             self._http_client,
-            token=token or self._settings.ldaca_oni_api_token,
+            token=token or _secret(self._settings.ldaca_oni_api_token),
         )
 
     async def _run_io(

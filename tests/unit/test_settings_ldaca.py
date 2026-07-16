@@ -1,31 +1,26 @@
+"""Strict immutable Oni settings accept only the canonical typed form."""
+
+from typing import Any, cast
+
+import pytest
+from pydantic import ValidationError
+
 from ldaca_wordflow.settings import Settings
 
 
-def test_featured_collection_ids_do_not_split_arcp_comma() -> None:
-    app_settings = Settings(
-        ldaca_oni_featured_collection_ids="arcp://name,hdl10.26180~23961609"
-    )
-
-    assert app_settings.get_ldaca_oni_featured_collection_ids() == [
-        "arcp://name,hdl10.26180~23961609"
-    ]
-
-
-def test_featured_collection_ids_support_semicolon_and_json_lists() -> None:
-    semicolon_settings = Settings(
-        ldaca_oni_featured_collection_ids=(
-            "arcp://name,hdl10.26180~23961609; arcp://name,hdl10.26180~other"
-        )
-    )
-    json_settings = Settings(
-        ldaca_oni_featured_collection_ids=(
-            '["arcp://name,hdl10.26180~23961609", "arcp://name,hdl10.26180~other"]'
-        )
-    )
-
-    expected = [
+def test_featured_collection_ids_preserve_arcp_identifiers_exactly() -> None:
+    identifiers = (
         "arcp://name,hdl10.26180~23961609",
         "arcp://name,hdl10.26180~other",
-    ]
-    assert semicolon_settings.get_ldaca_oni_featured_collection_ids() == expected
-    assert json_settings.get_ldaca_oni_featured_collection_ids() == expected
+    )
+    settings = Settings(ldaca_oni_featured_collection_ids=identifiers)
+    assert settings.ldaca_oni_featured_collection_ids == identifiers
+
+
+def test_featured_collection_ids_reject_encoded_string_formats() -> None:
+    with pytest.raises(ValidationError):
+        Settings(
+            ldaca_oni_featured_collection_ids=cast(
+                Any, "arcp://name,hdl10.26180~23961609;arcp://name,other"
+            ),
+        )
