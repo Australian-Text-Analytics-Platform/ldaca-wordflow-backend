@@ -225,9 +225,8 @@ class EventHub:
             return
         subscription.closed = True
         queue = subscription._queue
-        if queue.full():
-            while not queue.empty():
-                queue.get_nowait()
+        while not queue.empty():
+            queue.get_nowait()
         queue.put_nowait(None)
 
     def _next_sequence(self) -> int:

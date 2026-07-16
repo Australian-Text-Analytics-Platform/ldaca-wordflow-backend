@@ -72,6 +72,7 @@ async def test_logout_closes_only_its_session_streams() -> None:
     second = await hub.subscribe("alice", "second")
     await first.receive()
     await second.receive()
+    await hub.publish_workspace_runtime("alice", uuid.uuid4(), "open")
 
     await hub.close_session_streams("first")
 
