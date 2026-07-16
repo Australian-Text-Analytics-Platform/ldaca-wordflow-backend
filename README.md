@@ -40,6 +40,7 @@ JupyterHub, the launcher derives the proxy `root_path` from
 - Backend architecture: [`../docs/architecture/backend/overview.md`](../docs/architecture/backend/overview.md)
 - HTTP endpoint inventory: [`../docs/reference/backend-api.md`](../docs/reference/backend-api.md)
 - Settings reference: [`../docs/reference/backend-settings.md`](../docs/reference/backend-settings.md)
-- Type check: `uvx ty check`
+- Lint: `uv run ruff check .`
+- Type check: `uv run ty check`
 - Tests: `uv run pytest -q`
 - OpenAPI export: `uv run python scripts/export_openapi.py --output <path>`
