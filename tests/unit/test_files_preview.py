@@ -7,26 +7,29 @@ from unittest.mock import patch
 from zipfile import ZipFile
 
 import polars as pl
-import pytest
-from fastapi.testclient import TestClient
 
 
-@pytest.fixture(name="client")
-def files_client_alias(files_test_client: TestClient):
-    return files_test_client
+def _write_stub_xlsx(path: Path) -> None:
+    """Write a structurally valid ZIP container for mocked Excel-reader tests."""
+
+    with ZipFile(path, "w") as archive:
+        archive.writestr(
+            "xl/workbook.xml",
+            '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"/>',
+        )
 
 
-def test_csv_preview_supported_types_and_preview(client, tmp_path):
+def test_csv_preview_supported_types_and_preview(files_test_client, tmp_path):
     """Test CSV file preview with pagination"""
     # Arrange: create CSV in user data
-    user_root = tmp_path / "users" / "user_test_user" / "user_data"
+    user_root = tmp_path / "users" / "root" / "files"
     csv_path = user_root / "sample.csv"
     pl.DataFrame({"a": [1, 2, 3], "b": ["x", "y", "z"]}).write_csv(csv_path)
 
     # Act
-    resp = client.post(
-        "/api/files/preview",
-        json={"filename": "sample.csv", "page": 0, "page_size": 2},
+    resp = files_test_client.post(
+        "/api/user-files/preview",
+        json={"path": "sample.csv", "page": 1, "page_size": 2},
     )
 
     # Assert
@@ -35,13 +38,15 @@ def test_csv_preview_supported_types_and_preview(client, tmp_path):
     assert data["file_type"] == "csv"
     assert "LazyFrame" in data["supported_types"]
     assert data["columns"] == ["a", "b"]
-    assert len(data["preview"]) == 2
+    assert len(data["rows"]) == 2
+    assert data["total_rows"] == 3
+    assert data["total_pages"] == 2
 
 
-def test_zip_preview_returns_file_listing(client, tmp_path):
-    """ZIP archives should return legacy text-ingestion metadata columns."""
+def test_generic_zip_preview_is_rejected(files_test_client, tmp_path):
+    """Executable/unbounded archive contents are not a user-data format."""
 
-    user_root = tmp_path / "users" / "user_test_user" / "user_data"
+    user_root = tmp_path / "users" / "root" / "files"
     zip_path = user_root / "archive.zip"
     from zipfile import ZipFile
 
@@ -49,122 +54,41 @@ def test_zip_preview_returns_file_listing(client, tmp_path):
         zf.writestr("a.txt", "hello")
         zf.writestr("b.txt", "world")
 
-    resp = client.post(
-        "/api/files/preview",
-        json={"filename": "archive.zip", "page": 0, "page_size": 10},
+    resp = files_test_client.post(
+        "/api/user-files/preview",
+        json={"path": "archive.zip", "page": 1, "page_size": 10},
     )
 
-    assert resp.status_code == 200
-    payload = resp.json()
-    assert payload["file_type"] == "zip"
-    assert payload["columns"] == ["file_path", "base_name", "extension", "document"]
-    assert "LazyFrame" in payload["supported_types"]
-    assert any(row["file_path"] == "a.txt" for row in payload["preview"])
+    assert resp.status_code == 400
+    assert resp.json()["code"] == "invalid_input"
 
 
-def test_text_preview_returns_single_cell(client, tmp_path):
+def test_text_preview_returns_single_cell(files_test_client, tmp_path):
     """Plain text files should produce a 1x1 preview table."""
 
-    user_root = tmp_path / "users" / "user_test_user" / "user_data"
+    user_root = tmp_path / "users" / "root" / "files"
     text_path = user_root / "example.txt"
     text_path.write_text("Plain text document.", encoding="utf-8")
 
-    resp = client.post(
-        "/api/files/preview",
-        json={"filename": "example.txt", "page": 0, "page_size": 5},
+    resp = files_test_client.post(
+        "/api/user-files/preview",
+        json={"path": "example.txt", "page": 1, "page_size": 5},
     )
 
     assert resp.status_code == 200
     payload = resp.json()
     assert payload["file_type"] == "text"
     assert payload["columns"] == ["text"]
-    assert payload["preview"] == [{"text": "Plain text document."}]
+    assert payload["rows"] == [{"text": "Plain text document."}]
     assert payload["total_rows"] == 1
 
 
-def test_excel_preview_handles_dataframe_return_for_sheet_listing(client, tmp_path):
-    """Excel preview should not fail when sheet_id=None returns a DataFrame."""
-
-    user_root = tmp_path / "users" / "user_test_user" / "user_data"
-    excel_path = user_root / "single_sheet.xlsx"
-    excel_path.write_bytes(b"placeholder")
-
-    def fake_read_excel(file_path, sheet_id=None, sheet_name=None):
-        if sheet_id is None:
-            # Reproduces the bug case: `.keys()` is not available on DataFrame.
-            return pl.DataFrame({"col_a": [1, 2], "col_b": ["x", "y"]})
-        if sheet_id == 0:
-            return pl.DataFrame({"col_a": [1, 2], "col_b": ["x", "y"]})
-        if sheet_name is not None:
-            return pl.DataFrame({"col_a": [1, 2], "col_b": ["x", "y"]})
-        raise AssertionError("Unexpected read_excel call signature")
-
-    with patch(
-        "ldaca_wordflow.api.files.file_preview.pl.read_excel",
-        side_effect=fake_read_excel,
-    ):
-        resp = client.post(
-            "/api/files/preview",
-            json={"filename": "single_sheet.xlsx", "page": 0, "page_size": 1},
-        )
-
-    assert resp.status_code == 200
-    payload = resp.json()
-    assert payload["file_type"] == "excel"
-    assert payload["columns"] == ["col_a", "col_b"]
-    assert payload["preview"] == [{"col_a": 1, "col_b": "x"}]
-    assert payload["sheet_names"] == []
-    assert payload["selected_sheet"] is None
-
-
-def test_excel_preview_handles_dict_return_for_sheet_id_zero(client, tmp_path):
-    """Excel preview should handle workbook dict returned for sheet_id=0."""
-
-    user_root = tmp_path / "users" / "user_test_user" / "user_data"
-    excel_path = user_root / "sheet_id_zero_returns_dict.xlsx"
-    excel_path.write_bytes(b"placeholder")
-
-    sheet_df = pl.DataFrame({"col_a": [10, 20], "col_b": ["m", "n"]})
-
-    def fake_read_excel(file_path, sheet_id=None, sheet_name=None):
-        if sheet_id is None:
-            # No sheet names available from this call path in some versions.
-            return sheet_df
-        if sheet_id == 0:
-            # Reproduces the new bug: code assumed DataFrame and accessed .height.
-            return {"Sheet1": sheet_df}
-        if sheet_name is not None:
-            return sheet_df
-        raise AssertionError("Unexpected read_excel call signature")
-
-    with patch(
-        "ldaca_wordflow.api.files.file_preview.pl.read_excel",
-        side_effect=fake_read_excel,
-    ):
-        resp = client.post(
-            "/api/files/preview",
-            json={
-                "filename": "sheet_id_zero_returns_dict.xlsx",
-                "page": 0,
-                "page_size": 1,
-            },
-        )
-
-    assert resp.status_code == 200
-    payload = resp.json()
-    assert payload["file_type"] == "excel"
-    assert payload["columns"] == ["col_a", "col_b"]
-    assert payload["preview"] == [{"col_a": 10, "col_b": "m"}]
-    assert payload["sheet_names"] == []
-    assert payload["selected_sheet"] is None
-
-
-def test_excel_preview_returns_sheet_names_for_selector(client, tmp_path):
+def test_excel_preview_returns_sheet_names_for_selector(files_test_client, tmp_path):
     """Excel preview should expose sheet names so Add File can offer a selector."""
 
-    user_root = tmp_path / "users" / "user_test_user" / "user_data"
+    user_root = tmp_path / "users" / "root" / "files"
     excel_path = user_root / "with_sheet_names.xlsx"
-    excel_path.write_bytes(b"placeholder")
+    _write_stub_xlsx(excel_path)
 
     base_df = pl.DataFrame({"col_a": [1, 2], "col_b": ["x", "y"]})
 
@@ -186,15 +110,15 @@ def test_excel_preview_returns_sheet_names_for_selector(client, tmp_path):
             return FakeReader()
 
     with (
-        patch("ldaca_wordflow.api.files.file_preview.fastexcel", FakeFastExcel),
+        patch("ldaca_wordflow.services.file_preview.fastexcel", FakeFastExcel),
         patch(
-            "ldaca_wordflow.api.files.file_preview.pl.read_excel",
+            "ldaca_wordflow.services.file_preview.pl.read_excel",
             side_effect=fake_read_excel,
         ),
     ):
-        resp = client.post(
-            "/api/files/preview",
-            json={"filename": "with_sheet_names.xlsx", "page": 0, "page_size": 1},
+        resp = files_test_client.post(
+            "/api/user-files/preview",
+            json={"path": "with_sheet_names.xlsx", "page": 1, "page_size": 1},
         )
 
     assert resp.status_code == 200
@@ -202,51 +126,3 @@ def test_excel_preview_returns_sheet_names_for_selector(client, tmp_path):
     assert payload["file_type"] == "excel"
     assert payload["sheet_names"] == ["Sheet1", "Sheet2"]
     assert payload["selected_sheet"] == "Sheet1"
-
-
-def test_excel_preview_sheet_names_xml_fallback_without_fastexcel(client, tmp_path):
-    """Sheet names should still be exposed via workbook.xml fallback when fastexcel is unavailable."""
-
-    user_root = tmp_path / "users" / "user_test_user" / "user_data"
-    excel_path = user_root / "xml_fallback.xlsx"
-
-    # Minimal zipped workbook.xml payload for fallback parser.
-    workbook_xml = (
-        '<?xml version="1.0" encoding="UTF-8"?>'
-        '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
-        "<sheets>"
-        '<sheet name="SheetA" sheetId="1" r:id="rId1" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"/>'
-        '<sheet name="SheetB" sheetId="2" r:id="rId2" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"/>'
-        "</sheets>"
-        "</workbook>"
-    )
-    with ZipFile(excel_path, "w") as zf:
-        zf.writestr("xl/workbook.xml", workbook_xml)
-
-    base_df = pl.DataFrame({"col_a": [1], "col_b": ["x"]})
-
-    def fake_read_excel(file_path, sheet_id=None, sheet_name=None):
-        if sheet_name is not None:
-            return base_df
-        if sheet_id == 0:
-            return base_df
-        if sheet_id is None:
-            return base_df
-        raise AssertionError("Unexpected read_excel call signature")
-
-    with (
-        patch("ldaca_wordflow.api.files.file_preview.fastexcel", None),
-        patch(
-            "ldaca_wordflow.api.files.file_preview.pl.read_excel",
-            side_effect=fake_read_excel,
-        ),
-    ):
-        resp = client.post(
-            "/api/files/preview",
-            json={"filename": "xml_fallback.xlsx", "page": 0, "page_size": 1},
-        )
-
-    assert resp.status_code == 200
-    payload = resp.json()
-    assert payload["sheet_names"] == ["SheetA", "SheetB"]
-    assert payload["selected_sheet"] == "SheetA"

@@ -5,8 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import polars as pl
+import pytest
 
 from ldaca_wordflow.infrastructure.storage.data_loading import (
+    DataFileLoadError,
     detect_file_type,
     load_data_file,
 )
@@ -24,3 +26,13 @@ def test_json_lines_extensions_share_one_ingestion_path(tmp_path: Path) -> None:
             {"text": "first"},
             {"text": "second"},
         ]
+
+
+def test_text_ingestion_rejects_invalid_utf8_instead_of_replacing_it(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "invalid.txt"
+    path.write_bytes(b"valid\xffinvalid")
+
+    with pytest.raises(DataFileLoadError):
+        load_data_file(path)

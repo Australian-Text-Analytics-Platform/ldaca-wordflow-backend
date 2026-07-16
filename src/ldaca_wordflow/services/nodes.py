@@ -15,7 +15,11 @@ import polars as pl
 from anyio.to_thread import run_sync as run_sync_in_worker_thread
 from ..domain.workspace import Node, Workspace
 
-from ..infrastructure.storage.data_loading import load_data_file, normalize_dtypes
+from ..infrastructure.storage.data_loading import (
+    DataFileLoadError,
+    load_data_file,
+    normalize_dtypes,
+)
 from ..shared.errors import (
     DataBlockInUseError,
     InvalidInputError,
@@ -124,11 +128,14 @@ class NodeService:
             metadata = await self._run_io(source_path.stat)
             if metadata.st_size > self._max_source_bytes:
                 raise ResourceTooLargeError("File is too large for node ingestion")
-            dataframe, dtype_changes = await self._run_io(
-                _load_dataframe,
-                source_path,
-                request.sheet_name,
-            )
+            try:
+                dataframe, dtype_changes = await self._run_io(
+                    _load_dataframe,
+                    source_path,
+                    request.sheet_name,
+                )
+            except DataFileLoadError as exc:
+                raise InvalidInputError("User file could not be loaded") from exc
         node_name = (request.name or _node_name_from_path(request.file_path)).strip()
         valid, reason = validate_display_name(node_name)
         if not valid:

@@ -10,7 +10,16 @@ import unicodedata
 import zipfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
+import fastexcel
 import polars as pl
+
+PREVIEWABLE_FILE_TYPES = frozenset(
+    {"csv", "tsv", "json", "jsonl", "parquet", "excel", "text"}
+)
+
+
+class DataFileLoadError(ValueError):
+    """A user-provided data file could not be parsed by its canonical loader."""
 
 
 def detect_file_type(filename: str) -> str:
@@ -48,6 +57,22 @@ def load_data_file(
     sheet_name: str | None = None,
 ) -> pl.LazyFrame | pl.DataFrame:
     """Load one supported user file into a Polars frame."""
+    try:
+        return _load_data_file(file_path, sheet_name)
+    except (
+        OSError,
+        UnicodeError,
+        ValueError,
+        fastexcel.FastExcelError,
+        pl.exceptions.PolarsError,
+    ) as exc:
+        raise DataFileLoadError("Data file could not be loaded") from exc
+
+
+def _load_data_file(
+    file_path: Path,
+    sheet_name: str | None,
+) -> pl.LazyFrame | pl.DataFrame:
     file_type = detect_file_type(file_path.name)
 
     if file_type == "csv":
@@ -77,7 +102,7 @@ def load_data_file(
 
 def read_text_file(file_path: Path) -> pl.DataFrame:
     """Read a plain text file into a single-column Polars DataFrame."""
-    content = file_path.read_text(encoding="utf-8", errors="replace")
+    content = file_path.read_text(encoding="utf-8")
     lines = content.splitlines()
     if not lines:
         return pl.DataFrame({"text": []})
