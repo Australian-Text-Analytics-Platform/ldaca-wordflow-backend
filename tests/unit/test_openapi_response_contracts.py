@@ -1,103 +1,238 @@
-"""OpenAPI response contract coverage for public, file, and streaming routes.
-
-Used by:
-- backend endpoint-design cleanup because generated clients and API docs need
-  concrete JSON schemas or explicit non-JSON media metadata for these routes.
-"""
+"""OpenAPI response-shape and HTTP-semantics guardrails."""
 
 from __future__ import annotations
 
-from ldaca_wordflow.main import app
+from typing import Any
+
+from ldaca_wordflow.asgi import app
 
 
-def _json_schema_ref(path: str, method: str) -> str | None:
-    operation = app.openapi()["paths"][path][method]
-    response = operation["responses"]["200"]
-    return response["content"]["application/json"]["schema"].get("$ref")
+HTTP_METHODS = {"delete", "get", "patch", "post", "put"}
 
 
-def test_openapi_documents_json_response_models_for_public_routes() -> None:
-    """JSON public/admin routes should expose concrete response schemas."""
-
-    expected_refs = {
-        ("/api", "get"): "#/components/schemas/RootResponse",
-        ("/api/auth/logout", "post"): "#/components/schemas/MessageResponse",
-        ("/api/auth/status", "get"): "#/components/schemas/AuthStatusResponse",
-        ("/api/auth/health", "get"): "#/components/schemas/AuthHealthResponse",
-        ("/api/admin/users", "get"): "#/components/schemas/AdminUsersResponse",
-        ("/api/admin/cleanup", "get"): "#/components/schemas/AdminCleanupResponse",
-    }
-
-    for (path, method), expected_ref in expected_refs.items():
-        assert _json_schema_ref(path, method) == expected_ref
+def _success_responses() -> list[tuple[str, str, str, dict[str, Any]]]:
+    return [
+        (path, method, code, response)
+        for path, path_item in app.openapi()["paths"].items()
+        for method, operation in path_item.items()
+        if method in HTTP_METHODS
+        for code, response in operation["responses"].items()
+        if code.startswith("2") or code.startswith("3")
+    ]
 
 
-def test_openapi_documents_redirect_response_status_codes() -> None:
-    """OAuth redirect routes should document their redirect status codes."""
+def test_every_success_response_is_typed_or_declares_its_stream_media() -> None:
+    missing = []
+    for path, method, code, response in _success_responses():
+        if code == "204" or code.startswith("3"):
+            continue
+        content = response.get("content", {})
+        if not content:
+            missing.append((method.upper(), path, code))
+            continue
+        for media_type, media in content.items():
+            schema = media.get("schema", {})
+            if not schema and media_type != "text/event-stream":
+                missing.append((method.upper(), path, code, media_type))
+    assert missing == []
 
+
+def test_empty_deletions_are_real_204_responses() -> None:
     schema = app.openapi()
-    expected_status_codes = {
+    endpoints = {
+        ("/api/session", "delete"),
+        ("/api/user-files", "delete"),
+        ("/api/user-file-imports/{import_id}", "delete"),
+        ("/api/workspaces/{workspace_id}", "delete"),
+        ("/api/workspaces/{workspace_id}/nodes/{node_id}", "delete"),
+        ("/api/workspaces/{workspace_id}/tabs/{tab_id}", "delete"),
+        ("/api/workspaces/{workspace_id}/tabs/{tab_id}/analysis", "delete"),
+    }
+    for path, method in endpoints:
+        responses = schema["paths"][path][method]["responses"]
+        assert set(responses) >= {"204"}
+        assert "content" not in responses["204"]
+
+
+def test_creation_background_and_oauth_status_codes_are_explicit() -> None:
+    schema = app.openapi()["paths"]
+    expected = {
+        ("/api/workspaces", "post"): "201",
+        ("/api/workspaces/{workspace_id}/tabs", "post"): "201",
+        ("/api/workspaces/{workspace_id}/tabs/{tab_id}/analysis", "post"): "201",
+        ("/api/user-files/uploads", "post"): "201",
+        ("/api/user-files/folders", "post"): "201",
+        ("/api/workspaces/{workspace_id}/nodes", "post"): "201",
+        ("/api/sample-collections/{collection_id}/imports", "post"): "202",
+        ("/api/data-portal/imports", "post"): "202",
         ("/api/auth/google/callback", "post"): "303",
         ("/api/auth/cilogon/login", "get"): "302",
         ("/api/auth/cilogon/callback", "get"): "303",
     }
+    for (path, method), status_code in expected.items():
+        assert status_code in schema[path][method]["responses"]
 
-    for (path, method), status_code in expected_status_codes.items():
-        assert status_code in schema["paths"][path][method]["responses"]
+
+def test_file_archive_artifact_and_sse_media_types_are_documented() -> None:
+    schema = app.openapi()["paths"]
+    assert (
+        "application/octet-stream"
+        in schema["/api/user-files/content"]["get"]["responses"]["200"]["content"]
+    )
+    assert (
+        "application/zip"
+        in schema["/api/workspaces/{workspace_id}/archive"]["get"]["responses"]["200"][
+            "content"
+        ]
+    )
+    assert (
+        "application/octet-stream"
+        in schema[
+            "/api/workspaces/{workspace_id}/analyses/{analysis_id}/artifacts/{artifact_name}"
+        ]["get"]["responses"]["200"]["content"]
+    )
+    assert (
+        "text/event-stream"
+        in schema["/api/events"]["get"]["responses"]["200"]["content"]
+    )
 
 
-def test_openapi_documents_non_json_file_and_stream_media_types() -> None:
-    """File, raw-text, and SSE routes should advertise their response media."""
+def test_analysis_requests_results_and_queries_are_discriminated() -> None:
+    paths = app.openapi()["paths"]
+    definitions = (
+        paths["/api/workspaces/{workspace_id}/tabs/{tab_id}/analysis"]["post"]
+        ["requestBody"]["content"]["application/json"]["schema"],
+        paths[
+            "/api/workspaces/{workspace_id}/analyses/{analysis_id}/result/query"
+        ]["post"]["requestBody"]["content"]["application/json"]["schema"],
+        paths["/api/workspaces/{workspace_id}/analyses/{analysis_id}/result"]["get"]
+        ["responses"]["200"]["content"]["application/json"]["schema"],
+    )
+    for definition in definitions:
+        assert "oneOf" in definition
+        assert definition["discriminator"]["propertyName"] == "kind"
+    assert (
+        "/api/workspaces/{workspace_id}/analyses/{analysis_id}/preferences"
+        not in paths
+    )
+
+
+def test_workspace_owned_analysis_representation_is_exact() -> None:
+    schema = app.openapi()
+    analysis = schema["components"]["schemas"]["Analysis"]
+    assert set(analysis["properties"]) == {
+        "id",
+        "parent_analysis_id",
+        "request",
+        "state",
+        "progress",
+        "cancellation_requested_at",
+        "error",
+        "integrity",
+        "created_at",
+        "started_at",
+        "finished_at",
+        "revision",
+    }
+    assert set(analysis["required"]) == set(analysis["properties"])
+
+
+def test_storage_policy_is_a_strict_discriminated_resource() -> None:
+    schema = app.openapi()["paths"]["/api/storage"]["get"]["responses"]["200"]
+    resource = schema["content"]["application/json"]["schema"]
+
+    assert len(resource["oneOf"]) == 2
+    assert resource["discriminator"]["propertyName"] == "policy"
+
+
+def test_tab_resources_are_exact_and_the_collection_is_unpaginated() -> None:
+    schema = app.openapi()
+    tab = schema["components"]["schemas"]["Tab"]
+    assert set(tab["properties"]) == {
+        "id",
+        "kind",
+        "name",
+        "analysis_id",
+        "created_at",
+        "modified_at",
+        "revision",
+    }
+    assert set(tab["required"]) == set(tab["properties"])
+    collection = schema["paths"]["/api/workspaces/{workspace_id}/tabs"]["get"]
+    assert [parameter["name"] for parameter in collection["parameters"]] == [
+        "workspace_id"
+    ]
+    response = collection["responses"]["200"]["content"]["application/json"][
+        "schema"
+    ]
+    assert response["type"] == "array"
+    assert response["items"] == {"$ref": "#/components/schemas/Tab"}
+
+
+def test_pagination_is_one_based_everywhere_it_is_exposed() -> None:
+    schemas = app.openapi()["components"]["schemas"]
+    paged = [
+        definition
+        for definition in schemas.values()
+        if isinstance(definition, dict)
+        and isinstance(definition.get("properties"), dict)
+        and "page" in definition["properties"]
+    ]
+    assert paged
+    for definition in paged:
+        assert definition["properties"]["page"].get("minimum") == 1
+
+
+def test_every_validation_response_uses_the_safe_api_error_contract() -> None:
+    """FastAPI's input-bearing validation schema must never leak into OpenAPI."""
 
     schema = app.openapi()
-    expected_media_types = {
-        ("/api/files/sample-data/readme", "get"): {"text/plain"},
-        ("/api/files/raw", "get"): {"text/plain", "text/markdown"},
-        ("/api/files/content", "get"): {"application/octet-stream"},
-        ("/api/tasks/stream", "get"): {"text/event-stream"},
-        (
-            "/api/workspaces/{workspace_id}/download/tasks/{task_id}/artifact",
-            "get",
-        ): {"application/zip"},
-        (
-            "/api/workspaces/{workspace_id}/export",
-            "get",
-        ): {
-            "application/json",
-            "application/octet-stream",
-            "application/vnd.apache.arrow.file",
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            "application/x-ndjson",
-            "application/zip",
-            "text/csv",
-        },
+    validation_refs = {
+        response["content"]["application/json"]["schema"].get("$ref")
+        for path_item in schema["paths"].values()
+        for method, operation in path_item.items()
+        if method in HTTP_METHODS
+        for code, response in operation["responses"].items()
+        if code == "422"
     }
-
-    for (path, method), media_types in expected_media_types.items():
-        response = schema["paths"][path][method]["responses"]["200"]
-        documented_media_types = set(response.get("content", {}))
-        assert media_types <= documented_media_types
+    assert validation_refs == {"#/components/schemas/ApiError"}
+    assert "HTTPValidationError" not in schema["components"]["schemas"]
+    assert "ValidationError" not in schema["components"]["schemas"]
 
 
-def test_openapi_uses_query_path_file_resources_instead_of_catch_all_routes() -> None:
-    """File path operations should use one query-path contract."""
+def test_public_json_is_recursive_and_analysis_results_are_semantic_resources() -> None:
+    """Generated clients receive real JSON unions and no generic payload envelope."""
+
+    schemas = app.openapi()["components"]["schemas"]
+    for name in ("JsonData-Input", "JsonData-Output"):
+        branches = schemas[name].get("anyOf", [])
+        assert {branch.get("type") for branch in branches} >= {
+            "array",
+            "boolean",
+            "integer",
+            "null",
+            "number",
+            "object",
+            "string",
+        }
+
+    for name in (
+        "ConcordanceResult",
+        "QuotationResult",
+        "SequentialResult",
+        "TokenFrequencyResult",
+        "TopicModelingResult",
+    ):
+        properties = schemas[name]["properties"]
+        assert "payload" not in properties
+        assert "task_id" not in properties
+        assert "result_version" not in properties
+
+
+def test_read_only_collection_routes_do_not_advertise_unrelated_errors() -> None:
+    """Responses remain operation-specific instead of inheriting a global catalogue."""
 
     paths = app.openapi()["paths"]
-
-    assert "/api/files/content" in paths
-    assert "/api/files/info" in paths
-    assert "delete" in paths["/api/files/"]
-    assert "/api/files/{filename}" not in paths
-    assert "/api/files/{filename}/info" not in paths
-
-    for path, method in [
-        ("/api/files/content", "get"),
-        ("/api/files/info", "get"),
-        ("/api/files/", "delete"),
-    ]:
-        query_params = {
-            param["name"]
-            for param in paths[path][method].get("parameters", [])
-            if param.get("in") == "query"
-        }
-        assert "path" in query_params
+    assert set(paths["/api/workspaces"]["get"]["responses"]) == {"200", "401"}
+    assert set(paths["/api/events"]["get"]["responses"]) == {"200", "401"}
+    assert set(paths["/health"]["get"]["responses"]) == {"200", "503"}
