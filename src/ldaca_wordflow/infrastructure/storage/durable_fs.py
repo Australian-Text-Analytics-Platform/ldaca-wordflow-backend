@@ -47,14 +47,6 @@ def mkdir_durable(path: Path) -> None:
         fsync_directory(created.parent)
 
 
-def fsync_file_and_parent(path: Path) -> None:
-    """Flush a complete file and the directory entry that names it."""
-
-    with path.open("rb") as handle:
-        os.fsync(handle.fileno())
-    fsync_directory(path.parent)
-
-
 @contextmanager
 def atomic_output_path(target: Path) -> Iterator[Path]:
     """Yield a same-directory temporary path and publish it on clean exit."""
@@ -99,6 +91,5 @@ __all__ = [
     "atomic_output_path",
     "atomic_write_json",
     "fsync_directory",
-    "fsync_file_and_parent",
     "mkdir_durable",
 ]
