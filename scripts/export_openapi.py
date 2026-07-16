@@ -4,13 +4,14 @@ import argparse
 import json
 from pathlib import Path
 
-from ldaca_wordflow.main import app
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_OUTPUT = REPO_ROOT / "frontend" / "openapi" / "ldaca-wordflow.openapi.json"
+from ldaca_wordflow.main import create_app
+from ldaca_wordflow.settings import load_settings
 
 
 def export_openapi(output_path: Path) -> None:
+    # Schema export performs application wiring only. It deliberately disables
+    # frontend asset probing and never enters lifespan/runtime allocation.
+    app = create_app(load_settings(), serve_frontend=False)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(
         json.dumps(app.openapi(), indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -24,8 +25,8 @@ def main() -> None:
     parser.add_argument(
         "--output",
         type=Path,
-        default=DEFAULT_OUTPUT,
-        help=f"Path to write the OpenAPI schema. Defaults to {DEFAULT_OUTPUT}.",
+        required=True,
+        help="Path to write the OpenAPI schema.",
     )
     args = parser.parse_args()
     export_openapi(args.output)
