@@ -1,17 +1,6 @@
-"""Public package exports for backend app entrypoints.
+"""Explicit construction and launcher entrypoints for LDaCA Wordflow."""
 
-Used by:
-- desktop/runtime launchers and external embedding contexts because callers need the
-  shared shared backend behavior rule in one place instead of duplicating it.
-Why:
-- Provides stable import surface for app object and startup helpers.
+from .main import create_app
+from .server_launcher import run_server, start_async_server
 
-Flow: normalize inputs, delegate to the owning backend state or service boundary, and
-    return serialized values or existing domain errors to callers.
-"""
-
-from .core.workspace import workspace_manager
-from .main import app
-from .server_launcher import start_server
-
-__all__ = ["app", "workspace_manager", "start_server"]
+__all__ = ["create_app", "run_server", "start_async_server"]

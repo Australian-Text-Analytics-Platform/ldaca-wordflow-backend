@@ -1,4 +1,4 @@
-"""Self-destruct the backend when its parent process disappears.
+"""Terminate the packaged backend when its desktop parent disappears.
 
 Tauri spawns the backend Python process with `LDACA_PARENT_PID` set to the
 Tauri PID. This module starts a daemon thread that polls the parent and
@@ -13,13 +13,8 @@ benign reasons (startup races, integrity-level handshake delays, ctypes
 HANDLE-truncation quirks). Killing a healthy backend on a flaky probe is
 worse than waiting an extra few seconds to notice a real parent death.
 
-Used by:
-- Backend API routes, worker tasks, workspace services, and backend tests because they
-  need a backend boundary that validates inputs before delegating to workspace or worker
-  state.
-
-Flow: normalize inputs, delegate to the owning backend state or service boundary, and
-    return serialized values or existing domain errors to callers.
+Only the packaged desktop launch sets the parent PID. Other launch profiles
+leave the environment variable absent, so starting the watchdog is a no-op.
 """
 
 from __future__ import annotations
@@ -45,13 +40,6 @@ def _make_windows_probe():
     HANDLE is a 64-bit pointer on 64-bit Windows; ctypes' default `c_int`
     return type can truncate it. Setting `restype = c_void_p` avoids that
     so we never mistake a valid handle for NULL.
-
-    Called by:
-    - Local helpers, route handlers, or service methods in this module because they need a
-      backend boundary that validates inputs before delegating to workspace or worker state.
-
-    Flow: normalize inputs, delegate to the owning backend state or service boundary, and
-        return serialized values or existing domain errors to callers.
     """
     import ctypes
     from ctypes import wintypes
@@ -78,13 +66,6 @@ def _make_windows_probe():
 
         None means "we couldn't tell" — caller should not count it as a
         negative probe.
-
-        Called by:
-        - The `_make_windows_probe` local workflow in this module because the local shared
-          backend behavior flow needs this step kept close to the code that consumes it.
-
-        Flow: normalize inputs, delegate to the owning backend state or service boundary, and
-            return serialized values or existing domain errors to callers.
         """
         handle = open_process(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
         if not handle:
@@ -113,26 +94,10 @@ def _make_windows_probe():
 
 
 def _make_unix_probe():
-    """Support desktop parent-process monitoring with a make unix probe helper.
-
-    Called by:
-    - Local helpers, route handlers, or service methods in this module because they need a
-      backend boundary that validates inputs before delegating to workspace or worker state.
-
-    Flow: normalize inputs, delegate to the owning backend state or service boundary, and
-        return serialized values or existing domain errors to callers.
-    """
+    """Build the POSIX existence probe used by the desktop watchdog."""
 
     def _probe(pid: int) -> bool | None:
-        """Probe runtime state used by desktop parent-process monitoring.
-
-        Called by:
-        - The `_make_unix_probe` local workflow in this module because the local shared backend
-          behavior flow needs this step kept close to the code that consumes it.
-
-        Flow: normalize inputs, delegate to the owning backend state or service boundary, and
-            return serialized values or existing domain errors to callers.
-        """
+        """Return whether the PID exists without sending it a signal."""
 
         try:
             os.kill(pid, 0)
@@ -149,16 +114,8 @@ def _make_unix_probe():
 def _terminate_self() -> None:
     """Kill any subprocess descendants then hard-exit this process.
 
-    os._exit() skips Python's normal shutdown (atexit, gc, finalizers) which
-    is exactly what we want — uvicorn's graceful path can hang on background
-    tasks (e.g. spaCy model download), and we've already lost the parent.
-
-    Called by:
-    - Local helpers, route handlers, or service methods in this module because they need a
-      backend boundary that validates inputs before delegating to workspace or worker state.
-
-    Flow: normalize inputs, delegate to the owning backend state or service boundary, and
-        return serialized values or existing domain errors to callers.
+    ``os._exit`` is intentional here: the supervising desktop process is gone,
+    so no caller remains to coordinate an ordinary graceful shutdown.
     """
     try:
         import psutil
@@ -168,7 +125,7 @@ def _terminate_self() -> None:
         for child in children:
             try:
                 child.kill()
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
+            except psutil.NoSuchProcess, psutil.AccessDenied:
                 pass
     except Exception as exc:
         # Cleanup is best-effort; never block the suicide on it.
@@ -181,42 +138,26 @@ def start_parent_watchdog(
     interval_seconds: float = _DEFAULT_INTERVAL_SECONDS,
     failure_threshold: int = _DEFAULT_FAILURE_THRESHOLD,
 ) -> None:
-    """Spawn the watchdog daemon thread if a parent pid was passed in env.
+    """Spawn the watchdog daemon thread if a parent pid was passed in env."""
 
-    Used by:
-    - backend package imports because callers need the shared shared backend behavior rule
-      in one place instead of duplicating it.
-
-    Flow: normalize inputs, delegate to the owning backend state or service boundary, and
-        return serialized values or existing domain errors to callers.
-    """
+    if interval_seconds <= 0:
+        raise ValueError("Parent watchdog interval must be positive")
+    if failure_threshold < 1:
+        raise ValueError("Parent watchdog failure threshold must be positive")
 
     raw = os.environ.get(_PARENT_PID_ENV)
     if not raw:
         return
     try:
         parent_pid = int(raw.strip())
-    except ValueError:
-        logger.warning(
-            "Invalid %s value %r; parent watchdog disabled.", _PARENT_PID_ENV, raw
-        )
-        return
+    except ValueError as exc:
+        raise ValueError(f"{_PARENT_PID_ENV} must be a positive integer") from exc
     if parent_pid <= 0:
-        return
+        raise ValueError(f"{_PARENT_PID_ENV} must be a positive integer")
 
     probe = _make_windows_probe() if sys.platform == "win32" else _make_unix_probe()
 
     def _run() -> None:
-        """Support desktop parent-process monitoring with a run helper.
-
-        Called by:
-        - The `start_parent_watchdog` local workflow in this module because the local shared
-          backend behavior flow needs this step kept close to the code that consumes it.
-
-        Flow: normalize inputs, delegate to the owning backend state or service boundary, and
-            return serialized values or existing domain errors to callers.
-        """
-
         logger.info(
             "Parent watchdog active (parent_pid=%d, interval=%.1fs, threshold=%d).",
             parent_pid,
@@ -247,6 +188,4 @@ def start_parent_watchdog(
             # result is None (inconclusive) — don't change the counter.
             time.sleep(interval_seconds)
 
-    threading.Thread(
-        target=_run, name="ldaca-parent-watchdog", daemon=True
-    ).start()
+    threading.Thread(target=_run, name="ldaca-parent-watchdog", daemon=True).start()

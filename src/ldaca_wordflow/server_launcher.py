@@ -1,143 +1,280 @@
-"""Unified server launcher for the LDaCA backend.
+"""Race-free Uvicorn launchers for hosted, notebook, and desktop profiles.
 
-Used by:
-- desktop/runtime launchers, Jupyter/Colab notebooks, and ``__init__.py``
-  because they need a single entry point for starting the server in
-  blocking or background mode.
-
-Flow: resolve host/port/root_path from env and settings, select the
-    appropriate FastAPI app (full backend, backend+SPA, or SPA-only),
-    and launch uvicorn either as a non-blocking task or in blocking mode.
+The launcher binds the listening socket before constructing immutable settings
+or the FastAPI application. Desktop callers may therefore request port zero
+without probing and releasing a candidate port. A private startup record is
+published only after Uvicorn has completed ASGI lifespan startup.
 """
 
+from __future__ import annotations
+
 import asyncio
+import json
 import logging
 import os
-import sys
+import socket
+from dataclasses import dataclass
+from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI
 
-from .main import __version__, app
-from .settings import reload_settings, settings
-from .spa import _create_frontend_only_app, _mount_frontend
+from .main import __version__, create_app
+from .infrastructure.storage.durable_fs import atomic_output_path
+from .settings import Settings, load_settings
 
 logger = logging.getLogger(__name__)
 
-_server: uvicorn.Server | None = None
-_server_task: asyncio.Task[None] | None = None
+
+@dataclass(frozen=True, slots=True)
+class ServerHandle:
+    """Caller-owned asynchronous Uvicorn server and completion task."""
+
+    server: uvicorn.Server
+    task: asyncio.Task[None]
+    settings: Settings
+
+    async def close(self, timeout: float = 10.0) -> None:
+        """Request graceful shutdown and await the owned task with a bound."""
+
+        self.server.should_exit = True
+        try:
+            await asyncio.wait_for(asyncio.shield(self.task), timeout=timeout)
+        except TimeoutError:
+            self.server.force_exit = True
+            self.task.cancel()
+            await asyncio.gather(self.task, return_exceptions=True)
+            raise
+
+    async def wait(self) -> None:
+        """Wait until the server exits or fails."""
+
+        await self.task
 
 
-def _clear_server_state(_task: asyncio.Task[None] | None = None) -> None:
-    """Reset cached server state after a background task finishes.
+def _bind_socket(host: str, port: int, backlog: int) -> socket.socket:
+    """Bind and retain the one socket Uvicorn will serve.
 
-    Called by:
-    - ``start_server`` as a done callback on the background server task,
-      so that a subsequent call can create a fresh server.
+    Called before application construction so the
+    immutable settings contain the kernel-selected port. This helper owns only
+    socket setup and cleanup; the caller owns startup-record publication because
+    it has the desktop control-file context.
     """
-    global _server, _server_task
-    _server = None
-    _server_task = None
+
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    listener = socket.socket(family, socket.SOCK_STREAM)
+    try:
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind((host, port))
+        listener.listen(backlog)
+        return listener
+    except BaseException:
+        listener.close()
+        raise
 
 
-def start_server(
+def _publish_startup_failure(path: Path) -> None:
+    """Publish the stable desktop failure record before re-raising startup.
+
+    Used by both pre-Uvicorn failures and lifespan failures so the desktop
+    supervisor observes one control-file contract regardless of which startup
+    phase failed.
+    """
+
+    _write_startup_record(
+        path,
+        {
+            "schema_version": 1,
+            "status": "failed",
+            "pid": os.getpid(),
+            "code": "startup_failed",
+            "version": __version__,
+        },
+    )
+
+
+def _write_startup_record(path: Path, payload: dict[str, object]) -> None:
+    """Atomically publish one mode-0600 desktop control record."""
+
+    with atomic_output_path(path) as temporary:
+        temporary.chmod(0o600)
+        with temporary.open("w", encoding="utf-8") as output:
+            json.dump(payload, output, separators=(",", ":"))
+            output.write("\n")
+
+
+async def _serve_bound(
+    server: uvicorn.Server,
+    listener: socket.socket,
     *,
-    backend: bool = True,
-    frontend: bool = True,
+    settings: Settings,
+    startup_file: Path | None,
+    readiness: asyncio.Future[None],
+) -> None:
+    """Run Uvicorn and publish readiness only after lifespan succeeds."""
+
+    serve_task = asyncio.create_task(server.serve(sockets=[listener]))
+    try:
+        while not server.started:
+            if serve_task.done():
+                await serve_task
+                raise RuntimeError("Uvicorn stopped before reporting readiness")
+            await asyncio.sleep(0.01)
+
+        if startup_file is not None:
+            _write_startup_record(
+                startup_file,
+                {
+                    "schema_version": 1,
+                    "status": "ready",
+                    "pid": os.getpid(),
+                    "host": settings.server_host,
+                    "port": settings.backend_port,
+                    "version": __version__,
+                },
+            )
+        if not readiness.done():
+            readiness.set_result(None)
+        await serve_task
+    except BaseException as exc:
+        if startup_file is not None and not server.started:
+            _publish_startup_failure(startup_file)
+        if not readiness.done():
+            readiness.set_exception(exc)
+        if not serve_task.done():
+            serve_task.cancel()
+        await asyncio.gather(serve_task, return_exceptions=True)
+        raise
+    finally:
+        listener.close()
+
+
+def _prepare_server(
+    *,
+    serve_frontend: bool,
     port: int | None = None,
     host: str | None = None,
-    background: bool = False,
     root_path: str | None = None,
-) -> asyncio.Task[None] | None:
-    """Unified entry point for launching the LDaCA server.
+    settings: Settings | None = None,
+    startup_file: str | Path | None = None,
+) -> tuple[uvicorn.Server, socket.socket, Settings, Path | None]:
+    """Bind a socket and construct one server from final immutable settings.
 
-    Args:
-        backend: Include the full API backend (routers, lifespan, DB, etc.).
-        frontend: Mount the bundled frontend SPA on the same server.
-        port: Port to bind to. Defaults to 8001 (backend) or 3000 (frontend-only).
-        host: Host to bind to. Defaults to ``"localhost"`` when *background* is
-            ``True``, ``"0.0.0.0"`` otherwise.
-        background: When ``True``, start the server as a non-blocking
-            ``asyncio.Task`` (for notebook / Colab usage) and return the task.
-            When ``False`` (default), block with ``uvicorn.run()``.
-        root_path: ASGI root path prefix, used when behind a reverse proxy.
-            Auto-detected from ``JUPYTERHUB_SERVICE_PREFIX`` + ``proxy/<port>``
-            if not provided and running inside JupyterHub/Binder.
-
-    Returns:
-        The ``asyncio.Task`` when *background* is ``True``, otherwise ``None``
-        (blocks until the server shuts down).
-
-    Raises:
-        ValueError: If both *backend* and *frontend* are ``False``.
-
-    Used by:
-    - FastAPI application startup, backend package imports because they need a backend
-      boundary that validates inputs before delegating to workspace or worker state.
+    Port zero is accepted only for a backend-only desktop launch with a startup
+    file. Normal hosted and frontend-serving modes require an explicit stable
+    port because their externally visible URL must be known before startup.
     """
-    if not backend and not frontend:
-        raise ValueError("At least one of backend or frontend must be True")
 
-    global _server, _server_task
-    global settings
+    configured = settings or load_settings()
+    requested_port = port if port is not None else configured.backend_port
+    selected_host = configured.server_host if host is None else host
+    startup_path = Path(startup_file) if startup_file is not None else None
+    if startup_path is not None and startup_path.exists():
+        raise ValueError("Startup file must not already exist")
+    if requested_port == 0 and (serve_frontend or startup_path is None):
+        raise ValueError("Port zero requires a backend-only launch with a startup file")
+    if requested_port < 0 or requested_port > 65535:
+        raise ValueError("Port must be between 0 and 65535")
 
-    _env_port = os.environ.get("LDACA_BACKEND_PORT") or os.environ.get("BACKEND_PORT")
-    _port = port or (int(_env_port) if _env_port else (8001 if backend else 3000))
-    _host = host or ("localhost" if background else "0.0.0.0")
-
-    os.environ["BACKEND_PORT"] = str(_port)
-    os.environ["SERVER_HOST"] = _host
-
-    current = reload_settings()
-    settings = current
-
-    _root_path = root_path
-    if _root_path is None:
-        hub_prefix = os.environ.get("JUPYTERHUB_SERVICE_PREFIX", "")
-        if hub_prefix:
-            _root_path = f"{hub_prefix.rstrip('/')}/proxy/{_port}"
-
-    if backend:
-        target_app = app
-        if frontend:
-            _mount_frontend(target_app)
-    else:
-        target_app = _create_frontend_only_app(_port)
-
-    if background:
-        if _server_task is not None:
-            if _server_task.done():
-                _clear_server_state()
-            else:
-                logger.info(
-                    "Server already running at http://localhost:%s",
-                    current.backend_port,
+    try:
+        listener = _bind_socket(selected_host, requested_port, backlog=2048)
+    except BaseException:
+        if startup_path is not None:
+            _publish_startup_failure(startup_path)
+        raise
+    actual_port = int(listener.getsockname()[1])
+    try:
+        current = Settings.model_validate(
+            {
+                **configured.model_dump(),
+                "backend_port": actual_port,
+                "server_host": selected_host,
+            }
+        )
+        resolved_root_path = root_path
+        if resolved_root_path is None:
+            hub_prefix = os.environ.get("JUPYTERHUB_SERVICE_PREFIX", "")
+            if hub_prefix:
+                resolved_root_path = (
+                    f"{hub_prefix.rstrip('/')}/proxy/{current.backend_port}"
                 )
-                return _server_task
 
         config = uvicorn.Config(
-            target_app,
+            create_app(current, serve_frontend=serve_frontend),
             host=current.server_host,
             port=current.backend_port,
-            root_path=_root_path or "",
+            root_path=resolved_root_path or "",
             reload=False,
             log_level="info",
         )
-        _server = uvicorn.Server(config)
-        loop = asyncio.get_running_loop()
-        _server_task = loop.create_task(_server.serve())
-        _server_task.add_done_callback(_clear_server_state)
-        return _server_task
+        server = uvicorn.Server(config)
+        return server, listener, current, startup_path
+    except BaseException:
+        listener.close()
+        if startup_path is not None:
+            _publish_startup_failure(startup_path)
+        raise
 
-    is_frozen = getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS")
-    use_reload = current.debug and not is_frozen
 
-    uvicorn.run(
-        target_app,
-        host=current.server_host,
-        port=current.backend_port,
-        root_path=_root_path or "",
-        reload=use_reload,
-        log_level="info",
+async def start_async_server(
+    *,
+    serve_frontend: bool = True,
+    port: int | None = None,
+    host: str | None = None,
+    root_path: str | None = None,
+    settings: Settings | None = None,
+    startup_file: str | Path | None = None,
+) -> ServerHandle:
+    """Start one server and return only after ASGI lifespan reports ready."""
+
+    server, listener, current, startup_path = _prepare_server(
+        serve_frontend=serve_frontend,
+        port=port,
+        host=host,
+        root_path=root_path,
+        settings=settings,
+        startup_file=startup_file,
     )
-    return None
+    readiness = asyncio.get_running_loop().create_future()
+    task = asyncio.create_task(
+        _serve_bound(
+            server,
+            listener,
+            settings=current,
+            startup_file=startup_path,
+            readiness=readiness,
+        )
+    )
+    try:
+        await asyncio.shield(readiness)
+    except BaseException:
+        await asyncio.gather(task, return_exceptions=True)
+        raise
+    return ServerHandle(server=server, task=task, settings=current)
+
+
+def run_server(
+    *,
+    serve_frontend: bool = True,
+    port: int | None = None,
+    host: str | None = None,
+    root_path: str | None = None,
+    settings: Settings | None = None,
+    startup_file: str | Path | None = None,
+) -> None:
+    """Run one server until process shutdown using the blocking CLI contract."""
+
+    async def serve() -> None:
+        handle = await start_async_server(
+            serve_frontend=serve_frontend,
+            port=port,
+            host=host,
+            root_path=root_path,
+            settings=settings,
+            startup_file=startup_file,
+        )
+        await handle.wait()
+
+    asyncio.run(serve())
+
+
+__all__ = ["ServerHandle", "run_server", "start_async_server"]
