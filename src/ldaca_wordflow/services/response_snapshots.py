@@ -193,8 +193,13 @@ def _create_generated_snapshot(
 
 
 def _remove_root(root: Path) -> None:
-    if root.is_dir() and not root.is_symlink():
-        shutil.rmtree(root, ignore_errors=True)
+    try:
+        metadata = root.lstat()
+    except FileNotFoundError:
+        return
+    if not stat.S_ISDIR(metadata.st_mode) or root.is_symlink():
+        raise RuntimeError("Response snapshot root is unsafe")
+    shutil.rmtree(root)
 
 
 __all__ = ["ResponseSnapshot", "ResponseSnapshotService"]

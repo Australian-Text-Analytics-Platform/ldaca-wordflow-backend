@@ -12,6 +12,7 @@ from ldaca_wordflow.infrastructure.storage.workspace_access import (
     write_workspace_owner,
 )
 from ldaca_wordflow.services import quota as quota_module
+from ldaca_wordflow.services import response_snapshots as response_snapshots_module
 from ldaca_wordflow.services.quota import (
     QuotaService,
     QuotaStorageStatus,
@@ -329,3 +330,31 @@ async def test_response_snapshot_survives_source_deletion_and_cleans_up(
     await snapshot.cleanup()
     await snapshot.cleanup()
     assert not response_path.exists()
+
+
+@pytest.mark.anyio
+async def test_response_snapshot_reconciliation_propagates_cleanup_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Startup must not hide an abandoned response directory it cannot remove."""
+
+    root = tmp_path / "data"
+    snapshot_root = root / "responses"
+    snapshot_root.mkdir(parents=True)
+    (snapshot_root / "orphan.bin").write_bytes(b"orphan")
+    service = ResponseSnapshotService(
+        snapshot_root,
+        unlimited_storage_admission(root),
+        max_snapshot_bytes=1024,
+        max_concurrent_snapshots=1,
+        limiter=anyio.CapacityLimiter(2),
+    )
+
+    def fail_cleanup(_path: Path) -> None:
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(response_snapshots_module.shutil, "rmtree", fail_cleanup)
+
+    with pytest.raises(PermissionError, match="denied"):
+        await service.reconcile()
