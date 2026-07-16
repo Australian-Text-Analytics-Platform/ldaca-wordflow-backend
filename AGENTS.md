@@ -32,7 +32,9 @@ infrastructure must not import `ldaca_wordflow.api`.
   startup and reverse-order shutdown contracts documented in
   [runtime architecture](../docs/architecture/backend/runtime.md).
 - `WorkspaceService` is the only workspace mutation and persistence boundary.
-  `TaskService` is the only public task state machine.
+- `AnalysisService` owns Workspace-contained Analysis lifecycle state;
+  `UserFileImportService` independently owns retained remote-import state.
+  Do not introduce a generic background-work resource or manager between them.
 - Domain exceptions stay independent of FastAPI and are translated at the API
   edge.
 
@@ -40,11 +42,11 @@ infrastructure must not import `ldaca_wordflow.api`.
 
 - Preserve lazy Polars plans. Avoid `collect()` except at I/O, artifact, or
   final response boundaries.
-- Snapshot immutable task inputs under the workspace gate, then release it
+- Snapshot immutable Analysis inputs under the Workspace gate, then release it
   before process execution, provider calls, or streaming.
-- Worker entrypoints call `configure_worker_environment()` before importing
-  heavy dependencies. Large results belong in task-owned artifacts, not process
-  return payloads.
+- Picklable worker functions use the `@process_entrypoint` decorator, which
+  configures the child before invoking the function. Large Analysis results
+  belong in Analysis-owned Artifacts, not process return payloads.
 - Completion handlers run on the application event loop and must be idempotent.
 
 ## Commands
@@ -53,8 +55,9 @@ Run from `backend/`:
 
 ```sh
 uv sync
+uv run ruff check .
+uv run ty check
 uv run pytest -q
-uvx ty check
 uv run python scripts/export_openapi.py --output <path>
 ```
 
@@ -64,6 +67,6 @@ by hand.
 
 ## Done
 
-Run `uvx ty check` and `uv run pytest -q`. Update the applicable backend
-architecture, domain, API reference, settings reference, runbook, or ADR when
-the change makes it incomplete or inaccurate.
+Run `uv run ruff check .`, `uv run ty check`, and `uv run pytest -q`. Update
+the applicable backend architecture, domain, API reference, settings reference,
+runbook, or ADR when the change makes it incomplete or inaccurate.
