@@ -2,11 +2,13 @@
 
 from pathlib import Path
 
+import polars as pl
 import pytest
 
 from ldaca_wordflow.workers.data_portal import (
     _content_size,
     _select_text_documents,
+    _tabulate_metadata,
     _write_documents,
 )
 
@@ -67,6 +69,88 @@ def test_document_materialization_requires_every_downloaded_text(
             [{"path": "missing.txt"}],
             {},
             tmp_path / "documents.parquet",
+        )
+
+
+def test_metadata_tabulation_flattens_only_the_selected_configured_table(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metadata = {
+        "@graph": [
+            {
+                "@id": "work-1",
+                "@type": "CreativeWork",
+                "name": "Interview",
+                "author": {"@id": "person-1"},
+                "keyword": ["speech", "archive"],
+                "internal": "discarded",
+            },
+            {
+                "@id": "person-1",
+                "@type": "Person",
+                "name": "Researcher",
+                "role": ["speaker", "collector"],
+                "affiliation": {"@id": "org-1"},
+            },
+            {
+                "@id": "org-1",
+                "@type": "Organization",
+                "name": "LDaCA",
+            },
+        ]
+    }
+    config = {
+        "tables": {
+            "CreativeWork": {
+                "expand_props": ["author"],
+                "ignore_props": ["@type", "internal", "author_@type"],
+                "all_props": [],
+            },
+            "Person": {
+                "expand_props": [],
+                "ignore_props": [],
+                "all_props": [],
+            },
+        }
+    }
+    monkeypatch.setattr(
+        "ldaca_wordflow.workers.data_portal.load_tabular_config",
+        lambda _identifier: config,
+    )
+    destination = tmp_path / "metadata.parquet"
+
+    _tabulate_metadata("arcp://name,example", metadata, destination)
+
+    assert pl.read_parquet(destination).to_dicts() == [
+        {
+            "entity_id": "work-1",
+            "name": "Interview",
+            "author_name": "Researcher",
+            "author_role": "speaker",
+            "author_role_1": "collector",
+            "author_affiliation": "LDaCA",
+            "author_affiliation_id": "org-1",
+            "keyword": "speech",
+            "keyword_1": "archive",
+        }
+    ]
+
+
+def test_metadata_tabulation_rejects_an_empty_table_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "ldaca_wordflow.workers.data_portal.load_tabular_config",
+        lambda _identifier: {"tables": {}},
+    )
+
+    with pytest.raises(ValueError, match="has no tables"):
+        _tabulate_metadata(
+            "arcp://name,example",
+            {"@graph": []},
+            tmp_path / "metadata.parquet",
         )
 
 

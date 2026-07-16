@@ -525,7 +525,6 @@ async def runtime_context(settings: Settings) -> AsyncIterator[Runtime]:
         data_portal_service = DataPortalService(
             settings,
             user_file_store,
-            limiter=io_limiter,
         )
         resources.push_async_callback(data_portal_service.close)
         user_file_import_store = UserFileImportStore(

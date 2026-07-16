@@ -12,9 +12,6 @@ import asyncio
 import hashlib
 import json
 import re
-import sqlite3
-import tempfile
-from contextlib import chdir
 from collections.abc import Callable
 from multiprocessing.queues import Queue
 from pathlib import Path
@@ -41,15 +38,12 @@ def data_portal_import_process(
     timeout: float,
     download_concurrency: int,
     staging_dir: str,
-    cache_dir: str,
     max_output_bytes: int,
 ) -> dict[str, object]:
     """Tabulate/download one portal object into a private completed directory."""
 
     report = cast(Callable[[dict[str, object]], None], progress_queue.put)
     staging = Path(staging_dir).resolve(strict=True)
-    cache = Path(cache_dir)
-    cache.mkdir(parents=True, exist_ok=False)
     report({"fraction": 0.05, "message": "Fetching Data Portal metadata"})
     metadata, documents, texts = asyncio.run(
         _fetch_portal_content(
@@ -67,13 +61,11 @@ def data_portal_import_process(
     filename = f"{folder_name}.parquet"
     destination = staging / filename
 
-    with chdir(cache), tempfile.TemporaryDirectory(dir=cache) as raw_working:
-        working = Path(raw_working)
-        if documents:
-            _write_documents(documents, texts, destination)
-        else:
-            report({"fraction": 0.25, "message": "Tabulating RO-Crate metadata"})
-            _tabulate_metadata(identifier, metadata, working, destination)
+    if documents:
+        _write_documents(documents, texts, destination)
+    else:
+        report({"fraction": 0.25, "message": "Tabulating RO-Crate metadata"})
+        _tabulate_metadata(identifier, metadata, destination)
 
     if destination.stat().st_size > max_output_bytes:
         raise ValueError("Data Portal import exceeds its storage budget")
@@ -270,42 +262,177 @@ def _write_documents(
 def _tabulate_metadata(
     identifier: str,
     metadata: dict[str, Any],
-    working: Path,
     destination: Path,
 ) -> None:
-    from .._vendor.rocrate_tabular.tabulator import ROCrateTabulator
+    """Flatten the configured RO-Crate entity table without an intermediate DB."""
 
-    crate = working / "crate"
-    crate.mkdir()
-    (crate / "ro-crate-metadata.json").write_text(
-        json.dumps(metadata),
-        encoding="utf-8",
-    )
     config = load_tabular_config(identifier)
-    config_path = working / "tabular-config.json"
-    config_path.write_text(json.dumps(config), encoding="utf-8")
-    database = working / "rocrate.sqlite"
-    tabulator = ROCrateTabulator()
-    try:
-        tabulator.load_config(str(config_path))
-        tabulator.crate_to_db(crate, database)
-        for table_name in config.get("tables", {}):
-            tabulator.entity_table(table_name)
-    finally:
-        tabulator.close()
     tables = config.get("tables", {})
+    if not isinstance(tables, dict) or not tables:
+        raise ValueError("RO-Crate tabular configuration has no tables")
     table_name = next(
         (
             name
             for name in ("RepositoryObject", "CreativeWork", "File")
             if name in tables
         ),
-        next(iter(tables), "property"),
+        next(iter(tables)),
     )
-    quoted = '"' + table_name.replace('"', '""') + '"'
-    with sqlite3.connect(database) as connection:
-        frame = pl.read_database(f"SELECT * FROM {quoted}", connection)
-    frame.write_parquet(destination)
+    table_config = tables[table_name]
+    if not isinstance(table_config, dict):
+        raise ValueError(f"RO-Crate table configuration is invalid: {table_name}")
+    entities = _metadata_entities(metadata)
+    matching = [
+        entity for entity in entities.values() if table_name in _entity_types(entity)
+    ]
+    if not matching:
+        raise ValueError(f"RO-Crate contains no {table_name} metadata")
+
+    ignored = _configured_properties(table_config, "ignore_props")
+    expanded = _configured_properties(table_config, "expand_props")
+    junctions = _configured_properties(table_config, "junctions")
+    junctions.update(_wide_reference_properties(matching))
+    rows = [
+        _flatten_metadata_entity(
+            entity,
+            entities,
+            ignored=ignored,
+            expanded=expanded,
+            junctions=junctions,
+        )
+        for entity in matching
+    ]
+    pl.DataFrame(rows, strict=False).write_parquet(destination)
+
+
+def _metadata_entities(metadata: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    graph = metadata.get("@graph")
+    if not isinstance(graph, list):
+        raise ValueError("RO-Crate metadata must contain an @graph array")
+    entities: dict[str, dict[str, Any]] = {}
+    for raw_entity in graph:
+        if not isinstance(raw_entity, dict):
+            raise ValueError("RO-Crate @graph entries must be objects")
+        entity_id = raw_entity.get("@id")
+        if not isinstance(entity_id, str) or not entity_id:
+            raise ValueError("RO-Crate entities must have a non-empty @id")
+        if entity_id in entities:
+            raise ValueError(f"RO-Crate contains a duplicate entity ID: {entity_id}")
+        entities[entity_id] = raw_entity
+    return entities
+
+
+def _entity_types(entity: dict[str, Any]) -> set[str]:
+    return {
+        str(value)
+        for value in _as_list(jsonld_value(entity.get("@type")))
+        if value is not None
+    }
+
+
+def _configured_properties(config: dict[str, Any], key: str) -> set[str]:
+    value = config.get(key, [])
+    if not isinstance(value, list):
+        raise ValueError(f"RO-Crate table {key} must be an array of strings")
+    properties: set[str] = set()
+    for item in value:
+        if not isinstance(item, str):
+            raise ValueError(f"RO-Crate table {key} must be an array of strings")
+        properties.add(item)
+    return properties
+
+
+def _wide_reference_properties(entities: list[dict[str, Any]]) -> set[str]:
+    """Mirror the source format's junction rule by omitting very wide relations."""
+
+    wide: set[str] = set()
+    for entity in entities:
+        for name, raw_value in entity.items():
+            if name == "@id":
+                continue
+            references = sum(
+                1 for value in _as_list(raw_value) if _reference_container(value)
+            )
+            if references > 10:
+                wide.add(name)
+    return wide
+
+
+def _flatten_metadata_entity(
+    entity: dict[str, Any],
+    entities: dict[str, dict[str, Any]],
+    *,
+    ignored: set[str],
+    expanded: set[str],
+    junctions: set[str],
+) -> dict[str, Any]:
+    row: dict[str, Any] = {"entity_id": entity["@id"]}
+    for name, raw_value in entity.items():
+        if name == "@id" or name in junctions:
+            continue
+        if name in expanded:
+            for value in _as_list(raw_value):
+                target_id = _reference_container(value)
+                target = entities.get(target_id) if target_id is not None else None
+                if target is None:
+                    continue
+                for target_name, target_value in target.items():
+                    expanded_name = f"{name}_{target_name}"
+                    if target_name == "@id" or expanded_name in ignored:
+                        continue
+                    _append_metadata_values(
+                        row,
+                        expanded_name,
+                        target_value,
+                        entities,
+                    )
+            continue
+        if name not in ignored:
+            _append_metadata_values(row, name, raw_value, entities)
+    return row
+
+
+def _append_metadata_values(
+    row: dict[str, Any],
+    name: str,
+    raw_value: Any,
+    entities: dict[str, dict[str, Any]],
+) -> None:
+    for value in _as_list(raw_value):
+        target_id = _reference_container(value)
+        if target_id is None:
+            _set_numbered(row, name, _metadata_scalar(value))
+            continue
+        target = entities.get(target_id)
+        target_name = _first_string(target.get("name")) if target is not None else None
+        _set_numbered(row, name, target_name or "")
+        _set_numbered(row, f"{name}_id", target_id)
+
+
+def _reference_container(value: Any) -> str | None:
+    if not isinstance(value, dict):
+        return None
+    reference = value.get("@id")
+    return reference if isinstance(reference, str) and reference else None
+
+
+def _metadata_scalar(value: Any) -> Any:
+    normalized = jsonld_value(value)
+    if normalized is None or isinstance(normalized, str | int | float | bool):
+        return normalized
+    return json.dumps(normalized, ensure_ascii=False, sort_keys=True)
+
+
+def _set_numbered(row: dict[str, Any], name: str, value: Any) -> None:
+    if name not in row:
+        row[name] = value
+        return
+    suffix = 1
+    while f"{name}_{suffix}" in row:
+        suffix += 1
+    if suffix > 10:
+        raise ValueError(f"RO-Crate property has too many values: {name}")
+    row[f"{name}_{suffix}"] = value
 
 
 __all__ = ["data_portal_import_process"]

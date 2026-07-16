@@ -132,7 +132,6 @@ class UserFileImportService:
                     continue
             self._records[key] = record
             self._operation_gates[key] = anyio.Lock()
-        await self._data_portal.reconcile_transient_storage(set())
         self._scheduler.start(task_group)
         self._started = True
 
@@ -211,7 +210,6 @@ class UserFileImportService:
                     await self._data_portal.cleanup_import(
                         user_id,
                         key.import_id,
-                        execution,
                     )
             if persisted:
                 with anyio.CancelScope(shield=True):
@@ -712,14 +710,11 @@ class UserFileImportService:
             await self._data_portal.cleanup_import(
                 key.user_id,
                 key.import_id,
-                execution,
             )
 
     @staticmethod
     def _staging_path(execution: ImportExecution) -> Path:
-        if isinstance(execution, SampleImportExecution):
-            return execution.staging
-        return Path(execution.storage_roots[0])
+        return execution.staging
 
     def _current_progress(
         self,

@@ -91,16 +91,12 @@ class _Samples:
 
 
 class _Portal:
-    async def reconcile_transient_storage(self, active_import_ids: set[str]) -> None:
-        assert active_import_ids == set()
-
     async def cleanup_import(
         self,
         user_id: str,
         import_id: str,
-        execution: object,
     ) -> None:
-        del user_id, import_id, execution
+        del user_id, import_id
 
 
 def _service(
