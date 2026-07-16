@@ -1,0 +1,372 @@
+"""Workspace-owned Analysis singleton, collection, and lifecycle routes."""
+
+from __future__ import annotations
+
+import uuid
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, Query, Request, Response, Security, status
+from fastapi.responses import FileResponse
+from pydantic import BaseModel, TypeAdapter
+from starlette.background import BackgroundTask
+
+from ...domain.workspace import Analysis, AnalysisSubmission, ChildAnalysisRequest
+from ...models.analysis_results import (
+    AnalysisResult,
+    AnalysisResultQuery,
+    ArtifactResource,
+    StoredArtifactIdentity,
+)
+from ...models.analyses import AnalysisPage
+from ...runtime import Runtime, get_runtime
+from ...services.analysis_results import ResultMaterialization
+from ...services.sessions import SessionPrincipal
+from ...shared.errors import InternalServiceError
+from ...shared.json_data import JsonData
+from ..responses import api_errors, route_path
+from ..security import get_current_session
+
+router = APIRouter(
+    prefix="/workspaces/{workspace_id}",
+    tags=["analyses"],
+    responses=api_errors(401),
+)
+_RESULT_ADAPTER = TypeAdapter(AnalysisResult)
+
+
+def _present_typed_value(
+    value: object,
+    request: Request,
+    workspace_id: uuid.UUID,
+    analysis_id: uuid.UUID,
+) -> JsonData:
+    if isinstance(value, StoredArtifactIdentity):
+        return ArtifactResource(
+            name=value.name,
+            media_type=value.media_type,
+            url=route_path(
+                request,
+                "download_analysis_artifact",
+                workspace_id=workspace_id,
+                analysis_id=analysis_id,
+                artifact_name=value.name,
+            ),
+        ).model_dump(mode="json")
+    if isinstance(value, BaseModel):
+        return {
+            name: _present_typed_value(
+                child,
+                request,
+                workspace_id,
+                analysis_id,
+            )
+            for name, child in value
+        }
+    if isinstance(value, dict):
+        return {
+            str(key): _present_typed_value(
+                child,
+                request,
+                workspace_id,
+                analysis_id,
+            )
+            for key, child in value.items()
+        }
+    if isinstance(value, list):
+        return [
+            _present_typed_value(child, request, workspace_id, analysis_id)
+            for child in value
+        ]
+    if isinstance(value, uuid.UUID):
+        return str(value)
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    raise InternalServiceError("Stored Analysis Result is invalid")
+
+
+def _present_result(
+    value: ResultMaterialization,
+    request: Request,
+    workspace_id: uuid.UUID,
+    analysis_id: uuid.UUID,
+) -> AnalysisResult:
+    payload = dict(value.payload)
+    stored = _present_typed_value(
+        value.stored,
+        request,
+        workspace_id,
+        analysis_id,
+    )
+    if isinstance(stored, dict) and "artifacts" in stored:
+        payload["artifacts"] = stored["artifacts"]
+    return _RESULT_ADAPTER.validate_python(payload)
+
+
+@router.post(
+    "/tabs/{tab_id}/analysis",
+    response_model=Analysis,
+    status_code=status.HTTP_201_CREATED,
+    responses=api_errors(403, 404, 409, 422, 500, 507),
+)
+async def submit_tab_analysis(
+    workspace_id: uuid.UUID,
+    tab_id: uuid.UUID,
+    body: AnalysisSubmission,
+    request: Request,
+    response: Response,
+    principal: Annotated[SessionPrincipal, Security(get_current_session)],
+    runtime: Runtime = Depends(get_runtime),
+) -> Analysis:
+    """Create one queued Analysis and atomically assign it to an empty Tab."""
+
+    analysis = await runtime.analysis_service.submit_root(
+        principal.user.id,
+        str(workspace_id),
+        str(tab_id),
+        body,
+    )
+    response.headers["Location"] = route_path(
+        request,
+        "get_analysis",
+        workspace_id=workspace_id,
+        analysis_id=analysis.id,
+    )
+    return analysis
+
+
+@router.get(
+    "/tabs/{tab_id}/analysis",
+    response_model=Analysis,
+    responses=api_errors(403, 404, 409, 422, 500),
+)
+async def get_tab_analysis(
+    workspace_id: uuid.UUID,
+    tab_id: uuid.UUID,
+    principal: Annotated[SessionPrincipal, Security(get_current_session)],
+    runtime: Runtime = Depends(get_runtime),
+) -> Analysis:
+    """Return the root Analysis currently assigned to one Tab."""
+
+    return await runtime.analysis_service.current_for_tab(
+        principal.user.id,
+        str(workspace_id),
+        str(tab_id),
+    )
+
+
+@router.delete(
+    "/tabs/{tab_id}/analysis",
+    status_code=status.HTTP_204_NO_CONTENT,
+    responses=api_errors(403, 404, 409, 422, 500, 507),
+)
+async def clear_tab_analysis(
+    workspace_id: uuid.UUID,
+    tab_id: uuid.UUID,
+    principal: Annotated[SessionPrincipal, Security(get_current_session)],
+    runtime: Runtime = Depends(get_runtime),
+) -> Response:
+    """Detach the current Analysis and make the Tab immediately reusable."""
+
+    await runtime.analysis_service.clear_tab(
+        principal.user.id,
+        str(workspace_id),
+        str(tab_id),
+    )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get(
+    "/analyses",
+    response_model=AnalysisPage,
+    responses=api_errors(403, 404, 409, 422, 500),
+)
+async def list_analyses(
+    workspace_id: uuid.UUID,
+    principal: Annotated[SessionPrincipal, Security(get_current_session)],
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=500),
+    runtime: Runtime = Depends(get_runtime),
+) -> AnalysisPage:
+    """Return one stable page of live valid and corrupt Analyses."""
+
+    return await runtime.analysis_service.list_analyses(
+        principal.user.id,
+        str(workspace_id),
+        page=page,
+        page_size=page_size,
+    )
+
+
+@router.get(
+    "/analyses/{analysis_id}",
+    response_model=Analysis,
+    responses=api_errors(403, 404, 409, 422, 500),
+)
+async def get_analysis(
+    workspace_id: uuid.UUID,
+    analysis_id: uuid.UUID,
+    principal: Annotated[SessionPrincipal, Security(get_current_session)],
+    runtime: Runtime = Depends(get_runtime),
+) -> Analysis:
+    """Return one valid live Analysis by its Workspace-local identity."""
+
+    return await runtime.analysis_service.get(
+        principal.user.id,
+        str(workspace_id),
+        str(analysis_id),
+    )
+
+
+@router.post(
+    "/analyses/{analysis_id}/children",
+    response_model=Analysis,
+    status_code=status.HTTP_201_CREATED,
+    responses=api_errors(403, 404, 409, 422, 500, 507),
+)
+async def submit_child_analysis(
+    workspace_id: uuid.UUID,
+    analysis_id: uuid.UUID,
+    body: ChildAnalysisRequest,
+    request: Request,
+    response: Response,
+    principal: Annotated[SessionPrincipal, Security(get_current_session)],
+    runtime: Runtime = Depends(get_runtime),
+) -> Analysis:
+    """Create one recomputed child Analysis beneath a successful root."""
+
+    child = await runtime.analysis_service.submit_child(
+        principal.user.id,
+        str(workspace_id),
+        str(analysis_id),
+        body,
+    )
+    response.headers["Location"] = route_path(
+        request,
+        "get_analysis",
+        workspace_id=workspace_id,
+        analysis_id=child.id,
+    )
+    return child
+
+
+@router.post(
+    "/analyses/{analysis_id}/cancel",
+    response_model=Analysis,
+    responses={
+        **api_errors(403, 404, 409, 422, 500),
+        status.HTTP_202_ACCEPTED: {
+            "model": Analysis,
+            "description": "Process termination remains pending",
+        },
+    },
+)
+async def cancel_analysis(
+    workspace_id: uuid.UUID,
+    analysis_id: uuid.UUID,
+    response: Response,
+    principal: Annotated[SessionPrincipal, Security(get_current_session)],
+    runtime: Runtime = Depends(get_runtime),
+) -> Analysis:
+    """Cancel queued work or request termination of one running Analysis."""
+
+    analysis, pending = await runtime.analysis_service.cancel(
+        principal.user.id,
+        str(workspace_id),
+        str(analysis_id),
+    )
+    if pending:
+        response.status_code = status.HTTP_202_ACCEPTED
+    return analysis
+
+
+@router.get(
+    "/analyses/{analysis_id}/result",
+    response_model=AnalysisResult,
+    responses=api_errors(403, 404, 409, 410, 413, 422, 500, 507),
+)
+async def get_analysis_result(
+    workspace_id: uuid.UUID,
+    analysis_id: uuid.UUID,
+    request: Request,
+    principal: Annotated[SessionPrincipal, Security(get_current_session)],
+    runtime: Runtime = Depends(get_runtime),
+) -> AnalysisResult:
+    """Return the canonical first page of one successful Analysis Result."""
+
+    value = await runtime.analysis_result_service.query(
+        principal.user.id,
+        str(workspace_id),
+        str(analysis_id),
+        None,
+        allow_closing=True,
+    )
+    return _present_result(value, request, workspace_id, analysis_id)
+
+
+@router.post(
+    "/analyses/{analysis_id}/result/query",
+    response_model=AnalysisResult,
+    responses=api_errors(400, 403, 404, 409, 410, 413, 422, 500, 507),
+)
+async def query_analysis_result(
+    workspace_id: uuid.UUID,
+    analysis_id: uuid.UUID,
+    body: AnalysisResultQuery,
+    request: Request,
+    principal: Annotated[SessionPrincipal, Security(get_current_session)],
+    runtime: Runtime = Depends(get_runtime),
+) -> AnalysisResult:
+    """Apply one complete typed, side-effect-free Result projection."""
+
+    value = await runtime.analysis_result_service.query(
+        principal.user.id,
+        str(workspace_id),
+        str(analysis_id),
+        body,
+        allow_closing=False,
+    )
+    return _present_result(value, request, workspace_id, analysis_id)
+
+
+@router.get(
+    "/analyses/{analysis_id}/artifacts/{artifact_name}",
+    response_class=FileResponse,
+    responses={
+        **api_errors(403, 404, 409, 410, 413, 422, 500, 507),
+        status.HTTP_200_OK: {
+            "content": {
+                "application/octet-stream": {
+                    "schema": {"type": "string", "format": "binary"}
+                }
+            },
+            "description": "Analysis Artifact",
+        },
+    },
+)
+async def download_analysis_artifact(
+    workspace_id: uuid.UUID,
+    analysis_id: uuid.UUID,
+    artifact_name: str,
+    principal: Annotated[SessionPrincipal, Security(get_current_session)],
+    runtime: Runtime = Depends(get_runtime),
+) -> FileResponse:
+    """Download one declared Artifact through a response-lifetime snapshot."""
+
+    (
+        snapshot,
+        reference,
+    ) = await runtime.analysis_result_service.artifact_response_snapshot(
+        principal.user.id,
+        str(workspace_id),
+        str(analysis_id),
+        artifact_name,
+    )
+    return FileResponse(
+        snapshot.path,
+        filename=reference.name,
+        media_type=reference.media_type or "application/octet-stream",
+        background=BackgroundTask(snapshot.cleanup),
+    )
+
+
+__all__ = ["router"]
