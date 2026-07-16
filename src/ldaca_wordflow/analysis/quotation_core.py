@@ -423,11 +423,6 @@ async def compute_quote_dataframe(
     quotation_service_timeout: float,
 ) -> pl.DataFrame:
     """Compute grouped quote rows for one node/column pair.
-
-
-
-
-
     Why:
     - Abstracts local vs remote extraction behind one shared contract.
     """
@@ -440,7 +435,7 @@ async def compute_quote_dataframe(
         payload = await extract_remote_paginated(
             engine,
             documents,
-            batch_size=max(1, int(quotation_service_max_batch_size or 0)),
+            batch_size=quotation_service_max_batch_size,
             timeout=quotation_service_timeout,
             extract_remote_fn=extract_remote_fn,
         )
