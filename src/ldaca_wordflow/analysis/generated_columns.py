@@ -136,7 +136,7 @@ TOPIC_MEANING_COLUMN = "TOPIC_topic_meaning"
 # detach-time distribution filter; never projected into a detached node.
 TOPIC_DISTRIBUTION_COLUMN = "TOPIC_topic_distribution"
 # User-facing detached-node column names: the dominant ("top 1") topic id and
-# the full soft distribution (rendered as a TMDist proportion bar).
+# the full soft distribution (rendered as a Topic Distribution proportion bar).
 TOPIC_TOP1_COLUMN = "TOPIC_top1"
 TOPIC_DISTRIBUTION_OUTPUT_COLUMN = "TOPIC_distribution"
 
