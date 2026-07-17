@@ -37,8 +37,6 @@ class WorkspaceNodeInfo(_StrictModel):
     document: str | None = None
     color: str | None = None
     shape: tuple[int | None, int | None] = (None, None)
-    dtypes: dict[str, str] = Field(default_factory=dict)
-    columns: list[str] = Field(default_factory=list)
     dtype_normalization: list[DtypeNormalizationChange] | None = None
     tokenizer_models: dict[str, str] = Field(default_factory=dict)
 

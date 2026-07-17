@@ -1,7 +1,6 @@
-"""
-Tests for unified file preview endpoint
-"""
+"""Tests for the Arrow IPC file-preview endpoints."""
 
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
 from zipfile import ZipFile
@@ -27,20 +26,19 @@ def test_csv_preview_supported_types_and_preview(files_test_client, tmp_path):
     pl.DataFrame({"a": [1, 2, 3], "b": ["x", "y", "z"]}).write_csv(csv_path)
 
     # Act
-    resp = files_test_client.post(
+    resp = files_test_client.get(
         "/api/user-files/preview",
-        json={"path": "sample.csv", "page": 1, "page_size": 2},
+        params={"path": "sample.csv", "page": 1, "page_size": 2},
     )
 
     # Assert
     assert resp.status_code == 200
-    data = resp.json()
-    assert data["file_type"] == "csv"
-    assert "LazyFrame" in data["supported_types"]
-    assert data["columns"] == ["a", "b"]
-    assert len(data["rows"]) == 2
-    assert data["total_rows"] == 3
-    assert data["total_pages"] == 2
+    assert resp.headers["content-type"].startswith(
+        "application/vnd.apache.arrow.stream"
+    )
+    assert resp.headers["x-wordflow-has-next"] == "true"
+    frame = pl.read_ipc_stream(BytesIO(resp.content))
+    assert frame.to_dict(as_series=False) == {"a": [1, 2], "b": ["x", "y"]}
 
 
 def test_generic_zip_preview_is_rejected(files_test_client, tmp_path):
@@ -54,9 +52,9 @@ def test_generic_zip_preview_is_rejected(files_test_client, tmp_path):
         zf.writestr("a.txt", "hello")
         zf.writestr("b.txt", "world")
 
-    resp = files_test_client.post(
+    resp = files_test_client.get(
         "/api/user-files/preview",
-        json={"path": "archive.zip", "page": 1, "page_size": 10},
+        params={"path": "archive.zip", "page": 1, "page_size": 10},
     )
 
     assert resp.status_code == 400
@@ -70,17 +68,15 @@ def test_text_preview_returns_single_cell(files_test_client, tmp_path):
     text_path = user_root / "example.txt"
     text_path.write_text("Plain text document.", encoding="utf-8")
 
-    resp = files_test_client.post(
+    resp = files_test_client.get(
         "/api/user-files/preview",
-        json={"path": "example.txt", "page": 1, "page_size": 5},
+        params={"path": "example.txt", "page": 1, "page_size": 5},
     )
 
     assert resp.status_code == 200
-    payload = resp.json()
-    assert payload["file_type"] == "text"
-    assert payload["columns"] == ["text"]
-    assert payload["rows"] == [{"text": "Plain text document."}]
-    assert payload["total_rows"] == 1
+    frame = pl.read_ipc_stream(BytesIO(resp.content))
+    assert frame.to_dicts() == [{"text": "Plain text document."}]
+    assert resp.headers["x-wordflow-has-next"] == "false"
 
 
 def test_excel_preview_returns_sheet_names_for_selector(files_test_client, tmp_path):
@@ -116,13 +112,20 @@ def test_excel_preview_returns_sheet_names_for_selector(files_test_client, tmp_p
             side_effect=fake_read_excel,
         ),
     ):
-        resp = files_test_client.post(
+        sheets_response = files_test_client.get(
+            "/api/user-files/worksheets",
+            params={"path": "with_sheet_names.xlsx"},
+        )
+        resp = files_test_client.get(
             "/api/user-files/preview",
-            json={"path": "with_sheet_names.xlsx", "page": 1, "page_size": 1},
+            params={"path": "with_sheet_names.xlsx", "page": 1, "page_size": 1},
         )
 
+    assert sheets_response.status_code == 200
+    assert sheets_response.json() == {
+        "sheets": ["Sheet1", "Sheet2"],
+        "default_sheet": "Sheet1",
+    }
     assert resp.status_code == 200
-    payload = resp.json()
-    assert payload["file_type"] == "excel"
-    assert payload["sheet_names"] == ["Sheet1", "Sheet2"]
-    assert payload["selected_sheet"] == "Sheet1"
+    frame = pl.read_ipc_stream(BytesIO(resp.content))
+    assert frame.to_dict(as_series=False) == {"col_a": [1], "col_b": ["x"]}

@@ -35,7 +35,7 @@ from ..domain.workspace.provenance import (
     node_reference,
 )
 
-from ..analysis.topic_types import TM_DISTRIBUTION_POLARS_DTYPE
+from ..shared.topic_types import is_topic_distribution_storage_dtype
 from ..shared.errors import InvalidInputError, NodeNotFoundError
 from ..shared.json_data import JsonData
 from .node_casting import cast_lazyframe_column
@@ -279,7 +279,7 @@ def _condition_expression(
     value = condition.value
     operator = condition.operator
 
-    if dtype == TM_DISTRIBUTION_POLARS_DTYPE:
+    if is_topic_distribution_storage_dtype(dtype):
         expression = _topic_distribution_expression(condition)
     elif operator in {"eq", "ne", "gt", "gte", "lt", "lte"}:
         scalar = _coerce_scalar(_parse_temporal(value))
@@ -380,12 +380,12 @@ def _topic_distribution_expression(condition: FilterCondition) -> pl.Expr:
         ) from exc
     proportion = (
         pl.col(condition.column)
-        .list.eval(
+        .arr.eval(
             pl.when(pl.element().struct.field("topic_id") == topic_id)
             .then(pl.element().struct.field("proportion"))
             .otherwise(0.0)
         )
-        .list.max()
+        .arr.max()
         .fill_null(0.0)
     )
     operators = {

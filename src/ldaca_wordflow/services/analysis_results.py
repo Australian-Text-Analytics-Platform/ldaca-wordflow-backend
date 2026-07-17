@@ -20,6 +20,7 @@ from pydantic import BaseModel, ValidationError
 from ..analysis.concordance_core import compute_node_concordance_page
 from ..analysis.quotation_core import compute_quotation_page
 from ..analysis.token_cache import tokens_cache_path
+from ..analysis.generated_columns import TOPIC_DISTRIBUTION_COLUMN
 from ..domain.workspace import (
     AnalysisArtifactRecord,
     AnalysisRecord,
@@ -36,9 +37,9 @@ from ..models.analysis_results import (
     DetachmentStoredResult,
     QuotationResultQuery,
     QuotationStoredResult,
-    SequentialResultQuery,
     SequentialStoredResult,
-    TokenFrequencyResultQuery,
+    PagedTableIdentity,
+    StoredArtifactIdentity,
     TokenFrequencyStoredResult,
     TopicModelingResultQuery,
     TopicModelingStoredResult,
@@ -47,10 +48,18 @@ from ..settings import Settings
 from ..shared.errors import (
     AnalysisCorruptError,
     AnalysisKindMismatchError,
+    ArtifactGoneError,
     InvalidInputError,
     NodeNotFoundError,
 )
 from ..shared.json_data import JsonData
+from ..shared.table_transport import (
+    IpcTablePage,
+    encode_ipc_stream,
+    encode_schema_stream,
+    topic_distribution_dtype,
+)
+from ..shared.topic_types import topic_count_from_storage_dtype
 from ..workers.input_snapshots import (
     create_worker_input_snapshot,
     load_snapshot_node,
@@ -130,6 +139,125 @@ class AnalysisResultService:
                 artifact_name,
             )
 
+    async def table_response_snapshot(
+        self,
+        user_id: str,
+        workspace_id: str,
+        analysis_id: str,
+        table_id: str,
+    ) -> ResponseSnapshot:
+        """Snapshot one declared complete Result table by semantic identity."""
+
+        async with self._analyses.successful_record_context(
+            user_id,
+            workspace_id,
+            analysis_id,
+            allow_closing=True,
+        ) as (lease, record):
+            stored_model = ANALYSIS_STORED_RESULT_MODELS.get(record.request.kind)
+            if stored_model is None or record.result_payload is None:
+                raise AnalysisCorruptError("Analysis data is corrupt")
+            try:
+                stored = stored_model.model_validate(record.result_payload)
+            except ValidationError as exc:
+                raise AnalysisCorruptError("Analysis data is corrupt") from exc
+            artifact = None
+            if isinstance(stored, TokenFrequencyStoredResult):
+                candidates = [item.table for item in stored.tables.nodes]
+                if stored.tables.statistics is not None:
+                    candidates.append(stored.tables.statistics)
+                artifact = next(
+                    (item.artifact for item in candidates if item.table_id == table_id),
+                    None,
+                )
+            elif isinstance(stored, SequentialStoredResult):
+                if stored.table.table_id == table_id:
+                    artifact = stored.table.artifact
+            if artifact is None:
+                raise ArtifactGoneError("Analysis Result table is unavailable")
+            snapshot, _reference = await self._artifacts.response_snapshot(
+                lease,
+                record,
+                artifact.name,
+            )
+            return snapshot
+
+    async def paged_table_page(
+        self,
+        user_id: str,
+        workspace_id: str,
+        analysis_id: str,
+        table_id: str,
+        *,
+        page: int,
+        page_size: int,
+        sort_by: str | None,
+        descending: bool,
+    ) -> IpcTablePage:
+        """Materialize one independent Arrow page from a declared Result table."""
+
+        snapshot = await self._paged_table_snapshot(
+            user_id, workspace_id, analysis_id, table_id
+        )
+        try:
+            return await self._run_sync(
+                _paged_artifact_page,
+                snapshot.path,
+                page,
+                page_size,
+                sort_by,
+                descending,
+            )
+        finally:
+            with anyio.CancelScope(shield=True):
+                await snapshot.cleanup()
+
+    async def paged_table_schema(
+        self,
+        user_id: str,
+        workspace_id: str,
+        analysis_id: str,
+        table_id: str,
+    ) -> bytes:
+        """Return a zero-row Arrow stream for a declared paged Result table."""
+
+        snapshot = await self._paged_table_snapshot(
+            user_id, workspace_id, analysis_id, table_id
+        )
+        try:
+            return await self._run_sync(_paged_artifact_schema, snapshot.path)
+        finally:
+            with anyio.CancelScope(shield=True):
+                await snapshot.cleanup()
+
+    async def _paged_table_snapshot(
+        self,
+        user_id: str,
+        workspace_id: str,
+        analysis_id: str,
+        table_id: str,
+    ) -> ResponseSnapshot:
+        async with self._analyses.successful_record_context(
+            user_id,
+            workspace_id,
+            analysis_id,
+            allow_closing=True,
+        ) as (lease, record):
+            stored_model = ANALYSIS_STORED_RESULT_MODELS.get(record.request.kind)
+            if stored_model is None or record.result_payload is None:
+                raise AnalysisCorruptError("Analysis data is corrupt")
+            try:
+                stored = stored_model.model_validate(record.result_payload)
+            except ValidationError as exc:
+                raise AnalysisCorruptError("Analysis data is corrupt") from exc
+            artifact = _paged_table_artifact(stored, table_id)
+            snapshot, _reference = await self._artifacts.response_snapshot(
+                lease,
+                record,
+                artifact.name,
+            )
+            return snapshot
+
     async def query(
         self,
         user_id: str,
@@ -141,7 +269,6 @@ class AnalysisResultService:
     ) -> ResultMaterialization:
         """Return one typed projection after releasing the Workspace gate."""
 
-        response_snapshots: list[ResponseSnapshot] = []
         input_snapshot: _QueryInputSnapshot | None = None
         try:
             async with self._analyses.successful_record_context(
@@ -170,6 +297,21 @@ class AnalysisResultService:
                     )
                     payload["kind"] = kind
                     return ResultMaterialization(payload=payload, stored=stored)
+                if isinstance(
+                    stored,
+                    TokenFrequencyStoredResult | SequentialStoredResult,
+                ):
+                    if query is not None:
+                        raise AnalysisKindMismatchError(
+                            "Complete Analysis Results do not accept queries"
+                        )
+                    await self._artifacts.ensure_available(lease, record)
+                    payload = cast(
+                        dict[str, JsonData],
+                        stored.model_dump(mode="json"),
+                    )
+                    payload["kind"] = kind
+                    return ResultMaterialization(payload=payload, stored=stored)
                 effective_query = query or _default_query(kind)
                 if effective_query.kind != kind:
                     raise AnalysisKindMismatchError(
@@ -178,47 +320,17 @@ class AnalysisResultService:
                 request = record.request.model_copy(deep=True)
                 await self._artifacts.ensure_available(lease, record)
 
-                if isinstance(effective_query, TokenFrequencyResultQuery):
-                    stored_token = TokenFrequencyStoredResult.model_validate(stored)
-                    selected = _selected_token_artifacts(stored_token, effective_query)
-                    token_inputs: list[tuple[uuid.UUID, Path]] = []
-                    for item in selected:
-                        snapshot, _reference = await self._artifacts.response_snapshot(
-                            lease,
-                            record,
-                            item.token_parquet_path.name,
-                        )
-                        response_snapshots.append(snapshot)
-                        token_inputs.append((item.node_id, snapshot.path))
-                elif isinstance(
+                if isinstance(
                     effective_query,
                     ConcordanceResultQuery | QuotationResultQuery,
                 ):
                     input_snapshot = await self._create_query_snapshot(lease, record)
 
-            if isinstance(effective_query, TokenFrequencyResultQuery):
-                return ResultMaterialization(
-                    payload=await self._query_token_frequency(
-                        TokenFrequencyStoredResult.model_validate(stored),
-                        effective_query,
-                        token_inputs,
-                    ),
-                    stored=stored,
-                )
             if isinstance(effective_query, TopicModelingResultQuery):
                 return ResultMaterialization(
                     payload=await self._run_sync(
                         _query_topics,
                         TopicModelingStoredResult.model_validate(stored),
-                        effective_query,
-                    ),
-                    stored=stored,
-                )
-            if isinstance(effective_query, SequentialResultQuery):
-                return ResultMaterialization(
-                    payload=await self._run_sync(
-                        _query_inline_rows,
-                        SequentialStoredResult.model_validate(stored),
                         effective_query,
                     ),
                     stored=stored,
@@ -283,32 +395,8 @@ class AnalysisResultService:
             )
         finally:
             with anyio.CancelScope(shield=True):
-                for snapshot in response_snapshots:
-                    await snapshot.cleanup()
                 if input_snapshot is not None:
                     await self._cleanup_query_snapshot(input_snapshot)
-
-    async def _query_token_frequency(
-        self,
-        stored: TokenFrequencyStoredResult,
-        query: TokenFrequencyResultQuery,
-        inputs: list[tuple[uuid.UUID, Path]],
-    ) -> dict[str, JsonData]:
-        data: dict[str, JsonData] = {}
-        for node_id, path in inputs:
-            data[str(node_id)] = await self._run_sync(
-                _query_parquet,
-                path,
-                query.page,
-                query.page_size,
-                query.sort_by,
-                query.descending,
-            )
-        payload = cast(dict[str, JsonData], stored.model_dump(mode="json"))
-        payload["kind"] = "token_frequency"
-        payload["data"] = data
-        payload["query"] = cast(JsonData, query.model_dump(mode="json"))
-        return payload
 
     async def _create_query_snapshot(
         self,
@@ -358,16 +446,12 @@ class AnalysisResultService:
 
 
 def _default_query(kind: str) -> AnalysisResultQuery:
-    if kind == "token_frequency":
-        return TokenFrequencyResultQuery()
     if kind == "topic_modeling":
         return TopicModelingResultQuery()
     if kind == "concordance":
         return ConcordanceResultQuery()
     if kind == "quotation":
         return QuotationResultQuery()
-    if kind == "sequential":
-        return SequentialResultQuery()
     raise AnalysisCorruptError("Analysis data is corrupt")
 
 
@@ -375,49 +459,79 @@ def _request_node_ids(record: AnalysisRecord) -> tuple[uuid.UUID, ...]:
     return analysis_input_ids(record.request)
 
 
-def _selected_token_artifacts(
-    stored: TokenFrequencyStoredResult,
-    query: TokenFrequencyResultQuery,
-):
-    selected = [
-        item
-        for item in stored.artifacts.nodes
-        if query.node_id is None or item.node_id == query.node_id
-    ]
-    if query.node_id is not None and not selected:
-        raise NodeNotFoundError("Analysis Result Data Block not found")
-    return selected
+def _paged_table_artifact(
+    stored: BaseModel,
+    table_id: str,
+) -> StoredArtifactIdentity:
+    if isinstance(stored, TopicModelingStoredResult):
+        table = next(
+            (
+                node.assignments
+                for node in stored.artifacts.nodes
+                if node.assignments.table_id == table_id
+            ),
+            None,
+        )
+        if isinstance(table, PagedTableIdentity):
+            return table.artifact
+    raise ArtifactGoneError("Analysis Result table is unavailable")
 
 
-def _query_parquet(
+def _paged_artifact_lazyframe(path: Path) -> pl.LazyFrame:
+    return pl.scan_parquet(path)
+
+
+def _paged_artifact_page(
     path: Path,
     page: int,
     page_size: int,
     sort_by: str | None,
     descending: bool,
-) -> dict[str, JsonData]:
-    lazyframe = pl.scan_parquet(path)
+) -> IpcTablePage:
+    if page < 1 or page_size < 1:
+        raise InvalidInputError("Page and page size must be positive")
+    lazyframe = _paged_artifact_lazyframe(path)
     schema = lazyframe.collect_schema()
+    topic_count = _topic_distribution_topic_count(schema)
     if sort_by is not None:
-        if sort_by not in schema.names():
-            raise InvalidInputError("Result sort column not found")
+        if sort_by not in schema:
+            raise InvalidInputError("Table sort column not found")
         lazyframe = lazyframe.sort(sort_by, descending=descending)
-    total = int(lazyframe.select(pl.len()).collect().item())
-    frame = lazyframe.slice((page - 1) * page_size, page_size).collect()
-    rows = cast(list[dict[str, JsonData]], frame.to_dicts())
-    return cast(
-        dict[str, JsonData],
-        {
-            "rows": rows,
-            "columns": schema.names(),
-            "dtypes": {name: str(dtype) for name, dtype in schema.items()},
-            "pagination": {
-                "page": page,
-                "page_size": page_size,
-                "total_rows": total,
-                "total_pages": math.ceil(total / page_size) if total else 0,
-            },
-        },
+    frame = lazyframe.slice((page - 1) * page_size, page_size + 1).collect()
+    has_next = len(frame) > page_size
+    frame = _apply_topic_extension(frame.head(page_size), topic_count)
+    return IpcTablePage(content=encode_ipc_stream(frame), has_next=has_next)
+
+
+def _paged_artifact_schema(path: Path) -> bytes:
+    schema = _paged_artifact_lazyframe(path).collect_schema()
+    if TOPIC_DISTRIBUTION_COLUMN in schema:
+        schema[TOPIC_DISTRIBUTION_COLUMN] = topic_distribution_dtype(
+            _topic_distribution_topic_count(schema)
+        )
+    return encode_schema_stream(schema)
+
+
+def _topic_distribution_topic_count(schema: pl.Schema) -> int:
+    if TOPIC_DISTRIBUTION_COLUMN not in schema:
+        return 0
+    try:
+        return topic_count_from_storage_dtype(schema[TOPIC_DISTRIBUTION_COLUMN])
+    except ValueError as exc:
+        raise AnalysisCorruptError(
+            "Analysis Topic Distribution artifact has an invalid schema"
+        ) from exc
+
+
+def _apply_topic_extension(frame: pl.DataFrame, topic_count: int) -> pl.DataFrame:
+    if TOPIC_DISTRIBUTION_COLUMN not in frame:
+        return frame
+    return frame.with_columns(
+        pl.Series(
+            TOPIC_DISTRIBUTION_COLUMN,
+            frame[TOPIC_DISTRIBUTION_COLUMN].to_list(),
+            dtype=topic_distribution_dtype(topic_count),
+        )
     )
 
 
@@ -460,27 +574,6 @@ def _json_sort_key(value: JsonData) -> tuple[int, int | float | str]:
     if isinstance(value, str):
         return 2, value
     return 3, json.dumps(value, sort_keys=True, separators=(",", ":"))
-
-
-def _query_inline_rows(
-    stored: SequentialStoredResult,
-    query: SequentialResultQuery,
-) -> dict[str, JsonData]:
-    payload = cast(dict[str, JsonData], stored.model_dump(mode="json"))
-    rows = [dict(row) for row in stored.data]
-    page_rows, pagination = _sort_and_page(
-        rows,
-        page=query.page,
-        page_size=query.page_size,
-        sort_by=query.sort_by,
-        descending=query.descending,
-        columns=set(stored.columns),
-    )
-    payload["kind"] = "sequential"
-    payload["data"] = cast(JsonData, page_rows)
-    payload["pagination"] = pagination
-    payload["query"] = cast(JsonData, query.model_dump(mode="json"))
-    return payload
 
 
 def _query_topics(

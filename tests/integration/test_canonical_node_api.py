@@ -1,7 +1,9 @@
 """End-to-end contract for server-ordered source-node resources."""
 
+from io import BytesIO
 from pathlib import Path
 
+import polars as pl
 from fastapi.testclient import TestClient
 
 from ldaca_wordflow.main import create_app
@@ -49,6 +51,8 @@ def test_source_node_resource_and_one_based_rows(tmp_path: Path) -> None:
             headers=unsafe,
         )
         assert created.status_code == 201
+        assert "columns" not in created.json()
+        assert "dtypes" not in created.json()
         node_id = created.json()["id"]
         assert created.headers["location"].endswith(f"/nodes/{node_id}")
         node_revision = created.headers["etag"]
@@ -91,9 +95,20 @@ def test_source_node_resource_and_one_based_rows(tmp_path: Path) -> None:
             params={"page": 1, "page_size": 1},
         )
         assert rows.status_code == 200
-        assert rows.json()["total_rows"] == 2
-        assert rows.json()["rows"] == [{"text": "hello", "count": 1}]
-        assert rows.json()["total_pages"] == 2
+        assert rows.headers["x-wordflow-has-next"] == "true"
+        assert pl.read_ipc_stream(BytesIO(rows.content)).to_dicts() == [
+            {"text": "hello", "count": 1}
+        ]
+
+        schema = client.get(
+            f"/api/workspaces/{workspace_id}/nodes/{node_id}/schema"
+        )
+        assert schema.status_code == 200
+        schema_frame = pl.read_ipc_stream(BytesIO(schema.content))
+        assert schema_frame.height == 0
+        assert schema_frame.schema == pl.Schema(
+            {"text": pl.String, "count": pl.Int64}
+        )
 
         zero = client.get(
             f"/api/workspaces/{workspace_id}/nodes/{node_id}/rows",
@@ -169,7 +184,7 @@ def test_derived_nodes_share_one_creation_contract_and_preview_is_read_only(
         )
         assert preview.status_code == 200
         assert preview.headers["etag"] == source.headers["etag"]
-        assert preview.json()["rows"] == [
+        assert pl.read_ipc_stream(BytesIO(preview.content)).to_dicts() == [
             {"text": "b", "count": 2},
             {"text": "c", "count": 3},
         ]

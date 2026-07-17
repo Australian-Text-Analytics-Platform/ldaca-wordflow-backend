@@ -42,15 +42,16 @@ def test_worker_raw_text_path_unchanged_when_no_tokens(tmp_path, monkeypatch):
         workspace_id="ws-1",
         node_corpora={"node-1": ["alpha beta alpha", "alpha"]},
         node_display_names={"node-1": "EN Corpus"},
-        artifact_dir=str(tmp_path),
+        artifact_dir=str(tmp_path / "output"),
+        scratch_dir=str(tmp_path / "scratch"),
         artifact_prefix="token_freq_text",
         node_tokenizer_models={"node-1": "native:plain_words_en"},
     )
 
     assert result["state"] == "successful"
     assert requested_models == ["native:plain_words_en"]
-    parquet_path = Path(result["artifacts"]["nodes"][0]["token_parquet_path"])
-    counts = pl.read_parquet(parquet_path).to_dicts()
+    table_path = Path(result["tables"]["nodes"][0]["table"]["artifact"])
+    counts = pl.read_ipc_stream(table_path).to_dicts()
     counts_map = {row["token"]: row["frequency"] for row in counts}
     assert counts_map == {"alpha": 3, "beta": 1}
 
@@ -67,7 +68,8 @@ def test_worker_mixes_token_stream_and_text_paths(tmp_path, monkeypatch):
         node_corpora={"text-side": ["alpha beta alpha"]},
         node_token_streams={"tokens-side": str(stream_path)},
         node_display_names={"text-side": "EN", "tokens-side": "ZH"},
-        artifact_dir=str(tmp_path),
+        artifact_dir=str(tmp_path / "output"),
+        scratch_dir=str(tmp_path / "scratch"),
         artifact_prefix="token_freq_mixed",
         node_tokenizer_models={"text-side": "native:plain_words_en"},
     )
@@ -75,16 +77,16 @@ def test_worker_mixes_token_stream_and_text_paths(tmp_path, monkeypatch):
     assert result["state"] == "successful"
     assert requested_models == ["native:plain_words_en"]
     node_paths = {
-        artifact["node_id"]: Path(artifact["token_parquet_path"])
-        for artifact in result["artifacts"]["nodes"]
+        table["node_id"]: Path(table["table"]["artifact"])
+        for table in result["tables"]["nodes"]
     }
     text_counts = {
         row["token"]: row["frequency"]
-        for row in pl.read_parquet(node_paths["text-side"]).to_dicts()
+        for row in pl.read_ipc_stream(node_paths["text-side"]).to_dicts()
     }
     tokens_counts = {
         row["token"]: row["frequency"]
-        for row in pl.read_parquet(node_paths["tokens-side"]).to_dicts()
+        for row in pl.read_ipc_stream(node_paths["tokens-side"]).to_dicts()
     }
     assert text_counts == {"alpha": 2, "beta": 1}
     assert tokens_counts == {"beta": 1, "gamma": 2}
@@ -128,7 +130,8 @@ def test_worker_plain_words_tokenization_preference_uses_raw_text_fast_path(
         workspace_id="ws-1",
         node_corpora={},
         node_display_names={},
-        artifact_dir=str(tmp_path),
+        artifact_dir=str(tmp_path / "output"),
+        scratch_dir=str(tmp_path / "scratch"),
         artifact_prefix="token_freq_plain_preference",
         input_snapshot_dir=str(snapshot_dir),
         node_ids=["node-1"],
@@ -138,8 +141,8 @@ def test_worker_plain_words_tokenization_preference_uses_raw_text_fast_path(
 
     assert result["state"] == "successful"
     assert requested_models == ["native:plain_words_en"]
-    parquet_path = Path(result["artifacts"]["nodes"][0]["token_parquet_path"])
-    counts = pl.read_parquet(parquet_path).to_dicts()
+    table_path = Path(result["tables"]["nodes"][0]["table"]["artifact"])
+    counts = pl.read_ipc_stream(table_path).to_dicts()
     counts_map = {row["token"]: row["frequency"] for row in counts}
     assert counts_map == {"alpha": 2, "beta": 2}
 
@@ -152,7 +155,8 @@ def test_worker_raw_text_path_requires_tokenizer_model(tmp_path, monkeypatch):
             workspace_id="ws-1",
             node_corpora={"node-1": ["alpha beta"]},
             node_display_names={"node-1": "EN Corpus"},
-            artifact_dir=str(tmp_path),
+            artifact_dir=str(tmp_path / "output"),
+            scratch_dir=str(tmp_path / "scratch"),
             artifact_prefix="token_freq_text",
         )
 
@@ -176,13 +180,14 @@ def test_worker_uses_node_token_streams_when_provided(tmp_path, monkeypatch):
         node_corpora={},
         node_token_streams={"node-1": str(stream_path)},
         node_display_names={"node-1": "ZH Corpus"},
-        artifact_dir=str(tmp_path),
+        artifact_dir=str(tmp_path / "output"),
+        scratch_dir=str(tmp_path / "scratch"),
         artifact_prefix="token_freq_stream",
     )
 
     assert result["state"] == "successful"
-    parquet_path = Path(result["artifacts"]["nodes"][0]["token_parquet_path"])
-    counts = pl.read_parquet(parquet_path).to_dicts()
+    table_path = Path(result["tables"]["nodes"][0]["table"]["artifact"])
+    counts = pl.read_ipc_stream(table_path).to_dicts()
     counts_map = {row["token"]: row["frequency"] for row in counts}
     assert counts_map == {"alpha": 3, "beta": 1, "gamma": 2}
 
@@ -209,13 +214,14 @@ def test_worker_token_stream_matches_manual_explode(tmp_path, monkeypatch):
         node_corpora={},
         node_token_streams={"node-1": str(stream_path)},
         node_display_names={"node-1": "Corpus"},
-        artifact_dir=str(tmp_path),
+        artifact_dir=str(tmp_path / "output"),
+        scratch_dir=str(tmp_path / "scratch"),
         artifact_prefix="token_freq_consistency",
     )
 
-    parquet_path = Path(result["artifacts"]["nodes"][0]["token_parquet_path"])
+    table_path = Path(result["tables"]["nodes"][0]["table"]["artifact"])
     actual = {
         row["token"]: row["frequency"]
-        for row in pl.read_parquet(parquet_path).to_dicts()
+        for row in pl.read_ipc_stream(table_path).to_dicts()
     }
     assert actual == expected

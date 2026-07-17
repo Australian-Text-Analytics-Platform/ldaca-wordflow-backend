@@ -18,7 +18,6 @@ from fastapi import (
 from ...models.node_resources import (
     NodeCreateRequest,
     NodeDerivationRequest,
-    NodeRowsResponse,
     NodeUpdateRequest,
 )
 from ...models.workspace import WorkspaceNodeInfo
@@ -26,6 +25,11 @@ from ...runtime import Runtime, get_runtime
 from ...services.sessions import SessionPrincipal
 from ..security import get_current_session
 from ..responses import api_errors, route_path, workspace_etag
+from ..table_responses import (
+    ARROW_STREAM_RESPONSE,
+    arrow_page_response,
+    arrow_stream_response,
+)
 
 router = APIRouter(
     prefix="/workspaces/{workspace_id}/nodes",
@@ -88,18 +92,17 @@ async def create_node(
 
 @router.post(
     "/previews",
-    response_model=NodeRowsResponse,
-    responses=api_errors(400, 403, 404, 413, 422),
+    response_class=Response,
+    responses={**api_errors(400, 403, 404, 413, 422), **ARROW_STREAM_RESPONSE},
 )
 async def preview_node_creation(
     workspace_id: uuid.UUID,
     request: NodeDerivationRequest,
-    response: Response,
     principal: Annotated[SessionPrincipal, Security(get_current_session)],
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=500),
     runtime: Runtime = Depends(get_runtime),
-) -> NodeRowsResponse:
+) -> Response:
     """Preview a derived-node plan without changing workspace state."""
 
     rows, revision = await runtime.node_service.preview(
@@ -109,8 +112,9 @@ async def preview_node_creation(
         page=page,
         page_size=page_size,
     )
-    response.headers["ETag"] = workspace_etag(revision)
-    return rows
+    result = arrow_page_response(rows)
+    result.headers["ETag"] = workspace_etag(revision)
+    return result
 
 
 @router.get(
@@ -187,8 +191,8 @@ async def delete_node(
 
 @router.get(
     "/{node_id}/rows",
-    response_model=NodeRowsResponse,
-    responses=api_errors(400, 404, 422),
+    response_class=Response,
+    responses={**api_errors(400, 404, 422), **ARROW_STREAM_RESPONSE},
 )
 async def get_node_rows(
     workspace_id: uuid.UUID,
@@ -200,7 +204,7 @@ async def get_node_rows(
     sort_by: str | None = Query(None),
     descending: bool = Query(False),
     runtime: Runtime = Depends(get_runtime),
-) -> NodeRowsResponse:
+) -> Response:
     """Materialize one bounded, one-based page from a lazy node plan."""
 
     rows, revision = await runtime.node_service.rows(
@@ -212,5 +216,29 @@ async def get_node_rows(
         sort_by=sort_by,
         descending=descending,
     )
-    response.headers["ETag"] = workspace_etag(revision)
-    return rows
+    result = arrow_page_response(rows)
+    result.headers["ETag"] = workspace_etag(revision)
+    return result
+
+
+@router.get(
+    "/{node_id}/schema",
+    response_class=Response,
+    responses={**api_errors(404, 422), **ARROW_STREAM_RESPONSE},
+)
+async def get_node_schema(
+    workspace_id: uuid.UUID,
+    node_id: uuid.UUID,
+    principal: Annotated[SessionPrincipal, Security(get_current_session)],
+    runtime: Runtime = Depends(get_runtime),
+) -> Response:
+    """Return the Data Block schema as a zero-row Arrow IPC stream."""
+
+    content, revision = await runtime.node_service.schema(
+        principal.user.id,
+        str(workspace_id),
+        str(node_id),
+    )
+    result = arrow_stream_response(content)
+    result.headers["ETag"] = workspace_etag(revision)
+    return result

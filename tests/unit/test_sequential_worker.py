@@ -49,6 +49,7 @@ def test_sequential_worker_validates_and_executes_the_typed_request(
         user_id="user",
         workspace_id="workspace",
         input_snapshot_dir=str(_snapshot(tmp_path)),
+        artifact_dir=str(tmp_path / "output"),
         node_id=NODE_ID,
         request_payload={
             "time_column": "occurred_at",
@@ -57,8 +58,9 @@ def test_sequential_worker_validates_and_executes_the_typed_request(
     )
 
     assert result["state"] == "successful"
-    assert result["total_records"] == 1
-    assert result["data"][0]["sequential_count"] == 2
+    table = pl.read_ipc_stream(result["table"]["artifact"])
+    assert table.height == 1
+    assert table["sequential_count"].to_list() == [2]
 
 
 def test_sequential_worker_rejects_noncanonical_request_fields(tmp_path: Path) -> None:
@@ -67,6 +69,7 @@ def test_sequential_worker_rejects_noncanonical_request_fields(tmp_path: Path) -
             user_id="user",
             workspace_id="workspace",
             input_snapshot_dir=str(_snapshot(tmp_path)),
+            artifact_dir=str(tmp_path / "output"),
             node_id=NODE_ID,
             request_payload={
                 "time_column": "occurred_at",

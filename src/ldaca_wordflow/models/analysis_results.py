@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from ..domain.workspace import NodeProvenance
 from ..shared.json_data import JsonData
 from .names import NodeName
+from .tables import CompleteTableResource, PagedTableResource
 from .tokenization import TokenizationMetadata
 
 
@@ -22,11 +23,6 @@ class _PagedQuery(_StrictModel):
     page_size: int = Field(default=50, ge=1, le=500)
     sort_by: str | None = None
     descending: bool = False
-
-
-class TokenFrequencyResultQuery(_PagedQuery):
-    kind: Literal["token_frequency"] = "token_frequency"
-    node_id: uuid.UUID | None = None
 
 
 class TopicModelingResultQuery(_PagedQuery):
@@ -44,16 +40,8 @@ class QuotationResultQuery(_PagedQuery):
     context_length: int = Field(default=20, ge=0, le=1000)
 
 
-class SequentialResultQuery(_PagedQuery):
-    kind: Literal["sequential"] = "sequential"
-
-
 AnalysisResultQuery = Annotated[
-    TokenFrequencyResultQuery
-    | TopicModelingResultQuery
-    | ConcordanceResultQuery
-    | QuotationResultQuery
-    | SequentialResultQuery,
+    TopicModelingResultQuery | ConcordanceResultQuery | QuotationResultQuery,
     Field(discriminator="kind"),
 ]
 
@@ -98,35 +86,30 @@ class ResultColumnMetadata(_StrictModel):
     all_columns: list[str]
 
 
-class TabularResultPage(_StrictModel):
-    rows: list[dict[str, JsonData]]
-    columns: list[str]
-    dtypes: dict[str, str]
-    pagination: ResultPagination
-
-
 ArtifactValueT = TypeVar("ArtifactValueT")
 PrivateArtifactPath = Annotated[str, Field(min_length=1)]
 
 
-class _TokenNodeArtifact(_StrictModel, Generic[ArtifactValueT]):
+class CompleteTableIdentity(_StrictModel, Generic[ArtifactValueT]):
+    table_id: str = Field(min_length=1, max_length=200)
+    artifact: ArtifactValueT
+
+
+class PagedTableIdentity(_StrictModel, Generic[ArtifactValueT]):
+    table_id: str = Field(min_length=1, max_length=200)
+    artifact: ArtifactValueT
+
+
+class _TokenNodeTable(_StrictModel, Generic[ArtifactValueT]):
     node_id: uuid.UUID
     node_name: NodeName
-    token_parquet_path: ArtifactValueT
+    table: CompleteTableIdentity[ArtifactValueT]
 
 
-class _TokenStreamArtifact(_StrictModel, Generic[ArtifactValueT]):
-    node_id: uuid.UUID
-    token_stream_parquet_path: ArtifactValueT
-
-
-class _TokenArtifacts(_StrictModel, Generic[ArtifactValueT]):
+class _TokenTables(_StrictModel, Generic[ArtifactValueT]):
     version: Literal[1]
-    nodes: list[_TokenNodeArtifact[ArtifactValueT]]
-    statistics_parquet_path: ArtifactValueT | None = None
-    input_token_streams: list[_TokenStreamArtifact[ArtifactValueT]] = Field(
-        default_factory=list
-    )
+    nodes: list[_TokenNodeTable[ArtifactValueT]]
+    statistics: CompleteTableIdentity[ArtifactValueT] | None = None
 
 
 class TokenAnalysisParameters(_StrictModel):
@@ -156,18 +139,28 @@ class _TokenFrequencyBody(_StrictModel):
 class TokenFrequencyWorkerResult(_TokenFrequencyBody):
     state: Literal["successful"]
     message: str
-    artifacts: _TokenArtifacts[PrivateArtifactPath]
+    tables: _TokenTables[PrivateArtifactPath]
 
 
 class TokenFrequencyStoredResult(_TokenFrequencyBody):
-    artifacts: _TokenArtifacts[StoredArtifactIdentity]
+    tables: _TokenTables[StoredArtifactIdentity]
+
+
+class _TokenNodeTableResource(_StrictModel):
+    node_id: uuid.UUID
+    node_name: NodeName
+    table: CompleteTableResource
+
+
+class _TokenTableResources(_StrictModel):
+    version: Literal[1]
+    nodes: list[_TokenNodeTableResource]
+    statistics: CompleteTableResource | None = None
 
 
 class TokenFrequencyResult(_TokenFrequencyBody):
     kind: Literal["token_frequency"] = "token_frequency"
-    artifacts: _TokenArtifacts[ArtifactResource]
-    data: dict[uuid.UUID, TabularResultPage]
-    query: TokenFrequencyResultQuery
+    tables: _TokenTableResources
 
 
 class TopicItem(_StrictModel):
@@ -185,13 +178,27 @@ class _TopicNodeArtifact(_StrictModel, Generic[ArtifactValueT]):
     node_name: NodeName
     text_column: str
     original_columns: list[str]
-    assignments_parquet_path: ArtifactValueT
+    assignments: PagedTableIdentity[ArtifactValueT]
 
 
 class _TopicArtifacts(_StrictModel, Generic[ArtifactValueT]):
     version: Literal[1]
     topic_meanings_parquet_path: ArtifactValueT
     nodes: list[_TopicNodeArtifact[ArtifactValueT]]
+
+
+class _TopicNodeArtifactResource(_StrictModel):
+    node_id: uuid.UUID
+    node_name: NodeName
+    text_column: str
+    original_columns: list[str]
+    assignments: PagedTableResource
+
+
+class _TopicArtifactsResource(_StrictModel):
+    version: Literal[1]
+    topic_meanings_parquet_path: ArtifactResource
+    nodes: list[_TopicNodeArtifactResource]
 
 
 class TopicStageTiming(_StrictModel):
@@ -234,7 +241,7 @@ class TopicModelingStoredResult(_TopicModelingBody):
 
 class TopicModelingResult(_TopicModelingBody):
     kind: Literal["topic_modeling"] = "topic_modeling"
-    artifacts: _TopicArtifacts[ArtifactResource]
+    artifacts: _TopicArtifactsResource
     pagination: ResultPagination
     query: TopicModelingResultQuery
 
@@ -303,22 +310,16 @@ class QuotationResult(QuotationStoredResult):
 
 class SequentialWorkerResult(_StrictModel):
     state: Literal["successful"]
-    data: list[dict[str, JsonData]]
-    columns: list[str]
-    total_records: int = Field(ge=0)
-    chart_type: str
+    table: CompleteTableIdentity[PrivateArtifactPath]
 
 
 class SequentialStoredResult(_StrictModel):
-    data: list[dict[str, JsonData]]
-    columns: list[str]
-    total_records: int = Field(ge=0)
+    table: CompleteTableIdentity[StoredArtifactIdentity]
 
 
 class SequentialResult(SequentialStoredResult):
     kind: Literal["sequential"] = "sequential"
-    pagination: ResultPagination
-    query: SequentialResultQuery
+    table: CompleteTableResource
 
 
 class DetachedDataBlockMetadata(_StrictModel):
@@ -433,7 +434,7 @@ def stored_result_payload(kind: str, result: BaseModel) -> dict[str, JsonData]:
     excluded = {
         "token_frequency": {"state", "message"},
         "concordance": {"state", "message"},
-        "sequential": {"state", "chart_type"},
+        "sequential": {"state"},
     }.get(kind, set())
     return cast(
         dict[str, JsonData],
@@ -454,6 +455,7 @@ __all__ = [
     "ConcordanceResultQuery",
     "ConcordanceStoredResult",
     "ConcordanceWorkerResult",
+    "CompleteTableIdentity",
     "ConcordanceDetachmentResult",
     "ConcordanceDetachmentWorkerResult",
     "ConcordanceDispersionDetachmentResult",
@@ -470,13 +472,10 @@ __all__ = [
     "QuotationDetachmentWorkerResult",
     "ResultPagination",
     "SequentialResult",
-    "SequentialResultQuery",
     "SequentialStoredResult",
     "SequentialWorkerResult",
     "StoredArtifactIdentity",
-    "TabularResultPage",
     "TokenFrequencyResult",
-    "TokenFrequencyResultQuery",
     "TokenFrequencyStoredResult",
     "TokenFrequencyWorkerResult",
     "TopicModelingResult",

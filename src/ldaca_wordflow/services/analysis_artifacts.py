@@ -552,6 +552,7 @@ def _unique_name(original: str, used: set[str]) -> str:
 
 def _media_type(path: Path) -> str:
     return {
+        ".arrows": "application/vnd.apache.arrow.stream",
         ".parquet": "application/vnd.apache.parquet",
         ".json": "application/json",
         ".csv": "text/csv",

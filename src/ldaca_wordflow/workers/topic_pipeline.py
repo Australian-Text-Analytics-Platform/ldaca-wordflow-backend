@@ -281,9 +281,9 @@ def _run_rust_topic_modeling(
         .unnest("__topic__")
     )
 
-    # ``topic_distribution`` is the per-document soft assignment: a list of
+    # ``topic_distribution`` is the per-document soft assignment: a fixed set of
     # ``{topic_id, proportion}`` (proportions sum to ~1 across the doc's
-    # chunks). It powers the Filter-tab tmdist function ("keep docs where
+    # chunks). It powers the Topic Distribution filter ("keep docs where
     # topic N proportion >= x"), so it is carried through to the assignment
     # parquet rather than dropped. Each document's distribution is padded to
     # include *every* non-negative topic id (0.0 when the doc has no chunk in
@@ -317,17 +317,20 @@ def _run_rust_topic_modeling(
     all_topic_ids: list[int] = sorted(cast(int, topic["id"]) for topic in topics)
     documents = []
     for index, topic in enumerate(dominant_list):
-        present = {
-            int(entry["topic_id"]): float(entry["proportion"])
-            for entry in (distribution_list[index] or [])
-        }
-        # Keep any outlier (-1) entry the pipeline emitted, then pad every
-        # non-negative topic id (0.0 if the doc has no presence there), sorted.
-        padded: dict[int, float] = {
-            topic_id: proportion
-            for topic_id, proportion in present.items()
-            if topic_id < 0
-        }
+        present: dict[int, float] = {}
+        for entry in distribution_list[index] or []:
+            try:
+                topic_id = int(entry["topic_id"])
+                proportion = float(entry["proportion"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError("Topic Distribution entry is malformed") from exc
+            if topic_id in present:
+                raise ValueError("Topic Distribution contains a duplicate topic id")
+            present[topic_id] = proportion
+        unknown = set(present).difference({-1, *all_topic_ids})
+        if unknown:
+            raise ValueError("Topic Distribution contains an unknown topic id")
+        padded: dict[int, float] = {-1: present.get(-1, 0.0)}
         for topic_id in all_topic_ids:
             padded[topic_id] = present.get(topic_id, 0.0)
         documents.append(

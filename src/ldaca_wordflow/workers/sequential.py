@@ -8,6 +8,7 @@ result payload that the service persists on the Analysis.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any, Callable
 
 from .utils import process_entrypoint
@@ -21,6 +22,7 @@ def run_sequential_analysis(
     workspace_id: str,
     input_snapshot_dir: str,
     node_id: str,
+    artifact_dir: str,
     request_payload: dict[str, Any],
     progress_callback: Callable[[float, str], None] | None = None,
 ) -> dict[str, Any]:
@@ -40,11 +42,9 @@ def run_sequential_analysis(
             progress_callback(0.05, "Loading sequential analysis input...")
 
         from .input_snapshots import load_snapshot_node
-        from ..analysis.sequential_core import (
-            DEFAULT_CHART_TYPE,
-            _run_sequential_analysis,
-        )
+        from ..analysis.sequential_core import _run_sequential_analysis
         from ..domain.workspace import SequentialAnalysisRequest
+        from ..shared.table_transport import write_ipc_stream
 
         if "node_id" in request_payload:
             raise ValueError("Sequential node_id must use the snapshot selector")
@@ -69,12 +69,16 @@ def run_sequential_analysis(
             case_sensitive=request.case_sensitive,
         )
 
+        result_path = Path(artifact_dir) / "result.arrows"
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        write_ipc_stream(result_df, str(result_path))
+
         return {
             "state": "successful",
-            "data": result_df.to_dicts(),
-            "columns": list(result_df.columns),
-            "total_records": len(result_df),
-            "chart_type": DEFAULT_CHART_TYPE,
+            "table": {
+                "table_id": "result",
+                "artifact": str(result_path),
+            },
         }
     except Exception:
         logger.exception(

@@ -23,7 +23,6 @@ from ..domain.workspace.provenance import (
     ReplaceDerivation,
     SliceDerivation,
 )
-from ..shared.json_data import JsonData
 from .names import NodeName
 
 
@@ -139,17 +138,3 @@ class NodeUpdateRequest(_StrictRequest):
         if "name" in self.model_fields_set and self.name is None:
             raise ValueError("Node name cannot be null")
         return self
-
-
-class NodeRowsResponse(BaseModel):
-    """One-based materialized row page from a lazy node plan."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    page: int = Field(ge=1)
-    page_size: int
-    total_rows: int
-    total_pages: int
-    columns: list[str]
-    dtypes: dict[str, str]
-    rows: list[dict[str, JsonData]]

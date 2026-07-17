@@ -20,7 +20,7 @@ from typing import Any
 
 import polars as pl
 import pytest
-from ldaca_wordflow.workers import topic_modeling, topic_pipeline
+from ldaca_wordflow.workers import topic_modeling, topic_pipeline, topic_result
 from ldaca_wordflow.workers.topic_pipeline import (
     _sample_corpus,
 )
@@ -29,6 +29,23 @@ _STAGE_TIMINGS = [
     {"stage": "embedding", "elapsed_ms": 12.5},
     {"stage": "total", "elapsed_ms": 15.0},
 ]
+
+
+@pytest.mark.parametrize(
+    "entries",
+    [
+        [{"topic_id": 0, "proportion": 0.5}, {"topic_id": 0, "proportion": 0.5}],
+        [{"topic_id": 9, "proportion": 1.0}],
+        [{"topic_id": "bad", "proportion": 1.0}],
+    ],
+)
+def test_topic_distribution_rejects_noncanonical_entries(entries) -> None:
+    with pytest.raises(ValueError, match="Topic Distribution"):
+        topic_result._distribution_by_doc_index(
+            [{"doc_index": 0, "topic_distribution": entries}],
+            1,
+            [0],
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -169,10 +186,10 @@ def test_run_rust_topic_modeling_reconstructs_result_dict(monkeypatch):
         embedder_model="fake-model",
     )
 
-    # Documents carry both the dominant topic and the soft topic_distribution.
-    # The distribution is padded so every non-negative topic id (here 0 and 1)
+    # Documents carry both the dominant topic and the soft Topic Distribution.
+    # The distribution always starts with outlier -1 and then every real topic id.
     # appears in every document, with 0.0 where the doc has no presence; this
-    # powers the Filter-tab tmdist function and the dataview bars. The outlier
+    # powers the Topic Distribution filter and the data-view bars. The outlier
     # document (-1) has no non-negative dominant topics of its own but still
     # gets the full padded key set.
     assert result["documents"] == [
@@ -180,6 +197,7 @@ def test_run_rust_topic_modeling_reconstructs_result_dict(monkeypatch):
             "doc_index": 0,
             "dominant_topic": 0,
             "topic_distribution": [
+                {"topic_id": -1, "proportion": pytest.approx(0.0)},
                 {"topic_id": 0, "proportion": pytest.approx(0.9)},
                 {"topic_id": 1, "proportion": pytest.approx(0.1)},
             ],
@@ -188,6 +206,7 @@ def test_run_rust_topic_modeling_reconstructs_result_dict(monkeypatch):
             "doc_index": 1,
             "dominant_topic": 0,
             "topic_distribution": [
+                {"topic_id": -1, "proportion": pytest.approx(0.0)},
                 {"topic_id": 0, "proportion": pytest.approx(1.0)},
                 {"topic_id": 1, "proportion": pytest.approx(0.0)},
             ],
@@ -196,6 +215,7 @@ def test_run_rust_topic_modeling_reconstructs_result_dict(monkeypatch):
             "doc_index": 2,
             "dominant_topic": 1,
             "topic_distribution": [
+                {"topic_id": -1, "proportion": pytest.approx(0.0)},
                 {"topic_id": 0, "proportion": pytest.approx(0.0)},
                 {"topic_id": 1, "proportion": pytest.approx(1.0)},
             ],
@@ -204,6 +224,7 @@ def test_run_rust_topic_modeling_reconstructs_result_dict(monkeypatch):
             "doc_index": 3,
             "dominant_topic": -1,
             "topic_distribution": [
+                {"topic_id": -1, "proportion": pytest.approx(0.0)},
                 {"topic_id": 0, "proportion": pytest.approx(0.0)},
                 {"topic_id": 1, "proportion": pytest.approx(0.0)},
             ],
@@ -283,7 +304,13 @@ def test__compute_topic_modeling_writes_parquet_and_meaning_lists(
                     "representative_words": ["alpha", "beta", "gamma"],
                     "x": 1.5,
                     "y": -2.0,
-                }
+                },
+                {
+                    "id": 1,
+                    "representative_words": ["delta"],
+                    "x": 2.5,
+                    "y": 3.0,
+                },
             ],
         )
 
@@ -313,16 +340,25 @@ def test__compute_topic_modeling_writes_parquet_and_meaning_lists(
     ]
     assert assignments.schema["TOPIC_topic"] == pl.Int64
     assert assignments["TOPIC_topic"].to_list() == [0, 0]
-    assert assignments.schema["TOPIC_topic_distribution"] == pl.List(
-        pl.Struct({"topic_id": pl.Int64, "proportion": pl.Float64})
+    assert assignments.schema["TOPIC_topic_distribution"] == pl.Array(
+        pl.Struct({"topic_id": pl.Int64, "proportion": pl.Float64}), 3
     )
     assert assignments["TOPIC_topic_distribution"].to_list() == [
-        [{"topic_id": 0, "proportion": 1.0}],
-        [{"topic_id": 0, "proportion": 0.7}, {"topic_id": 1, "proportion": 0.3}],
+        [
+            {"topic_id": -1, "proportion": 0.0},
+            {"topic_id": 0, "proportion": 1.0},
+            {"topic_id": 1, "proportion": 0.0},
+        ],
+        [
+            {"topic_id": -1, "proportion": 0.0},
+            {"topic_id": 0, "proportion": 0.7},
+            {"topic_id": 1, "proportion": 0.3},
+        ],
     ]
     assert meanings.schema["TOPIC_topic_meaning"] == pl.List(pl.String)
     assert meanings.to_dicts() == [
-        {"TOPIC_topic": 0, "TOPIC_topic_meaning": ["alpha", "beta", "gamma"]}
+        {"TOPIC_topic": 0, "TOPIC_topic_meaning": ["alpha", "beta", "gamma"]},
+        {"TOPIC_topic": 1, "TOPIC_topic_meaning": ["delta"]},
     ]
 
     topic = result["topics"][0]

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import time
+from io import BytesIO
 from pathlib import Path
 
+import polars as pl
 from fastapi.testclient import TestClient
 
 from ldaca_wordflow.main import create_app
@@ -107,15 +109,19 @@ def test_sequential_analysis_is_owned_by_its_tab_and_workspace(tmp_path: Path) -
             f"/api/workspaces/{workspace_id}/analyses/{analysis_id}/result"
         )
         assert result.status_code == 200, result.text
-        assert result.json()["kind"] == "sequential"
+        result_payload = result.json()
+        assert result_payload["kind"] == "sequential"
+        assert result_payload["table"]["delivery"] == "complete"
+        table_response = client.get(result_payload["table"]["url"])
+        assert table_response.status_code == 200
+        table = pl.read_ipc_stream(BytesIO(table_response.content))
+        assert table.height > 0
         queried = client.post(
             f"/api/workspaces/{workspace_id}/analyses/{analysis_id}/result/query",
             json={"kind": "sequential", "page": 1, "page_size": 1},
             headers=unsafe,
         )
-        assert queried.status_code == 200, queried.text
-        assert len(queried.json()["data"]) == 1
-        assert queried.json()["pagination"]["page_size"] == 1
+        assert queried.status_code == 422, queried.text
 
         cleared = client.delete(
             f"/api/workspaces/{workspace_id}/tabs/{tab['id']}/analysis",
@@ -215,13 +221,13 @@ def test_analysis_artifacts_publish_under_the_analysis_directory(
         assert result.status_code == 200, result.text
         payload = result.json()
         assert payload["kind"] == "token_frequency"
-        artifact_url = payload["artifacts"]["nodes"][0]["token_parquet_path"]["url"]
-        assert artifact_url.startswith(
-            f"/api/workspaces/{workspace_id}/analyses/{analysis_id}/artifacts/"
+        table_url = payload["tables"]["nodes"][0]["table"]["url"]
+        assert table_url.startswith(
+            f"/api/workspaces/{workspace_id}/analyses/{analysis_id}/result/tables/"
         )
-        download = client.get(artifact_url)
+        download = client.get(table_url)
         assert download.status_code == 200
-        assert download.content
+        assert pl.read_ipc_stream(BytesIO(download.content)).height > 0
 
         artifact_path = analysis_dir / record["artifact_references"][0]["relative_path"]
         artifact_path.unlink()

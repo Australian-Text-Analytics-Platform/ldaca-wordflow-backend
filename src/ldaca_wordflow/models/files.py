@@ -6,9 +6,6 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from ..shared.json_data import JsonData
-
-
 class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -35,29 +32,11 @@ class FileResource(_StrictModel):
         return self
 
 
-class FilePreviewRequest(_StrictModel):
-    """One-based bounded preview request for a user-owned file."""
+class FileWorksheetsResource(_StrictModel):
+    """Worksheet selection metadata for one Excel user file."""
 
-    path: str = Field(min_length=1)
-    page: int = Field(default=1, ge=1)
-    page_size: int = Field(default=20, ge=1, le=500)
-    sheet_name: str | None = None
-
-
-class FilePreviewResource(_StrictModel):
-    """Typed page from a supported file format."""
-
-    path: str
-    file_type: str
-    supported_types: list[str]
-    columns: list[str]
-    rows: list[dict[str, JsonData]]
-    page: int = Field(ge=1)
-    page_size: int = Field(ge=1)
-    total_rows: int = Field(ge=0)
-    total_pages: int = Field(ge=0)
-    sheet_names: list[str] | None = None
-    selected_sheet: str | None = None
+    sheets: list[str] = Field(min_length=1)
+    default_sheet: str = Field(min_length=1)
 
 
 class CreateFolderRequest(_StrictModel):
@@ -76,8 +55,7 @@ class MoveFileRequest(_StrictModel):
 
 __all__ = [
     "CreateFolderRequest",
-    "FilePreviewRequest",
-    "FilePreviewResource",
+    "FileWorksheetsResource",
     "FileResource",
     "MoveFileRequest",
 ]

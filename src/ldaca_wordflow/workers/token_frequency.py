@@ -27,6 +27,7 @@ def _compute_token_frequencies(
     node_corpora: dict[str, list[str]],
     node_display_names: dict[str, str],
     artifact_dir: str,
+    scratch_dir: str,
     artifact_prefix: str,
     token_limit: int = 10,
     stop_words: list[str] | None = None,
@@ -61,6 +62,8 @@ def _compute_token_frequencies(
 
         artifact_root = Path(artifact_dir)
         artifact_root.mkdir(parents=True, exist_ok=True)
+        scratch_root = Path(scratch_dir)
+        scratch_root.mkdir(parents=True, exist_ok=True)
 
         if progress_callback:
             progress_callback(0.1, "Validating payload...")
@@ -164,7 +167,7 @@ def _compute_token_frequencies(
                         cache_path=token_cache_path,
                     )
                     stream_path = (
-                        artifact_root
+                        scratch_root
                         / f"{artifact_prefix}_tokens_stream_{node_id}.parquet"
                     )
                     (
@@ -271,30 +274,36 @@ def _compute_token_frequencies(
                 {"token": token, "frequency": int(freq)}
                 for token, freq in filtered_tokens
             ]
-            token_path = (
-                artifact_root
-                / f"{artifact_prefix}_token_frequencies_{frame_key}.parquet"
-            )
-            pl.DataFrame(token_rows).with_columns(
+            token_path = artifact_root / f"tokens-{frame_key}.arrows"
+            token_frame = pl.DataFrame(token_rows).with_columns(
                 [
                     pl.col("token").cast(pl.Utf8),
                     pl.col("frequency").cast(pl.Int64),
                 ]
-            ).lazy().sink_parquet(token_path)
+            )
+            from ..shared.table_transport import write_ipc_stream
+
+            write_ipc_stream(token_frame, str(token_path))
             display_name = display_names.get(frame_key, frame_key)
             node_artifacts.append(
                 {
                     "node_id": frame_key,
                     "node_name": display_name,
-                    "token_parquet_path": str(token_path),
+                    "table": {
+                        "table_id": f"tokens-{frame_key}",
+                        "artifact": str(token_path),
+                    },
                 }
             )
 
-        statistics_path: str | None = None
+        statistics_table: dict[str, str] | None = None
         if len(prepared_node_ids) == 2 and stats_df is not None:
-            stats_path = artifact_root / f"{artifact_prefix}_token_statistics.parquet"
-            stats_df.lazy().sink_parquet(stats_path)
-            statistics_path = str(stats_path)
+            stats_path = artifact_root / "statistics.arrows"
+            write_ipc_stream(stats_df, str(stats_path))
+            statistics_table = {
+                "table_id": "statistics",
+                "artifact": str(stats_path),
+            }
 
         analysis_params_dict = {
             "node_ids": list(prepared_node_ids),
@@ -308,17 +317,10 @@ def _compute_token_frequencies(
         result_payload: dict[str, Any] = {
             "state": "successful",
             "message": f"Successfully calculated token frequencies for {len(prepared_node_ids)} node(s)",
-            "artifacts": {
+            "tables": {
                 "version": 1,
                 "nodes": node_artifacts,
-                "statistics_parquet_path": statistics_path,
-                "input_token_streams": [
-                    {
-                        "node_id": node_id,
-                        "token_stream_parquet_path": path,
-                    }
-                    for node_id, path in token_streams.items()
-                ],
+                "statistics": statistics_table,
             },
             "token_limit": effective_limit,
             "analysis_params": analysis_params_dict,
@@ -348,6 +350,7 @@ def run_token_frequency_analysis(
     node_ids: list[str],
     node_columns: dict[str, str],
     artifact_dir: str,
+    scratch_dir: str,
     artifact_prefix: str,
     input_snapshot_dir: str,
     token_limit: int = 10,
@@ -365,6 +368,7 @@ def run_token_frequency_analysis(
         node_corpora={},
         node_display_names={},
         artifact_dir=artifact_dir,
+        scratch_dir=scratch_dir,
         artifact_prefix=artifact_prefix,
         token_limit=token_limit,
         stop_words=stop_words,

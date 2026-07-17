@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import math
 import os
 import tempfile
 import uuid
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, TypeVar, cast
+from typing import Any, TypeVar
 
 import anyio
 import polars as pl
@@ -27,15 +26,17 @@ from ..shared.errors import (
     ResourceConflictError,
     ResourceTooLargeError,
 )
-from ..shared.json_data import JsonData
 from ..infrastructure.storage.bounded_io import write_parquet_bounded
-from ..shared.serialization import stringify_unsafe_integers
+from ..shared.table_transport import (
+    IpcTablePage,
+    encode_schema_stream,
+    materialize_page,
+)
 from .user_files import UserFileStore
 from ..models.node_resources import (
     FileNodeCreateRequest,
     NodeCreateRequest,
     NodeDerivationRequest,
-    NodeRowsResponse,
     NodeUpdateRequest,
 )
 from ..models.workspace import WorkspaceNodeInfo
@@ -195,7 +196,7 @@ class NodeService:
         *,
         page: int,
         page_size: int,
-    ) -> tuple[NodeRowsResponse, int]:
+    ) -> tuple[IpcTablePage, int]:
         """Materialize an operation preview without mutating or advancing revision."""
 
         async with self._workspaces.submission_context(
@@ -315,7 +316,7 @@ class NodeService:
         page_size: int,
         sort_by: str | None,
         descending: bool,
-    ) -> tuple[NodeRowsResponse, int]:
+    ) -> tuple[IpcTablePage, int]:
         async with self._workspaces.read_context(user_id, workspace_id) as lease:
             node = lease.workspace.nodes.get(node_id)
             if node is None:
@@ -329,6 +330,24 @@ class NodeService:
                 descending,
             )
             return response, lease.revision
+
+    async def schema(
+        self,
+        user_id: str,
+        workspace_id: str,
+        node_id: str,
+    ) -> tuple[bytes, int]:
+        """Return one Data Block schema as a zero-row IPC stream."""
+
+        async with self._workspaces.read_context(user_id, workspace_id) as lease:
+            node = lease.workspace.nodes.get(node_id)
+            if node is None:
+                raise NodeNotFoundError("Node not found")
+            content = await self._run_io(
+                encode_schema_stream,
+                node.data.collect_schema(),
+            )
+            return content, lease.revision
 
     async def _run_io(
         self,
@@ -400,25 +419,13 @@ def _materialize_rows(
     page_size: int,
     sort_by: str | None,
     descending: bool,
-) -> NodeRowsResponse:
-    schema = lazyframe.collect_schema()
-    if sort_by is not None:
-        if sort_by not in schema.names():
-            raise InvalidInputError("Sort column is not present on the node")
-        lazyframe = lazyframe.sort(sort_by, descending=descending)
-    total_rows = int(lazyframe.select(pl.len()).collect().item())
-    offset = (page - 1) * page_size
-    page_frame = lazyframe.slice(offset, page_size).collect()
-    raw_rows = stringify_unsafe_integers(page_frame.to_dicts())
-    rows = cast(list[dict[str, JsonData]], raw_rows)
-    return NodeRowsResponse(
+) -> IpcTablePage:
+    return materialize_page(
+        lazyframe,
         page=page,
         page_size=page_size,
-        total_rows=total_rows,
-        total_pages=math.ceil(total_rows / page_size) if total_rows else 0,
-        columns=schema.names(),
-        dtypes={name: str(dtype) for name, dtype in schema.items()},
-        rows=rows,
+        sort_by=sort_by,
+        descending=descending,
     )
 
 
@@ -427,7 +434,7 @@ def _preview_derivation(
     request: NodeDerivationRequest,
     page: int,
     page_size: int,
-) -> NodeRowsResponse:
+) -> IpcTablePage:
     lazyframe, _name, _operation, _parents = build_derived_lazyframe(
         workspace,
         request,

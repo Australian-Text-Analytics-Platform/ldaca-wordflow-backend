@@ -1,9 +1,18 @@
 """Typed Analysis Result projection tests."""
 
+from io import BytesIO
+
+import polars as pl
 import pytest
 
-from ldaca_wordflow.services.analysis_results import _sort_and_page
-from ldaca_wordflow.shared.errors import InvalidInputError
+from ldaca_wordflow.analysis.generated_columns import TOPIC_DISTRIBUTION_COLUMN
+from ldaca_wordflow.shared.topic_types import topic_distribution_storage_dtype
+from ldaca_wordflow.services.analysis_results import (
+    _paged_artifact_page,
+    _paged_artifact_schema,
+    _sort_and_page,
+)
+from ldaca_wordflow.shared.errors import AnalysisCorruptError, InvalidInputError
 from ldaca_wordflow.shared.json_data import JsonData
 
 
@@ -46,3 +55,59 @@ def test_result_sort_rejects_unknown_columns() -> None:
             descending=False,
             columns={"value"},
         )
+
+
+def test_topic_assignment_pages_use_ipc_and_preserve_semantic_storage(
+    tmp_path,
+) -> None:
+    path = tmp_path / "assignments.parquet"
+    pl.DataFrame(
+        {
+            "__row_nr__": [0, 1],
+            TOPIC_DISTRIBUTION_COLUMN: pl.Series(
+                [
+                    [
+                        {"topic_id": -1, "proportion": 0.25},
+                        {"topic_id": 0, "proportion": 0.75},
+                    ],
+                    [
+                        {"topic_id": -1, "proportion": 0.0},
+                        {"topic_id": 0, "proportion": 1.0},
+                    ],
+                ],
+                dtype=topic_distribution_storage_dtype(1),
+            ),
+        }
+    ).write_parquet(path)
+
+    page = _paged_artifact_page(path, 1, 1, None, False)
+    with pytest.warns(UserWarning, match="Extension type"):
+        frame = pl.read_ipc_stream(BytesIO(page.content))
+    schema = pl.read_ipc_stream(BytesIO(_paged_artifact_schema(path)))
+
+    assert page.has_next is True
+    assert frame[TOPIC_DISTRIBUTION_COLUMN].to_list() == [
+        [
+            {"topic_id": -1, "proportion": 0.25},
+            {"topic_id": 0, "proportion": 0.75},
+        ]
+    ]
+    assert schema.height == 0
+    assert schema.schema[TOPIC_DISTRIBUTION_COLUMN] == topic_distribution_storage_dtype(1)
+
+
+def test_variable_list_topic_assignment_artifact_is_rejected(tmp_path) -> None:
+    path = tmp_path / "legacy-assignments.parquet"
+    pl.DataFrame(
+        {
+            TOPIC_DISTRIBUTION_COLUMN: pl.Series(
+                [[{"topic_id": 0, "proportion": 1.0}]],
+                dtype=pl.List(
+                    pl.Struct({"topic_id": pl.Int64, "proportion": pl.Float64})
+                ),
+            )
+        }
+    ).write_parquet(path)
+
+    with pytest.raises(AnalysisCorruptError, match="invalid schema"):
+        _paged_artifact_schema(path)

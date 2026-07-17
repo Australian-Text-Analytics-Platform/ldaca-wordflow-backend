@@ -15,8 +15,11 @@ from ...models.analysis_results import (
     AnalysisResult,
     AnalysisResultQuery,
     ArtifactResource,
+    CompleteTableIdentity,
+    PagedTableIdentity,
     StoredArtifactIdentity,
 )
+from ...models.tables import CompleteTableResource, PagedTableResource
 from ...models.analyses import AnalysisPage
 from ...runtime import Runtime, get_runtime
 from ...services.analysis_results import ResultMaterialization
@@ -25,6 +28,11 @@ from ...shared.errors import InternalServiceError
 from ...shared.json_data import JsonData
 from ..responses import api_errors, route_path
 from ..security import get_current_session
+from ..table_responses import (
+    ARROW_STREAM_RESPONSE,
+    arrow_page_response,
+    arrow_stream_response,
+)
 
 router = APIRouter(
     prefix="/workspaces/{workspace_id}",
@@ -40,6 +48,35 @@ def _present_typed_value(
     workspace_id: uuid.UUID,
     analysis_id: uuid.UUID,
 ) -> JsonData:
+    if isinstance(value, CompleteTableIdentity):
+        return CompleteTableResource(
+            table_id=value.table_id,
+            url=route_path(
+                request,
+                "download_analysis_table",
+                workspace_id=workspace_id,
+                analysis_id=analysis_id,
+                table_id=value.table_id,
+            ),
+        ).model_dump(mode="json")
+    if isinstance(value, PagedTableIdentity):
+        return PagedTableResource(
+            table_id=value.table_id,
+            schema_url=route_path(
+                request,
+                "get_analysis_table_schema",
+                workspace_id=workspace_id,
+                analysis_id=analysis_id,
+                table_id=value.table_id,
+            ),
+            rows_url=route_path(
+                request,
+                "get_analysis_table_rows",
+                workspace_id=workspace_id,
+                analysis_id=analysis_id,
+                table_id=value.table_id,
+            ),
+        ).model_dump(mode="json")
     if isinstance(value, StoredArtifactIdentity):
         return ArtifactResource(
             name=value.name,
@@ -97,8 +134,10 @@ def _present_result(
         workspace_id,
         analysis_id,
     )
-    if isinstance(stored, dict) and "artifacts" in stored:
-        payload["artifacts"] = stored["artifacts"]
+    if isinstance(stored, dict):
+        for key in ("artifacts", "tables", "table"):
+            if key in stored:
+                payload[key] = stored[key]
     return _RESULT_ADAPTER.validate_python(payload)
 
 
@@ -326,6 +365,104 @@ async def query_analysis_result(
         allow_closing=False,
     )
     return _present_result(value, request, workspace_id, analysis_id)
+
+
+@router.get(
+    "/analyses/{analysis_id}/result/tables/{table_id}",
+    response_class=FileResponse,
+    responses={
+        **api_errors(403, 404, 409, 410, 413, 422, 500, 507),
+        status.HTTP_200_OK: {
+            "content": {
+                "application/vnd.apache.arrow.stream": {
+                    "schema": {"type": "string", "format": "binary"}
+                }
+            },
+            "description": "Complete Arrow IPC Result table",
+        },
+    },
+)
+async def download_analysis_table(
+    workspace_id: uuid.UUID,
+    analysis_id: uuid.UUID,
+    table_id: str,
+    principal: Annotated[SessionPrincipal, Security(get_current_session)],
+    runtime: Runtime = Depends(get_runtime),
+) -> FileResponse:
+    """Return one complete immutable Result table as an Arrow IPC stream."""
+
+    snapshot = await runtime.analysis_result_service.table_response_snapshot(
+        principal.user.id,
+        str(workspace_id),
+        str(analysis_id),
+        table_id,
+    )
+    return FileResponse(
+        snapshot.path,
+        media_type="application/vnd.apache.arrow.stream",
+        headers={"Cache-Control": "no-store"},
+        background=BackgroundTask(snapshot.cleanup),
+    )
+
+
+@router.get(
+    "/analyses/{analysis_id}/result/tables/{table_id}/rows",
+    response_class=Response,
+    responses={
+        **api_errors(403, 404, 409, 410, 422, 500, 507),
+        **ARROW_STREAM_RESPONSE,
+    },
+)
+async def get_analysis_table_rows(
+    workspace_id: uuid.UUID,
+    analysis_id: uuid.UUID,
+    table_id: str,
+    principal: Annotated[SessionPrincipal, Security(get_current_session)],
+    runtime: Runtime = Depends(get_runtime),
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=500)] = 50,
+    sort_by: str | None = None,
+    descending: bool = False,
+) -> Response:
+    """Return one page of an open-ended Result table as Arrow IPC."""
+
+    result = await runtime.analysis_result_service.paged_table_page(
+        principal.user.id,
+        str(workspace_id),
+        str(analysis_id),
+        table_id,
+        page=page,
+        page_size=page_size,
+        sort_by=sort_by,
+        descending=descending,
+    )
+    return arrow_page_response(result)
+
+
+@router.get(
+    "/analyses/{analysis_id}/result/tables/{table_id}/schema",
+    response_class=Response,
+    responses={
+        **api_errors(403, 404, 409, 410, 422, 500, 507),
+        **ARROW_STREAM_RESPONSE,
+    },
+)
+async def get_analysis_table_schema(
+    workspace_id: uuid.UUID,
+    analysis_id: uuid.UUID,
+    table_id: str,
+    principal: Annotated[SessionPrincipal, Security(get_current_session)],
+    runtime: Runtime = Depends(get_runtime),
+) -> Response:
+    """Return a paged Result table schema as a zero-row Arrow stream."""
+
+    content = await runtime.analysis_result_service.paged_table_schema(
+        principal.user.id,
+        str(workspace_id),
+        str(analysis_id),
+        table_id,
+    )
+    return arrow_stream_response(content)
 
 
 @router.get(

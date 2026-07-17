@@ -10,9 +10,7 @@ from ..domain.workspace.provenance import describe_provenance
 
 def canonical_node_info(node: Node) -> dict[str, Any]:
     """Map one registered domain node into strict `WorkspaceNodeInfo` input."""
-    schema_obj = node.data.collect_schema()
-    columns = schema_obj.names()
-    schema = {column: str(dtype) for column, dtype in schema_obj.items()}
+    column_count = len(node.data.collect_schema())
 
     return {
         "id": node.id,
@@ -30,9 +28,7 @@ def canonical_node_info(node: Node) -> dict[str, Any]:
         "child_ids": [child.id for child in node.children],
         "document": node.document,
         "color": node.color,
-        "shape": (node.shape[0], len(columns)),
-        "columns": columns,
-        "dtypes": schema,
+        "shape": (node.shape[0], column_count),
         "tokenizer_models": {
             source: str(meta["model"])
             for source, meta in node.tokenization.items()

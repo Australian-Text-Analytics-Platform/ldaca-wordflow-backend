@@ -25,6 +25,7 @@ from ..analysis.generated_columns import (
     TOPIC_DISTRIBUTION_COLUMN,
     TOPIC_MEANING_COLUMN,
 )
+from ..shared.topic_types import topic_distribution_storage_dtype
 from .topic_pipeline import (
     _resolve_top_n_words,
 )
@@ -59,20 +60,24 @@ def _dominant_topics_by_doc_index(
 
 
 def _distribution_by_doc_index(
-    documents: list[dict[str, Any]], total_docs: int
+    documents: list[dict[str, Any]], total_docs: int, topic_ids: list[int]
 ) -> list[list[dict[str, Any]]]:
     """Flatten Rust ``documents[]`` into per-doc topic-distribution lists.
 
     Mirrors :func:`_dominant_topics_by_doc_index` but extracts the soft
     ``topic_distribution`` (``[{topic_id, proportion}, ...]``) so it can be
     written into the assignment parquet for the detach-time distribution filter.
-    Documents missing a distribution (or out of range) get an empty list, which
-    the filter treats as proportion 0 for every topic.
+    Every valid document gets exactly ``[-1, *topic_ids]`` in that order.
 
     Called by:
     - ``_build_topic_result_payload`` (this module).
     """
-    distributions: list[list[dict[str, Any]]] = [[] for _ in range(total_docs)]
+    expected_ids = [-1, *topic_ids]
+    expected_set = set(expected_ids)
+    empty = [
+        {"topic_id": topic_id, "proportion": 0.0} for topic_id in expected_ids
+    ]
+    distributions = [[dict(entry) for entry in empty] for _ in range(total_docs)]
     for doc in documents:
         try:
             doc_index = int(doc["doc_index"])
@@ -81,18 +86,22 @@ def _distribution_by_doc_index(
         if not (0 <= doc_index < total_docs):
             continue
         entries = doc.get("topic_distribution") or []
-        normalized: list[dict[str, Any]] = []
+        normalized: dict[int, float] = {}
         for entry in entries:
             try:
-                normalized.append(
-                    {
-                        "topic_id": int(entry["topic_id"]),
-                        "proportion": float(entry["proportion"]),
-                    }
-                )
-            except KeyError, TypeError, ValueError:
-                continue
-        distributions[doc_index] = normalized
+                topic_id = int(entry["topic_id"])
+                proportion = float(entry["proportion"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError("Topic Distribution entry is malformed") from exc
+            if topic_id not in expected_set:
+                raise ValueError("Topic Distribution contains an unknown topic id")
+            if topic_id in normalized:
+                raise ValueError("Topic Distribution contains a duplicate topic id")
+            normalized[topic_id] = proportion
+        distributions[doc_index] = [
+            {"topic_id": topic_id, "proportion": normalized.get(topic_id, 0.0)}
+            for topic_id in expected_ids
+        ]
     return distributions
 
 
@@ -128,11 +137,17 @@ def _build_topic_result_payload(
 
     total_docs = sum(int(size) for size in corpus_sizes)
     dominant_by_index = _dominant_topics_by_doc_index(documents, total_docs)
-    distribution_by_index = _distribution_by_doc_index(documents, total_docs)
-    # Polars dtype for the persisted per-row distribution column.
-    distribution_dtype = pl.List(
-        pl.Struct({"topic_id": pl.Int64, "proportion": pl.Float64})
+    topic_ids = sorted(
+        int(topic["id"])
+        for topic in rust_topics
+        if isinstance(topic, dict) and int(topic.get("id", -1)) >= 0
     )
+    if topic_ids != list(range(len(topic_ids))):
+        raise ValueError("Topic ids must be contiguous and start at zero")
+    distribution_by_index = _distribution_by_doc_index(
+        documents, total_docs, topic_ids
+    )
+    distribution_dtype = topic_distribution_storage_dtype(len(topic_ids))
 
     assignments: list[list[int]] = []
     node_artifacts: list[dict[str, Any]] = []
@@ -176,7 +191,10 @@ def _build_topic_result_payload(
                 "node_name": node_name,
                 "text_column": text_column,
                 "original_columns": original_columns,
-                "assignments_parquet_path": str(assignments_path),
+                "assignments": {
+                    "table_id": f"assignments:{node_id}",
+                    "artifact": str(assignments_path),
+                },
             }
         )
         offset = end
@@ -321,7 +339,10 @@ def _build_empty_topic_payload(
                 "node_name": node_name,
                 "text_column": text_column,
                 "original_columns": original_columns,
-                "assignments_parquet_path": str(assignments_path),
+                "assignments": {
+                    "table_id": f"assignments:{node_id}",
+                    "artifact": str(assignments_path),
+                },
             }
         )
 

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import time
 from functools import partial
+from io import BytesIO
 from pathlib import Path
 
+import polars as pl
 from anyio.to_thread import run_sync as run_sync_in_worker_thread
 from fastapi.testclient import TestClient
 
@@ -59,7 +61,7 @@ def _source(client: TestClient, unsafe: dict[str, str]) -> tuple[str, str, str]:
     return workspace_id, node.json()["id"], node.headers["etag"]
 
 
-def _request(api_key: str = "provider-secret") -> dict[str, object]:
+def _request() -> dict[str, object]:
     return {
         "text_column": "text",
         "annotation_column": "stance",
@@ -70,8 +72,16 @@ def _request(api_key: str = "provider-secret") -> dict[str, object]:
         "provider": "openai",
         "model": "test-model",
         "instruction": "Classify each document.",
-        "api_key": api_key,
     }
+
+
+def _configure_credentials(client: TestClient, unsafe: dict[str, str]) -> None:
+    response = client.patch(
+        "/api/provider-credentials",
+        json={"openai_api_key": "provider-secret"},
+        headers=unsafe,
+    )
+    assert response.status_code == 200, response.text
 
 
 def _wait_analysis(
@@ -110,6 +120,7 @@ def test_preview_is_stateless_and_uses_one_based_paging(
     with _client(tmp_path) as client:
         csrf = client.get("/api/session").json()["csrf_token"]
         unsafe = {"Origin": "http://testserver", "X-CSRF-Token": csrf}
+        _configure_credentials(client, unsafe)
         workspace_id, node_id, _etag = _source(client, unsafe)
         response = client.post(
             f"/api/workspaces/{workspace_id}/nodes/{node_id}/annotation-previews",
@@ -172,6 +183,7 @@ def test_full_annotation_is_secret_free_and_completes_as_an_analysis(
     with _client(tmp_path) as client:
         csrf = client.get("/api/session").json()["csrf_token"]
         unsafe = {"Origin": "http://testserver", "X-CSRF-Token": csrf}
+        _configure_credentials(client, unsafe)
         workspace_id, node_id, _etag = _source(client, unsafe)
         tab_id = client.post(
             f"/api/workspaces/{workspace_id}/tabs",
@@ -180,9 +192,9 @@ def test_full_annotation_is_secret_free_and_completes_as_an_analysis(
         ).json()["id"]
         accepted = client.post(
             f"/api/workspaces/{workspace_id}/tabs/{tab_id}/analysis",
-            json={
-                "kind": "annotation",
-                "node_id": node_id,
+                json={
+                    "kind": "annotation",
+                    "node_id": node_id,
                 **_request(),
                 "output_node_name": "Classified documents",
             },
@@ -209,7 +221,8 @@ def test_full_annotation_is_secret_free_and_completes_as_an_analysis(
             params={"page": 1, "page_size": 10},
         )
         assert rows.status_code == 200
-        assert [row["stance"] for row in rows.json()["rows"]] == [
+        frame = pl.read_ipc_stream(BytesIO(rows.content))
+        assert frame["stance"].to_list() == [
             "support",
             "critical",
         ]
@@ -234,19 +247,19 @@ def test_model_discovery_rejects_custom_provider_urls_by_construction(
     monkeypatch.setattr(annotation_service_module, "list_models", fake_models)
     with _client(tmp_path) as client:
         csrf = client.get("/api/session").json()["csrf_token"]
-        response = client.post(
+        unsafe = {"Origin": "http://testserver", "X-CSRF-Token": csrf}
+        _configure_credentials(client, unsafe)
+        response = client.get(
             "/api/annotation-providers/openai/models",
-            json={"api_key": "provider-secret"},
-            headers={"Origin": "http://testserver", "X-CSRF-Token": csrf},
+            headers=unsafe,
         )
         assert response.status_code == 200
         assert response.json() == {
             "provider": "openai",
             "models": ["model-b", "model-a"],
         }
-        rejected = client.post(
+        rejected = client.get(
             "/api/annotation-providers/custom/models",
-            json={"api_key": "provider-secret", "base_url": "http://127.0.0.1"},
-            headers={"Origin": "http://testserver", "X-CSRF-Token": csrf},
+            headers=unsafe,
         )
         assert rejected.status_code == 422
