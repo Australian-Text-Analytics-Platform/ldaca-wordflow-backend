@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
-from typing import Annotated, Any, cast
+from typing import Annotated
 
 import anyio
 from fastapi import APIRouter, Depends, Request, Security
@@ -86,24 +86,16 @@ async def backend_events(
     request: Request,
     principal: Annotated[SessionPrincipal, Security(get_current_session)],
     runtime: Runtime = Depends(get_runtime),
-) -> EventSourceResponse:
+) -> AsyncIterator[ServerSentEvent]:
     """Open one bounded stream and refresh authoritative resources after ready."""
 
-    return EventSourceResponse(
-        cast(
-            Any,
-            _events(
-                runtime.event_hub,
-                runtime.session_service,
-                request.cookies.get(SESSION_COOKIE_NAME),
-                principal,
-            ),
-        ),
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
-    )
+    async for event in _events(
+        runtime.event_hub,
+        runtime.session_service,
+        request.cookies.get(SESSION_COOKIE_NAME),
+        principal,
+    ):
+        yield event
 
 
 __all__ = ["router"]
