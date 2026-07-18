@@ -37,6 +37,8 @@ from ldaca_wordflow.services.analysis_execution_types import (
 from ldaca_wordflow.services.events import EventHub
 from ldaca_wordflow.services.analyses import AnalysisService, PublishedAnalysisResult
 from ldaca_wordflow.services.nodes import NodeService
+from ldaca_wordflow.services.provider_credentials import ProviderCredentialStore
+from ldaca_wordflow.services.user_preferences import UserPreferenceStore
 from ldaca_wordflow.services.workspace import WorkspaceLease
 from ldaca_wordflow.services.workspace import WorkspaceService
 from ldaca_wordflow.settings import Settings
@@ -146,6 +148,28 @@ def _worker(*, progress_queue: object) -> dict[str, str]:
     return {"kind": "concordance"}
 
 
+def _credential_store(tmp_path: Path) -> ProviderCredentialStore:
+    settings = Settings(data_root=tmp_path, multi_user=False)
+    preferences = UserPreferenceStore(
+        settings,
+        io_limiter=anyio.CapacityLimiter(4),
+    )
+    return ProviderCredentialStore(settings, preferences)
+
+
+def _analysis_service(
+    tmp_path: Path,
+    workspaces: WorkspaceService,
+    execution: _ExecutionControl,
+    *,
+    clock: Any = None,
+) -> AnalysisService:
+    kwargs: dict[str, Any] = {"credentials": _credential_store(tmp_path)}
+    if clock is not None:
+        kwargs["clock"] = clock
+    return AnalysisService(workspaces, execution, _Artifacts(), **kwargs)
+
+
 async def _mark_succeeded(
     workspaces: WorkspaceService,
     workspace_id: str,
@@ -173,7 +197,7 @@ async def test_submission_atomically_assigns_one_queued_analysis(
         tmp_path
     )
     execution = _ExecutionControl()
-    service = AnalysisService(workspaces, execution, _Artifacts())
+    service = _analysis_service(tmp_path, workspaces, execution)
 
     created = await service.submit_root(
         "user",
@@ -203,7 +227,7 @@ async def test_rejected_submission_has_no_tab_or_workspace_side_effect(
         tmp_path
     )
     execution = _ExecutionControl()
-    service = AnalysisService(workspaces, execution, _Artifacts())
+    service = _analysis_service(tmp_path, workspaces, execution)
     before = await workspaces.get_workspace("user", workspace_id)
     tab_before = await workspaces.get_tab("user", workspace_id, tab_id)
 
@@ -241,7 +265,7 @@ async def test_stopped_scheduler_rolls_back_root_creation(tmp_path: Path) -> Non
     )
     execution = _ExecutionControl()
     execution.enqueue_failure = AnalysisSchedulingStopped("stopped")
-    service = AnalysisService(workspaces, execution, _Artifacts())
+    service = _analysis_service(tmp_path, workspaces, execution)
 
     with pytest.raises(BackendStoppingError):
         await service.submit_root("user", workspace_id, tab_id, _request(node_id))
@@ -257,7 +281,7 @@ async def test_stopped_scheduler_rolls_back_child_creation(tmp_path: Path) -> No
         tmp_path
     )
     execution = _ExecutionControl()
-    service = AnalysisService(workspaces, execution, _Artifacts())
+    service = _analysis_service(tmp_path, workspaces, execution)
     root = await service.submit_root("user", workspace_id, tab_id, _request(node_id))
     await _mark_succeeded(workspaces, workspace_id, root.id)
     execution.enqueue_failure = AnalysisSchedulingStopped("stopped")
@@ -284,7 +308,7 @@ async def test_unexpected_scheduling_failure_is_not_hidden(tmp_path: Path) -> No
     )
     execution = _ExecutionControl()
     execution.enqueue_failure = RuntimeError("scheduler defect")
-    service = AnalysisService(workspaces, execution, _Artifacts())
+    service = _analysis_service(tmp_path, workspaces, execution)
 
     with pytest.raises(RuntimeError, match="scheduler defect"):
         await service.submit_root("user", workspace_id, tab_id, _request(node_id))
@@ -302,7 +326,7 @@ async def test_child_submission_requires_a_successful_compatible_root(
         tmp_path
     )
     execution = _ExecutionControl()
-    service = AnalysisService(workspaces, execution, _Artifacts())
+    service = _analysis_service(tmp_path, workspaces, execution)
     root = await service.submit_root("user", workspace_id, tab_id, _request(node_id))
     valid_child = ConcordanceDetachmentAnalysisRequest(
         node_id=uuid.UUID(node_id),
@@ -344,7 +368,7 @@ async def test_queued_cancel_is_terminal_and_retained_on_the_tab(
         tmp_path
     )
     execution = _ExecutionControl()
-    service = AnalysisService(workspaces, execution, _Artifacts())
+    service = _analysis_service(tmp_path, workspaces, execution)
     created = await service.submit_root("user", workspace_id, tab_id, _request(node_id))
 
     cancelled, pending = await service.cancel("user", workspace_id, str(created.id))
@@ -369,10 +393,10 @@ async def test_running_cancel_persists_one_request_and_remains_pending(
     execution = _ExecutionControl()
     now = datetime.now(UTC)
     ticks = iter([now, now + timedelta(seconds=1), now + timedelta(seconds=2)])
-    service = AnalysisService(
+    service = _analysis_service(
+        tmp_path,
         workspaces,
         execution,
-        _Artifacts(),
         clock=lambda: next(ticks),
     )
     created = await service.submit_root("user", workspace_id, tab_id, _request(node_id))
@@ -400,7 +424,7 @@ async def test_clear_hides_analysis_and_allows_immediate_resubmission(
         tmp_path
     )
     execution = _ExecutionControl()
-    service = AnalysisService(workspaces, execution, _Artifacts())
+    service = _analysis_service(tmp_path, workspaces, execution)
     first = await service.submit_root("user", workspace_id, tab_id, _request(node_id))
 
     await service.clear_tab("user", workspace_id, tab_id)
@@ -420,7 +444,7 @@ async def test_dispatch_progress_and_success_use_the_expected_write_boundaries(
         tmp_path
     )
     execution = _ExecutionControl()
-    service = AnalysisService(workspaces, execution, _Artifacts())
+    service = _analysis_service(tmp_path, workspaces, execution)
     created = await service.submit_root("user", workspace_id, tab_id, _request(node_id))
     key = AnalysisExecutionKey("user", workspace_id, str(created.id))
     launch_entries: list[AnalysisExecutionKey] = []
@@ -485,7 +509,7 @@ async def test_result_context_requires_success_and_current_inputs(
     workspaces, workspace_id, node_id, tab_id = await _opened_workspace_with_tab(
         tmp_path
     )
-    service = AnalysisService(workspaces, _ExecutionControl(), _Artifacts())
+    service = _analysis_service(tmp_path, workspaces, _ExecutionControl())
     created = await service.submit_root("user", workspace_id, tab_id, _request(node_id))
 
     with pytest.raises(AnalysisNotSucceededError):
@@ -524,7 +548,7 @@ async def test_invalid_progress_fails_only_the_owning_analysis(tmp_path: Path) -
         tmp_path
     )
     execution = _ExecutionControl()
-    service = AnalysisService(workspaces, execution, _Artifacts())
+    service = _analysis_service(tmp_path, workspaces, execution)
     created = await service.submit_root("user", workspace_id, tab_id, _request(node_id))
     key = AnalysisExecutionKey("user", workspace_id, str(created.id))
 
@@ -553,7 +577,7 @@ async def test_detached_running_completion_confirms_cancellation_then_cleans_up(
         tmp_path
     )
     execution = _ExecutionControl()
-    service = AnalysisService(workspaces, execution, _Artifacts())
+    service = _analysis_service(tmp_path, workspaces, execution)
     created = await service.submit_root("user", workspace_id, tab_id, _request(node_id))
     key = AnalysisExecutionKey("user", workspace_id, str(created.id))
     async with workspaces.mutation_context(
@@ -578,7 +602,7 @@ async def test_shutdown_interruption_distinguishes_queued_running_and_user_cance
         tmp_path
     )
     execution = _ExecutionControl()
-    service = AnalysisService(workspaces, execution, _Artifacts())
+    service = _analysis_service(tmp_path, workspaces, execution)
 
     queued = await service.submit_root("user", workspace_id, tab_id, _request(node_id))
     queued_key = AnalysisExecutionKey("user", workspace_id, str(queued.id))
@@ -628,7 +652,7 @@ async def test_startup_reconciliation_fails_closed_workspace_analyses(
         tmp_path
     )
     execution = _ExecutionControl()
-    service = AnalysisService(workspaces, execution, _Artifacts())
+    service = _analysis_service(tmp_path, workspaces, execution)
     queued = await service.submit_root(
         "user", workspace_id, first_tab_id, _request(node_id)
     )
@@ -697,7 +721,7 @@ async def test_active_analysis_reservation_blocks_input_and_ancestor_mutation(
         )
 
     await workspaces.mutate_workspace("user", workspace_id, add_child)
-    analyses = AnalysisService(workspaces, _ExecutionControl(), _Artifacts())
+    analyses = _analysis_service(tmp_path, workspaces, _ExecutionControl())
     await analyses.submit_root(
         "user",
         workspace_id,

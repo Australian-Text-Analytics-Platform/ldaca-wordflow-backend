@@ -6,7 +6,7 @@ from enum import StrEnum
 from pathlib import PurePosixPath
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..shared.portable_names import (
     portable_collision_key,
@@ -98,7 +98,7 @@ class DataPortalSearchMethod(StrEnum):
 
 
 class DataPortalSearchRequest(BaseModel):
-    """One one-based portal search with an optional transient user token."""
+    """One one-based portal search using the configured user credential."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -106,17 +106,6 @@ class DataPortalSearchRequest(BaseModel):
     query: str = Field(default="", max_length=2_000)
     page: int = Field(default=1, ge=1)
     page_size: int = Field(default=25, ge=1, le=100)
-    api_token: SecretStr | None = None
-
-
-class DataPortalFeaturedRequest(BaseModel):
-    """Optional transient token for configured featured collections."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    api_token: SecretStr | None = None
-
-
 class DataPortalRecord(BaseModel):
     """Normalized portal record independent of Oni JSON-LD shapes."""
 
@@ -146,17 +135,15 @@ class DataPortalSearchResource(BaseModel):
 
 
 class DataPortalImportSubmitRequest(BaseModel):
-    """Portal import request with a credential excluded from durable import state."""
+    """Portal import request resolved with the configured user credential."""
 
     model_config = ConfigDict(extra="forbid")
 
     identifier: str = Field(min_length=1, max_length=4_000)
     name: str | None = Field(default=None, min_length=1, max_length=500)
-    api_token: SecretStr | None = None
 
 
 __all__ = [
-    "DataPortalFeaturedRequest",
     "DataPortalImportSubmitRequest",
     "DataPortalRecord",
     "DataPortalSearchRequest",

@@ -15,14 +15,19 @@ from ldaca_wordflow.spa import _runtime_config_js
 
 HTTP_METHODS = {"delete", "get", "patch", "post", "put"}
 EXPECTED_OPERATIONS = {
-    ("POST", "/api/annotation-providers/{provider}/models", "list_annotation_models"),
+    ("GET", "/api/annotation-providers/{provider}/models", "list_annotation_models"),
     ("GET", "/api/auth/cilogon/callback", "cilogon_callback"),
     ("GET", "/api/auth/cilogon/login", "cilogon_login"),
     ("POST", "/api/auth/google/callback", "google_callback"),
-    ("POST", "/api/data-portal/featured", "list_featured_data_portal_collections"),
+    ("GET", "/api/data-portal/featured", "list_featured_data_portal_collections"),
     ("POST", "/api/data-portal/imports", "submit_data_portal_import"),
     ("POST", "/api/data-portal/search", "search_data_portal"),
     ("GET", "/api/events", "backend_events"),
+    ("GET", "/api/preferences", "get_preferences"),
+    ("PATCH", "/api/preferences", "update_preferences"),
+    ("GET", "/api/provider-credentials", "get_provider_credentials"),
+    ("PATCH", "/api/provider-credentials", "update_provider_credentials"),
+    ("DELETE", "/api/provider-credentials", "clear_provider_credentials"),
     ("GET", "/api/user-files", "list_user_files"),
     ("GET", "/api/user-files/resource", "get_user_file_resource"),
     ("PATCH", "/api/user-files", "move_file"),

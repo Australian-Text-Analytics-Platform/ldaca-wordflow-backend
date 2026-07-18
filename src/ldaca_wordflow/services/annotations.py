@@ -32,6 +32,7 @@ from ..models.annotations import (
     AnnotationProvider,
 )
 from .workspace import WorkspaceService
+from .provider_credentials import ProviderCredentialStore
 
 T = TypeVar("T")
 
@@ -44,17 +45,20 @@ class AnnotationService:
         workspaces: WorkspaceService,
         *,
         limiter: anyio.CapacityLimiter,
+        credentials: ProviderCredentialStore,
     ) -> None:
         self._workspaces = workspaces
         self._limiter = limiter
+        self._credentials = credentials
 
     async def models(
         self,
+        user_id: str,
         provider: AnnotationProvider,
-        api_key: str,
     ) -> AnnotationModelsResource:
         """List models for a fixed built-in provider without accepting an SSRF URL."""
 
+        api_key = await self._credentials.annotation_credential(user_id, provider)
         try:
             discovered = await list_models(provider, api_key)
         except AnnotationAiError as exc:
@@ -85,11 +89,12 @@ class AnnotationService:
                 request.page,
                 request.page_size,
             )
+        api_key = await self._credentials.annotation_credential(user_id, request.provider)
         try:
             labels = await annotate_batch(
                 resolve_provider_wire(request.provider),
                 request.model,
-                request.api_key.get_secret_value(),
+                api_key,
                 request.instruction,
                 _class_options(request),
                 texts,

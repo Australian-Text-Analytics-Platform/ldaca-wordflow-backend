@@ -20,7 +20,7 @@ from ..domain.workspace import (
     AnalysisRecord,
     AnalysisState,
     AnalysisSubmission,
-    AnnotationAnalysisSubmission,
+    AnnotationAnalysisRequest,
     ChildAnalysisRequest,
     ConcordanceAnalysisRequest,
     ConcordanceDetachmentAnalysisRequest,
@@ -59,6 +59,7 @@ from .analysis_execution_types import (
     AnalysisSchedulingStopped,
 )
 from .workspace import WorkspaceLease, WorkspaceService
+from .provider_credentials import ProviderCredentialStore
 
 logger = logging.getLogger(__name__)
 ExecutionPreparer = Callable[
@@ -94,11 +95,13 @@ class AnalysisService:
         execution: AnalysisExecutionControl,
         artifacts: AnalysisResultPublisher,
         *,
+        credentials: ProviderCredentialStore,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._workspaces = workspaces
         self._execution = execution
         self._artifacts = artifacts
+        self._credentials = credentials
         self._clock = clock or (lambda: datetime.now(UTC))
         self._live_progress: dict[tuple[str, str], Progress] = {}
         self._accepting = True
@@ -189,8 +192,8 @@ class AnalysisService:
             raise BackendStoppingError()
         request = persisted_submission(submission)
         credential = (
-            submission.api_key.get_secret_value()
-            if isinstance(submission, AnnotationAnalysisSubmission)
+            await self._credentials.annotation_credential(user_id, request.provider)
+            if isinstance(request, AnnotationAnalysisRequest)
             else None
         )
         timestamp = self._clock()

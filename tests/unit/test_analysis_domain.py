@@ -13,7 +13,7 @@ from ldaca_wordflow.domain.workspace import (
     AnalysisRequest,
     AnalysisState,
     AnalysisKind,
-    AnnotationAnalysisSubmission,
+    AnnotationAnalysisRequest,
     ConcordanceAnalysisRequest,
     ConcordanceDetachmentAnalysisRequest,
     Failure,
@@ -54,8 +54,8 @@ def test_analysis_request_union_is_strict_and_discriminated() -> None:
         )
 
 
-def test_annotation_submission_projects_away_the_transient_secret() -> None:
-    submission = AnnotationAnalysisSubmission(
+def test_annotation_request_is_secret_free_and_persisted_unchanged() -> None:
+    request = AnnotationAnalysisRequest(
         node_id=uuid.uuid4(),
         text_column="text",
         annotation_column="class",
@@ -64,10 +64,9 @@ def test_annotation_submission_projects_away_the_transient_secret() -> None:
         model="model",
         instruction="Classify the text",
         output_node_name="Annotated",
-        api_key="secret",
     )
 
-    persisted = persisted_submission(submission)
+    persisted = persisted_submission(request)
 
     assert persisted.kind == "annotation"
     assert "api_key" not in persisted.model_dump(mode="json")

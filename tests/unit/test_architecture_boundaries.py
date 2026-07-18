@@ -84,7 +84,6 @@ def test_removed_facades_and_duplicate_modules_stay_absent() -> None:
         "core/workspace.py",
         "api/admin.py",
         "api/config.py",
-        "api/preferences.py",
         "core/exceptions.py",
         "core/json_data.py",
         "core/serialization.py",

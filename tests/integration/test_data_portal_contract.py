@@ -71,6 +71,13 @@ def test_portal_search_uses_one_based_paging_and_transient_token(
         base_url="http://testserver",
     ) as client:
         csrf = client.get("/api/session").json()["csrf_token"]
+        unsafe = {"Origin": "http://testserver", "X-CSRF-Token": csrf}
+        credentials = client.patch(
+            "/api/provider-credentials",
+            json={"data_portal_api_token": "portal-secret"},
+            headers=unsafe,
+        )
+        assert credentials.status_code == 200, credentials.text
         response = client.post(
             "/api/data-portal/search",
             json={
@@ -78,9 +85,8 @@ def test_portal_search_uses_one_based_paging_and_transient_token(
                 "query": "conversation",
                 "page": 3,
                 "page_size": 20,
-                "api_token": "portal-secret",
             },
-            headers={"Origin": "http://testserver", "X-CSRF-Token": csrf},
+            headers=unsafe,
         )
         assert response.status_code == 200
         assert response.json()["page"] == 3
@@ -124,12 +130,17 @@ def test_portal_import_token_is_not_persisted_and_publish_is_atomic(
     ) as client:
         csrf = client.get("/api/session").json()["csrf_token"]
         unsafe = {"Origin": "http://testserver", "X-CSRF-Token": csrf}
+        credentials = client.patch(
+            "/api/provider-credentials",
+            json={"data_portal_api_token": "portal-secret"},
+            headers=unsafe,
+        )
+        assert credentials.status_code == 200, credentials.text
         accepted = client.post(
             "/api/data-portal/imports",
             json={
                 "identifier": "arcp://name,example",
                 "name": "Corpus",
-                "api_token": "portal-secret",
             },
             headers=unsafe,
         )

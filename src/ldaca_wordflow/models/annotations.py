@@ -8,7 +8,6 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    SecretStr,
     StringConstraints,
     model_validator,
 )
@@ -52,9 +51,8 @@ class AnnotationConfig(BaseModel):
 
 
 class AnnotationPreviewRequest(AnnotationConfig):
-    """One stateless, one-based page preview with a transient credential."""
+    """One stateless, one-based page preview using the stored user credential."""
 
-    api_key: SecretStr = Field(min_length=1)
     page: int = Field(default=1, ge=1)
     page_size: int = Field(default=20, ge=1, le=200)
 
@@ -80,14 +78,6 @@ class AnnotationPreviewResource(BaseModel):
     labels: list[AnnotationPreviewLabel]
 
 
-class AnnotationModelsRequest(BaseModel):
-    """Transient credential used to discover one built-in provider's models."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    api_key: SecretStr = Field(min_length=1)
-
-
 class AnnotationModelsResource(BaseModel):
     """Sorted model identifiers returned by one configured provider."""
 
@@ -99,7 +89,6 @@ class AnnotationModelsResource(BaseModel):
 
 __all__ = [
     "AnnotationClass",
-    "AnnotationModelsRequest",
     "AnnotationModelsResource",
     "AnnotationPreviewRequest",
     "AnnotationPreviewResource",

@@ -37,6 +37,8 @@ from ._middleware import (
 from .api.auth import router as auth_router
 from .api.annotations import router as annotations_router
 from .api.data_portal import router as data_portal_router
+from .api.provider_credentials import router as provider_credentials_router
+from .api.preferences import router as preferences_router
 from .api.error_response import api_error_response
 from .api.events import router as events_router
 from .api.files import router as files_router
@@ -182,6 +184,8 @@ def _register_routers(app: FastAPI) -> None:
         auth_router,
         annotations_router,
         data_portal_router,
+        preferences_router,
+        provider_credentials_router,
         events_router,
         files_router,
         sample_data_router,

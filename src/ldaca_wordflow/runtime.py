@@ -65,6 +65,8 @@ from .services.analysis_executor import AnalysisProcessExecutor
 from .services.analysis_preparation import AnalysisExecutionPreparer
 from .services.analysis_artifacts import AnalysisArtifactService
 from .services.annotations import AnnotationService
+from .services.provider_credentials import ProviderCredentialStore
+from .services.user_preferences import UserPreferenceStore
 from .services.sample_data import SampleDataService
 from .services.data_portal import DataPortalService
 from .services.user_file_import_executor import UserFileImportProcessExecutor
@@ -229,6 +231,8 @@ class Runtime:
     analysis_execution: AnalysisExecutionRuntime
     analysis_result_service: AnalysisResultService
     annotation_service: AnnotationService
+    user_preference_store: UserPreferenceStore
+    provider_credential_store: ProviderCredentialStore
     sample_data_service: SampleDataService
     data_portal_service: DataPortalService
     user_file_import_service: UserFileImportService
@@ -474,6 +478,14 @@ async def runtime_context(settings: Settings) -> AsyncIterator[Runtime]:
             io_limiter=io_limiter,
         )
         await session_service.initialize()
+        user_preference_store = UserPreferenceStore(
+            settings,
+            io_limiter=io_limiter,
+        )
+        provider_credential_store = ProviderCredentialStore(
+            settings,
+            user_preference_store,
+        )
         oauth_service = OAuthService(settings, session_service)
         resources.push_async_callback(oauth_service.close)
         quotation_client = QuotationProviderClient(
@@ -504,6 +516,7 @@ async def runtime_context(settings: Settings) -> AsyncIterator[Runtime]:
             workspace_service,
             analysis_execution,
             analysis_artifacts,
+            credentials=provider_credential_store,
         )
         await analysis_service.reconcile_interrupted_analyses()
         analysis_execution.bind(analysis_service, task_group)
@@ -512,6 +525,7 @@ async def runtime_context(settings: Settings) -> AsyncIterator[Runtime]:
         annotation_service = AnnotationService(
             workspace_service,
             limiter=io_limiter,
+            credentials=provider_credential_store,
         )
         sample_data_service = SampleDataService(
             user_file_store,
@@ -525,6 +539,7 @@ async def runtime_context(settings: Settings) -> AsyncIterator[Runtime]:
         data_portal_service = DataPortalService(
             settings,
             user_file_store,
+            provider_credential_store,
         )
         resources.push_async_callback(data_portal_service.close)
         user_file_import_store = UserFileImportStore(
@@ -594,6 +609,8 @@ async def runtime_context(settings: Settings) -> AsyncIterator[Runtime]:
             analysis_execution=analysis_execution,
             analysis_result_service=analysis_result_service,
             annotation_service=annotation_service,
+            user_preference_store=user_preference_store,
+            provider_credential_store=provider_credential_store,
             sample_data_service=sample_data_service,
             data_portal_service=data_portal_service,
             user_file_import_service=user_file_import_service,

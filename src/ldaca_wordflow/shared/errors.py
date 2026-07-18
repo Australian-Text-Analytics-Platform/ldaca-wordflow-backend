@@ -354,3 +354,35 @@ class InternalServiceError(AppError):
 class BadGatewayError(AppError):
     status_code = 502
     code = "bad_gateway"
+
+
+class UserPreferencesCorruptError(AppError):
+    """One user's canonical preference file cannot be validated."""
+
+    status_code = 500
+    code = "user_preferences_corrupt"
+    expose_message = True
+
+    def __init__(self) -> None:
+        super().__init__(
+            "User preferences are unavailable because their stored file is invalid"
+        )
+
+
+class ProviderCredentialsCorruptError(AppError):
+    """One user's canonical provider credential file cannot be validated."""
+
+    status_code = 500
+    code = "provider_credentials_corrupt"
+    expose_message = True
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Provider credentials are unavailable because their stored file is invalid"
+        )
+
+
+class ProviderCredentialMissingError(ResourceConflictError):
+    """A provider operation requires a credential that is not configured."""
+
+    code = "provider_credential_missing"

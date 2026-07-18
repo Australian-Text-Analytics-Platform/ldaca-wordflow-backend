@@ -13,7 +13,6 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    SecretStr,
     StringConstraints,
     model_validator,
 )
@@ -228,17 +227,6 @@ class AnnotationAnalysisRequest(_AnnotationFields):
     """Secret-free immutable Annotation request stored in a Workspace."""
 
 
-class AnnotationAnalysisSubmission(_AnnotationFields):
-    """Annotation creation command carrying one process-local credential."""
-
-    api_key: SecretStr = Field(min_length=1)
-
-    def persisted_request(self) -> AnnotationAnalysisRequest:
-        return AnnotationAnalysisRequest.model_validate(
-            self.model_dump(exclude={"api_key"})
-        )
-
-
 RootAnalysisRequest = Annotated[
     TokenFrequencyAnalysisRequest
     | TopicModelingAnalysisRequest
@@ -255,7 +243,7 @@ AnalysisSubmission = Annotated[
     | ConcordanceAnalysisRequest
     | QuotationAnalysisRequest
     | SequentialAnalysisRequest
-    | AnnotationAnalysisSubmission,
+    | AnnotationAnalysisRequest,
     Field(discriminator="kind"),
 ]
 
@@ -298,8 +286,6 @@ AnalysisRequest = RootAnalysisRequest | ChildAnalysisRequest
 
 
 def persisted_submission(submission: AnalysisSubmission) -> RootAnalysisRequest:
-    if isinstance(submission, AnnotationAnalysisSubmission):
-        return submission.persisted_request()
     return submission
 
 
@@ -558,7 +544,6 @@ __all__ = [
     "AnalysisState",
     "AnalysisSubmission",
     "AnnotationAnalysisRequest",
-    "AnnotationAnalysisSubmission",
     "ChildAnalysisRequest",
     "ConcordanceAnalysisRequest",
     "ConcordanceDetachmentAnalysisRequest",

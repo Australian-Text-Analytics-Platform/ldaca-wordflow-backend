@@ -71,6 +71,14 @@ def user_imports_root(settings: Settings, user_id: str) -> Path:
     return user_root(settings, user_id) / "imports"
 
 
+def user_preferences_path(settings: Settings, user_id: str) -> Path:
+    return user_root(settings, user_id) / "preferences.toml"
+
+
+def user_provider_credentials_path(settings: Settings, user_id: str) -> Path:
+    return user_root(settings, user_id) / "provider-credentials.toml"
+
+
 def user_cache_root(settings: Settings, user_id: str) -> Path:
     return settings.get_data_root() / ".cache" / "users" / validate_user_id(user_id)
 
@@ -85,6 +93,8 @@ __all__ = [
     "user_cache_root",
     "user_files_root",
     "user_imports_root",
+    "user_preferences_path",
+    "user_provider_credentials_path",
     "user_root",
     "validate_user_id",
     "validate_display_name",

@@ -8,7 +8,6 @@ from pathlib import Path
 
 import anyio
 import httpx
-from pydantic import SecretStr
 
 from ..domain import (
     DataPortalUserFileImportRequest,
@@ -33,6 +32,7 @@ from ..infrastructure.storage.layout import validate_display_name
 from .user_files import UserFileStore
 from .user_file_import_execution_types import UserFileImportKey
 from .user_file_import_executor import UserFileImportProcessExecutor
+from .provider_credentials import ProviderCredentialStore
 
 ProgressReporter = Callable[[object], Awaitable[None]]
 
@@ -51,9 +51,11 @@ class DataPortalService:
         self,
         settings: Settings,
         files: UserFileStore,
+        credentials: ProviderCredentialStore,
     ) -> None:
         self._settings = settings
         self._files = files
+        self._credentials = credentials
         self._http_client = httpx.AsyncClient(
             base_url=settings.ldaca_oni_api_base_url.rstrip("/"),
             timeout=settings.ldaca_oni_timeout,
@@ -66,11 +68,11 @@ class DataPortalService:
         await self._http_client.aclose()
 
     async def search(
-        self, request: DataPortalSearchRequest
+        self, user_id: str, request: DataPortalSearchRequest
     ) -> DataPortalSearchResource:
         """Run a normalized portal search with one-based API pagination."""
 
-        client = self._client(_secret(request.api_token))
+        client = self._client(await self._credentials.data_portal_credential(user_id))
         try:
             records, total = await client.search(
                 method=request.method,
@@ -89,11 +91,11 @@ class DataPortalService:
 
     async def featured(
         self,
-        api_token: SecretStr | None,
+        user_id: str,
     ) -> DataPortalSearchResource:
         """Read configured featured collections outside all workspace gates."""
 
-        client = self._client(_secret(api_token))
+        client = self._client(await self._credentials.data_portal_credential(user_id))
         try:
             records = await client.featured_collections(
                 list(self._settings.ldaca_oni_featured_collection_ids)
@@ -127,6 +129,7 @@ class DataPortalService:
                 raise InvalidInputError(f"Invalid import name: {reason}")
         staging = await self._files.prepare_import_staging(user_id, import_id)
         try:
+            api_token = await self._credentials.data_portal_credential(user_id)
             name = request.name.strip() if request.name else None
             return (
                 DataPortalUserFileImportRequest(
@@ -139,8 +142,7 @@ class DataPortalService:
                         "identifier": identifier,
                         "requested_name": name,
                         "api_base_url": self._settings.ldaca_oni_api_base_url,
-                        "api_token": _secret(request.api_token)
-                        or _secret(self._settings.ldaca_oni_api_token),
+                        "api_token": api_token,
                         "timeout": self._settings.ldaca_oni_timeout,
                         "download_concurrency": (
                             self._settings.ldaca_oni_download_concurrency
@@ -207,15 +209,8 @@ class DataPortalService:
     def _client(self, token: str | None) -> OniClient:
         return OniClient(
             self._http_client,
-            token=token or _secret(self._settings.ldaca_oni_api_token),
+            token=token,
         )
-
-
-def _secret(value: SecretStr | None) -> str | None:
-    if value is None:
-        return None
-    resolved = value.get_secret_value().strip()
-    return resolved or None
 
 
 __all__ = ["DataPortalImportExecution", "DataPortalService"]
