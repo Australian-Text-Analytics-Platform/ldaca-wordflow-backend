@@ -8,9 +8,10 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 AnnotationProvider = Literal["openai", "openrouter", "anthropic", "google"]
 CredentialSource = Literal["none", "user", "deployment"]
+CredentialStorage = Literal["backend", "browser"]
 
 CredentialValue = Annotated[
-    str,
+    SecretStr,
     Field(
         min_length=1,
         max_length=4_000,
@@ -41,14 +42,15 @@ class AnnotationCredentialStatus(_StrictModel):
 
 
 class DataPortalCredentialStatus(_StrictModel):
-    user_configured: bool
+    user_configured: bool | None
     deployment_configured: bool
 
 
 class ProviderCredentialSummary(_StrictModel):
     """Safe credential presence information; never contains secret values."""
 
-    annotation: AnnotationCredentialStatus
+    storage: CredentialStorage
+    annotation: AnnotationCredentialStatus | None
     data_portal: DataPortalCredentialStatus
 
 
@@ -78,6 +80,7 @@ __all__ = [
     "AnnotationProvider",
     "AnnotationCredentialStatus",
     "CredentialSource",
+    "CredentialStorage",
     "DataPortalCredentialStatus",
     "ProviderCredentialPatch",
     "ProviderCredentialSummary",

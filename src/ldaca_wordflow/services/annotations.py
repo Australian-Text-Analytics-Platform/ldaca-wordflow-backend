@@ -9,6 +9,7 @@ from typing import TypeVar
 import anyio
 import polars as pl
 from anyio.to_thread import run_sync as run_sync_in_worker_thread
+from pydantic import SecretStr
 
 from ..infrastructure.providers.annotation_ai import (
     AnnotationAiError,
@@ -53,12 +54,15 @@ class AnnotationService:
 
     async def models(
         self,
-        user_id: str,
         provider: AnnotationProvider,
+        supplied_credential: SecretStr | None,
     ) -> AnnotationModelsResource:
         """List models for a fixed built-in provider without accepting an SSRF URL."""
 
-        api_key = await self._credentials.annotation_credential(user_id, provider)
+        api_key = await self._credentials.annotation_credential(
+            provider,
+            supplied=supplied_credential,
+        )
         try:
             discovered = await list_models(provider, api_key)
         except AnnotationAiError as exc:
@@ -89,7 +93,10 @@ class AnnotationService:
                 request.page,
                 request.page_size,
             )
-        api_key = await self._credentials.annotation_credential(user_id, request.provider)
+        api_key = await self._credentials.annotation_credential(
+            request.provider,
+            supplied=request.api_key,
+        )
         try:
             labels = await annotate_batch(
                 resolve_provider_wire(request.provider),

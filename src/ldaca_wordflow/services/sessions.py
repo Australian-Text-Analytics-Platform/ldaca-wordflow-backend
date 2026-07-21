@@ -29,6 +29,12 @@ from ..models.session import SessionUser
 from ..settings import Settings
 from ..shared.errors import InvalidInputError, ResourceConflictError
 
+SINGLE_USER = SessionUser(
+    id="root",
+    email="root@localhost",
+    name="Root User",
+)
+
 
 def _now() -> datetime:
     return datetime.now(UTC)
@@ -96,11 +102,7 @@ class SessionService:
             self._desktop_csrf_token = secrets.token_urlsafe(32)
             self._desktop_principal = SessionPrincipal(
                 session_id=f"desktop-{uuid.uuid4()}",
-                user=SessionUser(
-                    id=settings.single_user_id,
-                    email=settings.single_user_email,
-                    name=settings.single_user_name,
-                ),
+                user=SINGLE_USER,
                 expires_at=None,
             )
 

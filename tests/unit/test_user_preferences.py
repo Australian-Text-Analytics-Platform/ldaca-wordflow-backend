@@ -19,6 +19,8 @@ from ldaca_wordflow.services.provider_credentials import ProviderCredentialStore
 from ldaca_wordflow.services.user_preferences import UserPreferenceStore
 from ldaca_wordflow.settings import Settings
 from ldaca_wordflow.shared.errors import (
+    AccessDeniedError,
+    InvalidInputError,
     ProviderCredentialMissingError,
     ProviderCredentialsCorruptError,
     UserPreferencesCorruptError,
@@ -27,17 +29,29 @@ from ldaca_wordflow.shared.errors import (
 
 def _stores(
     tmp_path: Path,
+    *,
+    multi_user: bool = False,
+    deployment_token: str | None = None,
 ) -> tuple[
     UserPreferenceStore,
     ProviderCredentialStore,
     Settings,
 ]:
-    settings = Settings(data_root=tmp_path, multi_user=False)
+    settings = Settings(
+        data_root=tmp_path,
+        multi_user=multi_user,
+        ldaca_oni_api_token=deployment_token,
+        google_client_id="google-client" if multi_user else "",
+    )
+    limiter = anyio.CapacityLimiter(2)
     preferences = UserPreferenceStore(
         settings,
-        io_limiter=anyio.CapacityLimiter(2),
+        io_limiter=limiter,
     )
-    credentials = ProviderCredentialStore(settings, preferences)
+    credentials = ProviderCredentialStore(
+        settings,
+        io_limiter=limiter,
+    )
     return preferences, credentials, settings
 
 
@@ -81,6 +95,10 @@ async def test_patch_changes_only_explicit_fields_and_accepts_explicit_null(
     assert result.hidden_views == ["quotation"]
     assert result.default_tokenizer_model is None
     assert result.contextual_hints_enabled is True
+    stored = rtoml.loads(
+        user_preferences_path(_settings, "root").read_text(encoding="utf-8")
+    )
+    assert "default_tokenizer_model" not in stored
 
 
 @pytest.mark.anyio
@@ -91,7 +109,6 @@ async def test_credential_updates_never_touch_sanitized_preferences(
     await preferences.get("root")
 
     await credentials.update(
-        "root",
         ProviderCredentialPatch(openai_api_key="top-secret"),
     )
 
@@ -104,25 +121,69 @@ async def test_credential_updates_never_touch_sanitized_preferences(
 
 
 @pytest.mark.anyio
-async def test_preferences_and_credentials_are_isolated_by_user(tmp_path: Path) -> None:
-    preferences, credentials, _settings = _stores(tmp_path)
+async def test_single_user_credentials_use_only_the_canonical_root_file(
+    tmp_path: Path,
+) -> None:
+    _preferences, credentials, settings = _stores(tmp_path)
 
-    await preferences.update(
-        "user-a",
-        UserPreferencesPatch(favorite_workspaces=["workspace-a"]),
-    )
     await credentials.update(
-        "user-a",
-        ProviderCredentialPatch(openai_api_key="user-a-secret"),
+        ProviderCredentialPatch(openai_api_key="root-secret"),
     )
 
-    user_b_preferences = await preferences.get("user-b")
-    user_b_credentials = await credentials.summary("user-b")
+    summary = await credentials.summary()
+    assert summary.storage == "backend"
+    assert summary.annotation is not None
+    assert summary.annotation.openai is True
+    assert await credentials.annotation_credential("openai") == "root-secret"
+    assert user_provider_credentials_path(settings, "root").is_file()
+    assert list(settings.get_users_root_folder().glob("*/provider-credentials.toml")) == [
+        user_provider_credentials_path(settings, "root")
+    ]
 
-    assert user_b_preferences.favorite_workspaces == []
-    assert user_b_credentials.annotation.openai is False
+
+@pytest.mark.anyio
+async def test_single_user_rejects_request_supplied_credentials(tmp_path: Path) -> None:
+    _preferences, credentials, _settings = _stores(tmp_path)
+
+    with pytest.raises(InvalidInputError):
+        await credentials.annotation_credential("openai", supplied="request-secret")
+    with pytest.raises(InvalidInputError):
+        await credentials.data_portal_credential(supplied="request-secret")
+
+
+@pytest.mark.anyio
+async def test_multi_user_credentials_are_browser_owned_and_legacy_files_unread(
+    tmp_path: Path,
+) -> None:
+    _preferences, credentials, settings = _stores(
+        tmp_path,
+        multi_user=True,
+        deployment_token="deployment-token",
+    )
+    legacy_path = user_provider_credentials_path(settings, "user-a")
+    legacy_path.parent.mkdir(parents=True)
+    legacy_path.write_text("invalid = [", encoding="utf-8")
+
+    summary = await credentials.summary()
+
+    assert summary.storage == "browser"
+    assert summary.annotation is None
+    assert summary.data_portal.user_configured is None
+    assert summary.data_portal.deployment_configured is True
+    assert await credentials.annotation_credential(
+        "openai", supplied="browser-secret"
+    ) == "browser-secret"
+    assert await credentials.data_portal_credential(
+        supplied="browser-token"
+    ) == "browser-token"
+    assert await credentials.data_portal_credential() == "deployment-token"
     with pytest.raises(ProviderCredentialMissingError):
-        await credentials.annotation_credential("user-b", "openai")
+        await credentials.annotation_credential("openai")
+    with pytest.raises(AccessDeniedError):
+        await credentials.update(ProviderCredentialPatch(openai_api_key="denied"))
+    with pytest.raises(AccessDeniedError):
+        await credentials.clear()
+    assert legacy_path.read_text(encoding="utf-8") == "invalid = ["
 
 
 @pytest.mark.anyio
@@ -149,13 +210,14 @@ async def test_unversioned_preference_file_is_rejected(tmp_path: Path) -> None:
 
 @pytest.mark.anyio
 async def test_corrupt_canonical_credential_file_fails_visibly(tmp_path: Path) -> None:
-    preferences, _credentials, settings = _stores(tmp_path)
+    preferences, credentials, settings = _stores(tmp_path)
     path = user_provider_credentials_path(settings, "root")
     path.parent.mkdir(parents=True)
     path.write_text("invalid = [", encoding="utf-8")
 
+    assert (await preferences.get("root")).contextual_hints_enabled is True
     with pytest.raises(ProviderCredentialsCorruptError):
-        await preferences.get("root")
+        await credentials.summary()
 
 
 @pytest.mark.anyio
@@ -188,3 +250,40 @@ def test_preferences_api_reads_and_patches_current_user(files_test_client) -> No
     assert updated.json()["favorite_workspaces"] == ["workspace-a"]
     assert updated.json()["contextual_hints_enabled"] is False
     assert updated.json()["analysis_multi_tab_enabled"] is False
+
+
+def test_multi_user_credential_api_reports_browser_ownership_and_denies_writes(
+    multi_user_test_client,
+    tmp_path: Path,
+) -> None:
+    user_id = multi_user_test_client.get("/api/session").json()["user"]["id"]
+    settings = Settings(
+        data_root=tmp_path,
+        multi_user=True,
+        google_client_id="google-client",
+    )
+    legacy_path = user_provider_credentials_path(settings, user_id)
+    legacy_path.parent.mkdir(parents=True, exist_ok=True)
+    legacy_path.write_text("invalid = [", encoding="utf-8")
+
+    status = multi_user_test_client.get("/api/provider-credentials")
+
+    assert status.status_code == 200
+    assert status.json() == {
+        "storage": "browser",
+        "annotation": None,
+        "data_portal": {
+            "user_configured": None,
+            "deployment_configured": False,
+        },
+    }
+    patched = multi_user_test_client.patch(
+        "/api/provider-credentials",
+        json={"openai_api_key": "must-not-persist"},
+    )
+    assert patched.status_code == 403
+    assert patched.json()["code"] == "access_denied"
+    deleted = multi_user_test_client.delete("/api/provider-credentials")
+    assert deleted.status_code == 403
+    assert deleted.json()["code"] == "access_denied"
+    assert legacy_path.read_text(encoding="utf-8") == "invalid = ["

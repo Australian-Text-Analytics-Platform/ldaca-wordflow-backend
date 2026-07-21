@@ -122,6 +122,18 @@ def test_preview_is_stateless_and_uses_one_based_paging(
         unsafe = {"Origin": "http://testserver", "X-CSRF-Token": csrf}
         _configure_credentials(client, unsafe)
         workspace_id, node_id, _etag = _source(client, unsafe)
+        rejected = client.post(
+            f"/api/workspaces/{workspace_id}/nodes/{node_id}/annotation-previews",
+            json={
+                **_request(),
+                "api_key": "request-secret",
+                "page": 2,
+                "page_size": 1,
+            },
+            headers=unsafe,
+        )
+        assert rejected.status_code == 400
+        assert rejected.json()["code"] == "invalid_input"
         response = client.post(
             f"/api/workspaces/{workspace_id}/nodes/{node_id}/annotation-previews",
             json={**_request(), "page": 2, "page_size": 1},
@@ -190,6 +202,19 @@ def test_full_annotation_is_secret_free_and_completes_as_an_analysis(
             json={"kind": "annotation", "name": "Document classes"},
             headers=unsafe,
         ).json()["id"]
+        rejected = client.post(
+            f"/api/workspaces/{workspace_id}/tabs/{tab_id}/analysis",
+            json={
+                "kind": "annotation",
+                "node_id": node_id,
+                **_request(),
+                "output_node_name": "Classified documents",
+                "api_key": "request-secret",
+            },
+            headers=unsafe,
+        )
+        assert rejected.status_code == 400
+        assert rejected.json()["code"] == "invalid_input"
         accepted = client.post(
             f"/api/workspaces/{workspace_id}/tabs/{tab_id}/analysis",
                 json={
@@ -211,14 +236,22 @@ def test_full_annotation_is_secret_free_and_completes_as_an_analysis(
         )
         assert result.status_code == 200, result.text
         assert result.json()["kind"] == "annotation"
-        derived_id = result.json()["output_node_id"]
+        assert len(result.json()["output_node_ids"]) == 1
+        derived_id = result.json()["output_node_ids"][0]
 
         detail = client.get(f"/api/workspaces/{workspace_id}").json()
         nodes = client.get(f"/api/workspaces/{workspace_id}/nodes").json()
         assert any(node["id"] == derived_id for node in nodes)
-        rows = client.get(
-            f"/api/workspaces/{workspace_id}/nodes/{derived_id}/rows",
-            params={"page": 1, "page_size": 10},
+        rows = client.post(
+            f"/api/workspaces/{workspace_id}/sql",
+            json={
+                "mode": "query",
+                "node_ids": [derived_id],
+                "sql": f'SELECT * FROM "{derived_id}"',
+                "page": 1,
+                "page_size": 10,
+            },
+            headers=unsafe,
         )
         assert rows.status_code == 200
         frame = pl.read_ipc_stream(BytesIO(rows.content))
@@ -249,8 +282,16 @@ def test_model_discovery_rejects_custom_provider_urls_by_construction(
         csrf = client.get("/api/session").json()["csrf_token"]
         unsafe = {"Origin": "http://testserver", "X-CSRF-Token": csrf}
         _configure_credentials(client, unsafe)
-        response = client.get(
+        supplied = client.post(
             "/api/annotation-providers/openai/models",
+            json={"api_key": "request-secret"},
+            headers=unsafe,
+        )
+        assert supplied.status_code == 400
+        assert supplied.json()["code"] == "invalid_input"
+        response = client.post(
+            "/api/annotation-providers/openai/models",
+            json={},
             headers=unsafe,
         )
         assert response.status_code == 200
@@ -258,8 +299,63 @@ def test_model_discovery_rejects_custom_provider_urls_by_construction(
             "provider": "openai",
             "models": ["model-b", "model-a"],
         }
-        rejected = client.get(
+        rejected = client.post(
             "/api/annotation-providers/custom/models",
+            json={},
             headers=unsafe,
         )
         assert rejected.status_code == 422
+        assert client.get("/api/annotation-providers/openai/models").status_code == 405
+
+
+def test_multi_user_model_and_preview_credentials_are_request_only(
+    multi_user_test_client: TestClient,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    async def fake_models(provider, api_key):
+        assert provider == "openai"
+        assert api_key == "browser-only-secret"
+        return ["model-a"]
+
+    async def fake_annotate_batch(
+        _wire, _model, api_key, _instruction, _classes, texts, _config
+    ):
+        assert api_key == "browser-only-secret"
+        return ["support" for _ in texts]
+
+    monkeypatch.setattr(annotation_service_module, "list_models", fake_models)
+    monkeypatch.setattr(
+        annotation_service_module,
+        "annotate_batch",
+        fake_annotate_batch,
+    )
+    missing = multi_user_test_client.post(
+        "/api/annotation-providers/openai/models",
+        json={},
+    )
+    assert missing.status_code == 409
+    assert missing.json()["code"] == "provider_credential_missing"
+    models = multi_user_test_client.post(
+        "/api/annotation-providers/openai/models",
+        json={"api_key": "browser-only-secret"},
+    )
+    assert models.status_code == 200
+    assert models.json()["models"] == ["model-a"]
+
+    workspace_id, node_id, _etag = _source(multi_user_test_client, {})
+    preview = multi_user_test_client.post(
+        f"/api/workspaces/{workspace_id}/nodes/{node_id}/annotation-previews",
+        json={
+            **_request(),
+            "api_key": "browser-only-secret",
+            "page": 1,
+            "page_size": 1,
+        },
+    )
+    assert preview.status_code == 200, preview.text
+    assert all(
+        b"browser-only-secret" not in path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    )

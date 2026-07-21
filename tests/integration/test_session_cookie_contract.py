@@ -43,6 +43,12 @@ def test_desktop_session_requires_process_csrf_for_unsafe_loopback(
         payload = session.json()
         assert payload["mode"] == "single_user"
         assert payload["authenticated"] is True
+        assert payload["user"] == {
+            "id": "root",
+            "email": "root@localhost",
+            "name": "Root User",
+            "picture": None,
+        }
         assert session.headers["cache-control"] == "private, no-store"
 
         no_origin = client.post("/api/workspaces/", json={"name": "Workspace"})
@@ -119,7 +125,7 @@ def test_root_path_cannot_bypass_csrf_and_locations_keep_prefix(
         assert accepted.headers["location"].startswith("/prefix/api/workspaces/")
 
 
-def test_desktop_startup_refreshes_its_normal_user_row_as_unlimited(
+def test_desktop_startup_refreshes_canonical_root_user_as_unlimited(
     tmp_path: Path,
 ) -> None:
     settings = _settings(tmp_path, multi_user=False)
@@ -130,23 +136,22 @@ def test_desktop_startup_refreshes_its_normal_user_row_as_unlimited(
     database = sqlite3.connect(deployment_database_path(settings))
     database.execute(
         "UPDATE users SET name = ?, storage_quota_bytes = ? WHERE id = ?",
-        ("Stale Name", 1, settings.single_user_id),
+        ("Stale Name", 1, "root"),
     )
     database.commit()
     database.close()
 
-    refreshed = settings.model_copy(update={"single_user_name": "Updated Local"})
-    app = create_app(refreshed, serve_frontend=False)
+    app = create_app(settings, serve_frontend=False)
     with TestClient(app, base_url="http://testserver") as client:
-        assert client.get("/api/session").json()["user"]["name"] == "Updated Local"
+        assert client.get("/api/session").json()["user"]["name"] == "Root User"
 
     database = sqlite3.connect(deployment_database_path(settings))
     row = database.execute(
         "SELECT name, storage_quota_bytes FROM users WHERE id = ?",
-        (settings.single_user_id,),
+        ("root",),
     ).fetchone()
     database.close()
-    assert row == ("Updated Local", None)
+    assert row == ("Root User", None)
 
 
 def test_explicit_dev_origin_and_workspace_preflight_are_allowed(
@@ -233,7 +238,7 @@ def test_hosted_callback_issues_hashed_multi_session_cookie_and_exact_logout(
     app = create_app(settings, capture_runtime, serve_frontend=False)
     with TestClient(app, base_url="https://wordflow.example") as client:
         runtime = captured["runtime"]
-        assert not (settings.get_users_root_folder() / settings.single_user_id).exists()
+        assert not (settings.get_users_root_folder() / "root").exists()
         user = SessionUser(
             id="user-a",
             email="person@example.test",

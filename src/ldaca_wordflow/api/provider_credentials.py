@@ -31,32 +31,32 @@ async def get_provider_credentials(
     principal: Annotated[SessionPrincipal, Security(get_current_session)],
     runtime: Runtime = Depends(get_runtime),
 ) -> ProviderCredentialSummary:
-    return await runtime.provider_credential_store.summary(principal.user.id)
+    return await runtime.provider_credential_store.summary()
 
 
 @router.patch(
     "",
     response_model=ProviderCredentialSummary,
-    responses=api_errors(400, 409, 422, 500),
+    responses=api_errors(400, 403, 409, 422, 500),
 )
 async def update_provider_credentials(
     patch: ProviderCredentialPatch,
     principal: Annotated[SessionPrincipal, Security(get_current_session)],
     runtime: Runtime = Depends(get_runtime),
 ) -> ProviderCredentialSummary:
-    return await runtime.provider_credential_store.update(principal.user.id, patch)
+    return await runtime.provider_credential_store.update(patch)
 
 
 @router.delete(
     "",
     status_code=status.HTTP_204_NO_CONTENT,
-    responses=api_errors(400, 500),
+    responses=api_errors(400, 403, 500),
 )
 async def clear_provider_credentials(
     principal: Annotated[SessionPrincipal, Security(get_current_session)],
     runtime: Runtime = Depends(get_runtime),
 ) -> Response:
-    await runtime.provider_credential_store.clear(principal.user.id)
+    await runtime.provider_credential_store.clear()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

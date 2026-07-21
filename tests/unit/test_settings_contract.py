@@ -27,8 +27,13 @@ def test_data_root_is_canonical_and_storage_layout_is_not_configurable(
     ):
         with pytest.raises(ValidationError):
             Settings.model_validate({removed_quota_setting: 1})
-    with pytest.raises(ValidationError):
-        Settings(single_user_id="../outside")
+    for removed_identity_setting in (
+        "single_user_id",
+        "single_user_name",
+        "single_user_email",
+    ):
+        with pytest.raises(ValidationError):
+            Settings.model_validate({removed_identity_setting: "custom"})
 
 
 def test_cors_is_exact_and_multi_user_excludes_tauri_transport() -> None:

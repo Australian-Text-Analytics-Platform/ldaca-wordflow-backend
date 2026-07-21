@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, Request, Response, Security, status
 
 from ..domain import UserFileImport
 from ..models.data_sources import (
+    DataPortalFeaturedRequest,
     DataPortalImportSubmitRequest,
     DataPortalSearchRequest,
     DataPortalSearchResource,
@@ -36,21 +37,22 @@ async def search_data_portal(
 ) -> DataPortalSearchResource:
     """Search the configured portal without holding file or workspace gates."""
 
-    return await runtime.data_portal_service.search(_principal.user.id, request)
+    return await runtime.data_portal_service.search(request)
 
 
-@router.get(
+@router.post(
     "/featured",
     response_model=DataPortalSearchResource,
     responses=api_errors(400, 403, 422, 502),
 )
 async def list_featured_data_portal_collections(
-    principal: Annotated[SessionPrincipal, Security(get_current_session)],
+    request: DataPortalFeaturedRequest,
+    _principal: Annotated[SessionPrincipal, Security(get_current_session)],
     runtime: Runtime = Depends(get_runtime),
 ) -> DataPortalSearchResource:
     """Return configured featured collections through the same typed resource."""
 
-    return await runtime.data_portal_service.featured(principal.user.id)
+    return await runtime.data_portal_service.featured(request.api_token)
 
 
 @router.post(

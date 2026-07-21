@@ -490,7 +490,7 @@ async def runtime_context(settings: Settings) -> AsyncIterator[Runtime]:
         )
         provider_credential_store = ProviderCredentialStore(
             settings,
-            user_preference_store,
+            io_limiter=io_limiter,
         )
         oauth_service = OAuthService(settings, session_service)
         resources.push_async_callback(oauth_service.close)

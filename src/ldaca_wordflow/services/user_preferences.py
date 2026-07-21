@@ -1,4 +1,4 @@
-"""Per-user account preferences and provider-credential persistence."""
+"""Per-user account preference persistence."""
 
 from __future__ import annotations
 
@@ -13,11 +13,7 @@ from anyio.to_thread import run_sync as run_sync_in_worker_thread
 from pydantic import ValidationError
 
 from ..infrastructure.storage.durable_fs import atomic_output_path
-from ..infrastructure.storage.layout import (
-    user_preferences_path,
-    user_provider_credentials_path,
-)
-from ..models.provider_credentials import StoredProviderCredentials
+from ..infrastructure.storage.layout import user_preferences_path
 from ..models.user_preferences import (
     PREFERENCES_SCHEMA_VERSION,
     StoredUserPreferences,
@@ -25,15 +21,12 @@ from ..models.user_preferences import (
     UserPreferencesPatch,
 )
 from ..settings import Settings
-from ..shared.errors import (
-    ProviderCredentialsCorruptError,
-    UserPreferencesCorruptError,
-)
+from ..shared.errors import UserPreferencesCorruptError
 
 logger = logging.getLogger(__name__)
 
 class UserPreferenceStore:
-    """Own strict preference and credential files under one per-user lock."""
+    """Own strict preference files under one lock per user."""
 
     def __init__(
         self,
@@ -48,7 +41,7 @@ class UserPreferenceStore:
 
     async def get(self, user_id: str) -> UserPreferences:
         async with await self._user_lock(user_id):
-            preferences, _credentials = await self._load(user_id)
+            preferences = await self._load(user_id)
         return UserPreferences.model_validate(
             preferences.model_dump(exclude={"schema_version"})
         )
@@ -59,7 +52,7 @@ class UserPreferenceStore:
         patch: UserPreferencesPatch,
     ) -> UserPreferences:
         async with await self._user_lock(user_id):
-            preferences, _credentials = await self._load(user_id)
+            preferences = await self._load(user_id)
             values = preferences.model_dump()
             for field in patch.model_fields_set:
                 values[field] = getattr(patch, field)
@@ -73,61 +66,19 @@ class UserPreferenceStore:
             updated.model_dump(exclude={"schema_version"})
         )
 
-    async def credentials(self, user_id: str) -> StoredProviderCredentials:
-        async with await self._user_lock(user_id):
-            _preferences, credentials = await self._load(user_id)
-        return credentials
-
-    async def update_credentials(
-        self,
-        user_id: str,
-        transform: Callable[[StoredProviderCredentials], StoredProviderCredentials],
-    ) -> StoredProviderCredentials:
-        async with await self._user_lock(user_id):
-            _preferences, credentials = await self._load(user_id)
-            updated = transform(credentials)
-            await self._run_io(
-                _write_credentials,
-                user_provider_credentials_path(self._settings, user_id),
-                updated,
-            )
-        return updated
-
-    async def clear_credentials(self, user_id: str) -> None:
-        async with await self._user_lock(user_id):
-            await self._load(user_id)
-            await self._run_io(
-                _write_credentials,
-                user_provider_credentials_path(self._settings, user_id),
-                StoredProviderCredentials(),
-            )
-
-    async def _load(
-        self,
-        user_id: str,
-    ) -> tuple[StoredUserPreferences, StoredProviderCredentials]:
+    async def _load(self, user_id: str) -> StoredUserPreferences:
         preference_path = user_preferences_path(self._settings, user_id)
-        credential_path = user_provider_credentials_path(self._settings, user_id)
         try:
             result = await self._run_io(
-                _load_files,
+                _load_file,
                 preference_path,
-                credential_path,
             )
         except _InvalidPreferences as exc:
             logger.warning("Invalid user preferences for user %s", user_id)
             raise UserPreferencesCorruptError() from exc
-        except _InvalidCredentials as exc:
-            logger.warning("Invalid provider credentials for user %s", user_id)
-            raise ProviderCredentialsCorruptError() from exc
-        if not isinstance(result, tuple) or len(result) != 2:
+        if not isinstance(result, StoredUserPreferences):
             raise TypeError("User preference reader returned an invalid value")
-        preferences, credentials = result
-        if not isinstance(preferences, StoredUserPreferences) or not isinstance(
-            credentials, StoredProviderCredentials
-        ):
-            raise TypeError("User preference reader returned an invalid value")
-        return preferences, credentials
+        return result
 
     async def _user_lock(self, user_id: str) -> anyio.Lock:
         async with self._locks_guard:
@@ -145,10 +96,6 @@ class _InvalidPreferences(ValueError):
     pass
 
 
-class _InvalidCredentials(ValueError):
-    pass
-
-
 def _read_toml(path: Path, error_type: type[ValueError]) -> dict[str, object] | None:
     if not path.exists():
         return None
@@ -163,26 +110,13 @@ def _read_toml(path: Path, error_type: type[ValueError]) -> dict[str, object] | 
     return raw
 
 
-def _load_files(
-    preference_path: Path,
-    credential_path: Path,
-) -> tuple[StoredUserPreferences, StoredProviderCredentials]:
+def _load_file(preference_path: Path) -> StoredUserPreferences:
     preference_raw = _read_toml(preference_path, _InvalidPreferences)
-    credential_raw = _read_toml(credential_path, _InvalidCredentials)
-
-    try:
-        credentials = (
-            StoredProviderCredentials.model_validate(credential_raw)
-            if credential_raw is not None
-            else StoredProviderCredentials()
-        )
-    except ValidationError as exc:
-        raise _InvalidCredentials("Provider credential schema is invalid") from exc
 
     if preference_raw is None:
         preferences = StoredUserPreferences()
         _write_preferences(preference_path, preferences)
-        return preferences, credentials
+        return preferences
 
     if preference_raw.get("schema_version") != PREFERENCES_SCHEMA_VERSION:
         raise _InvalidPreferences("Preference schema version is unsupported")
@@ -190,27 +124,11 @@ def _load_files(
         preferences = StoredUserPreferences.model_validate(preference_raw)
     except ValidationError as exc:
         raise _InvalidPreferences("Preference schema is invalid") from exc
-    return preferences, credentials
+    return preferences
 
 
 def _write_preferences(path: Path, preferences: StoredUserPreferences) -> None:
-    payload = preferences.model_dump(mode="json")
-    _write_private_toml(path, payload)
-
-
-def _write_credentials(path: Path, credentials: StoredProviderCredentials) -> None:
-    payload: dict[str, object] = {
-        "annotation": {
-            provider: secret.get_secret_value()
-            for provider in ("openai", "openrouter", "anthropic", "google")
-            if (secret := getattr(credentials.annotation, provider)) is not None
-        },
-        "data_portal": (
-            {"api_token": credentials.data_portal.api_token.get_secret_value()}
-            if credentials.data_portal.api_token is not None
-            else {}
-        ),
-    }
+    payload = preferences.model_dump(mode="json", exclude_none=True)
     _write_private_toml(path, payload)
 
 

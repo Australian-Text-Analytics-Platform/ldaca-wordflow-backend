@@ -33,7 +33,7 @@ def _settings(tmp_path: Path) -> Settings:
     )
 
 
-def test_portal_search_uses_one_based_paging_and_transient_token(
+def test_single_user_portal_search_uses_one_based_paging_and_backend_token(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -78,6 +78,13 @@ def test_portal_search_uses_one_based_paging_and_transient_token(
             headers=unsafe,
         )
         assert credentials.status_code == 200, credentials.text
+        supplied = client.post(
+            "/api/data-portal/search",
+            json={"api_token": "request-secret"},
+            headers=unsafe,
+        )
+        assert supplied.status_code == 400
+        assert supplied.json()["code"] == "invalid_input"
         response = client.post(
             "/api/data-portal/search",
             json={
@@ -98,6 +105,46 @@ def test_portal_search_uses_one_based_paging_and_transient_token(
             "limit": 20,
             "offset": 40,
         }
+
+
+def test_multi_user_portal_reads_use_request_token_only(
+    multi_user_test_client: TestClient,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    captured: list[str | None] = []
+
+    async def fake_search(self, *, method, query, limit, offset):
+        del method, query, limit, offset
+        captured.append(self.token)
+        return [], 0
+
+    async def fake_featured(self, identifiers):
+        del identifiers
+        captured.append(self.token)
+        return []
+
+    monkeypatch.setattr(OniClient, "search", fake_search)
+    monkeypatch.setattr(OniClient, "featured_collections", fake_featured)
+
+    search = multi_user_test_client.post(
+        "/api/data-portal/search",
+        json={"api_token": "browser-portal-secret"},
+    )
+    featured = multi_user_test_client.post(
+        "/api/data-portal/featured",
+        json={"api_token": "browser-portal-secret"},
+    )
+
+    assert search.status_code == 200, search.text
+    assert featured.status_code == 200, featured.text
+    assert captured == ["browser-portal-secret", "browser-portal-secret"]
+    assert multi_user_test_client.get("/api/data-portal/featured").status_code == 405
+    assert all(
+        b"browser-portal-secret" not in path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    )
 
 
 def test_portal_import_token_is_not_persisted_and_publish_is_atomic(
@@ -167,3 +214,50 @@ def test_portal_import_token_is_not_persisted_and_publish_is_atomic(
         )
         assert content.status_code == 200
         assert content.content == b"parquet"
+
+
+def test_multi_user_portal_import_token_is_execution_only(
+    multi_user_test_client: TestClient,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    async def fake_execute(
+        self: DataPortalService,
+        key: UserFileImportKey,
+        execution: DataPortalImportExecution,
+        executor: UserFileImportProcessExecutor,
+        report_progress,
+    ) -> DataPortalUserFileImportResult:
+        del self, key, executor, report_progress
+        assert execution.kwargs["api_token"] == "browser-import-secret"
+        staging = Path(str(execution.kwargs["staging_dir"]))
+        (staging / "corpus.parquet").write_bytes(b"parquet")
+        return DataPortalUserFileImportResult(
+            destination_path="LDaCA/corpus",
+            file_count=1,
+            bytes_written=7,
+        )
+
+    monkeypatch.setattr(DataPortalService, "execute_import", fake_execute)
+    accepted = multi_user_test_client.post(
+        "/api/data-portal/imports",
+        json={
+            "identifier": "arcp://name,example",
+            "name": "Corpus",
+            "api_token": "browser-import-secret",
+        },
+    )
+    assert accepted.status_code == 202, accepted.text
+    deadline = time.monotonic() + 10
+    while True:
+        resource = multi_user_test_client.get(accepted.headers["location"]).json()
+        if resource["state"] in {"succeeded", "failed", "cancelled"}:
+            break
+        assert time.monotonic() < deadline
+        time.sleep(0.02)
+    assert resource["state"] == "succeeded", resource
+    assert all(
+        b"browser-import-secret" not in path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    )

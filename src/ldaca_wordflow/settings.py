@@ -182,17 +182,6 @@ class Settings(BaseSettings):
     # Authentication Configuration
     multi_user: bool = Field(default=False, description="Multi-user mode enabled")
 
-    # Single user configuration (when multi_user=False)
-    single_user_id: str = Field(
-        default="root",
-        pattern=r"^[A-Za-z0-9._-]+$",
-        description="Single user ID",
-    )
-    single_user_name: str = Field(default="Root User", description="Single user name")
-    single_user_email: str = Field(
-        default="root@localhost", description="Single user email"
-    )
-
     # Google OAuth Configuration (when multi_user=True)
     google_client_id: str = Field(default="", description="Google OAuth client ID")
 

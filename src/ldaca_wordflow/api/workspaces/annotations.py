@@ -26,7 +26,7 @@ router = APIRouter(
 @router.post(
     "/annotation-previews",
     response_model=AnnotationPreviewResource,
-    responses=api_errors(400, 403, 404, 422, 502),
+    responses=api_errors(400, 403, 404, 409, 422, 502),
 )
 async def preview_annotation(
     workspace_id: uuid.UUID,

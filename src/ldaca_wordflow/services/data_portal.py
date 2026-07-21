@@ -8,6 +8,7 @@ from pathlib import Path
 
 import anyio
 import httpx
+from pydantic import SecretStr
 
 from ..domain import (
     DataPortalUserFileImportRequest,
@@ -68,11 +69,15 @@ class DataPortalService:
         await self._http_client.aclose()
 
     async def search(
-        self, user_id: str, request: DataPortalSearchRequest
+        self, request: DataPortalSearchRequest
     ) -> DataPortalSearchResource:
         """Run a normalized portal search with one-based API pagination."""
 
-        client = self._client(await self._credentials.data_portal_credential(user_id))
+        client = self._client(
+            await self._credentials.data_portal_credential(
+                supplied=request.api_token,
+            )
+        )
         try:
             records, total = await client.search(
                 method=request.method,
@@ -91,11 +96,13 @@ class DataPortalService:
 
     async def featured(
         self,
-        user_id: str,
+        api_token: SecretStr | None,
     ) -> DataPortalSearchResource:
         """Read configured featured collections outside all workspace gates."""
 
-        client = self._client(await self._credentials.data_portal_credential(user_id))
+        client = self._client(
+            await self._credentials.data_portal_credential(supplied=api_token)
+        )
         try:
             records = await client.featured_collections(
                 list(self._settings.ldaca_oni_featured_collection_ids)
@@ -129,7 +136,9 @@ class DataPortalService:
                 raise InvalidInputError(f"Invalid import name: {reason}")
         staging = await self._files.prepare_import_staging(user_id, import_id)
         try:
-            api_token = await self._credentials.data_portal_credential(user_id)
+            api_token = await self._credentials.data_portal_credential(
+                supplied=request.api_token,
+            )
             name = request.name.strip() if request.name else None
             return (
                 DataPortalUserFileImportRequest(
