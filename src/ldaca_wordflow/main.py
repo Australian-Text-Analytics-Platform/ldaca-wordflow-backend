@@ -28,6 +28,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from ._middleware import (
     PrivateApiCacheMiddleware,
@@ -154,6 +155,34 @@ async def _unexpected_error_handler(request: Request, exc: Exception) -> JSONRes
     )
 
 
+class _UnexpectedErrorMiddleware:
+    """Render unhandled failures inside the normal CORS and cache boundary."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        response_started = False
+
+        async def send_wrapper(message: Message) -> None:
+            nonlocal response_started
+            if message["type"] == "http.response.start":
+                response_started = True
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_wrapper)
+        except Exception as exc:
+            if response_started:
+                raise
+            response = await _unexpected_error_handler(Request(scope), exc)
+            await response(scope, receive, send)
+
+
 async def _http_error_handler(
     request: Request,
     exc: StarletteHTTPException,
@@ -242,19 +271,6 @@ def create_app(
         allowed_origins=settings.get_allowed_origins(),
     )
     app.add_middleware(
-        cast(Any, CORSMiddleware),
-        allow_origins=list(settings.get_allowed_origins()),
-        allow_credentials=True,
-        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=[
-            "Accept",
-            "Content-Type",
-            "X-CSRF-Token",
-            "X-Request-ID",
-        ],
-        expose_headers=["ETag", "Location", "X-Request-ID"],
-    )
-    app.add_middleware(
         cast(Any, ExactHostMiddleware),
         trusted_hosts=settings.get_trusted_hosts(),
     )
@@ -265,6 +281,22 @@ def create_app(
             ("POST", "/api/user-files/uploads"): (settings.max_file_upload_bytes),
             ("POST", "/api/workspaces/imports"): (settings.max_workspace_archive_bytes),
         },
+    )
+    # Specialized middleware handles its own sentinels first; anything that
+    # still escapes is rendered before CORS/cache decorate the response.
+    app.add_middleware(cast(Any, _UnexpectedErrorMiddleware))
+    app.add_middleware(
+        cast(Any, CORSMiddleware),
+        allow_origins=list(settings.get_allowed_origins()),
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=[
+            "Accept",
+            "Content-Type",
+            "X-CSRF-Token",
+            "X-Request-ID",
+        ],
+        expose_headers=["ETag", "Location", "X-Request-ID", "X-Wordflow-Has-Next"],
     )
     app.add_middleware(cast(Any, PrivateApiCacheMiddleware))
     # Added last so request identity wraps CORS and every exception response.

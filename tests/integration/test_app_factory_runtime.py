@@ -347,6 +347,52 @@ def test_request_id_and_sanitized_validation_error_contract(tmp_path: Path) -> N
     assert "provider-key-must-not-echo" not in response.text
 
 
+def test_unexpected_api_errors_cross_the_complete_http_boundary(tmp_path: Path) -> None:
+    """Unhandled failures remain structured, private, and browser-readable."""
+
+    from ldaca_wordflow.main import create_app
+    from ldaca_wordflow.settings import load_settings
+
+    app = create_app(
+        load_settings(
+            data_root=tmp_path,
+            multi_user=False,
+            cors_allowed_origins=("http://frontend.test",),
+        ),
+        serve_frontend=False,
+    )
+    router = APIRouter()
+
+    @router.get("/api/__unexpected-probe", include_in_schema=False)
+    async def unexpected_probe() -> None:
+        raise RuntimeError("private backend details")
+
+    app.include_router(router)
+
+    with TestClient(
+        app,
+        base_url="http://localhost",
+        raise_server_exceptions=False,
+    ) as client:
+        response = client.get(
+            "/api/__unexpected-probe",
+            headers={
+                "Origin": "http://frontend.test",
+                "X-Request-ID": "unexpected-probe",
+            },
+        )
+
+    assert response.status_code == 500
+    assert response.headers["access-control-allow-origin"] == "http://frontend.test"
+    assert response.headers["cache-control"] == "private, no-store"
+    assert response.json() == {
+        "code": "internal_server_error",
+        "message": "Internal server error",
+        "request_id": "unexpected-probe",
+    }
+    assert "private backend details" not in response.text
+
+
 def test_request_body_limit_counts_actual_bytes(tmp_path: Path) -> None:
     """A false Content-Length cannot bypass the process-wide body boundary."""
 
