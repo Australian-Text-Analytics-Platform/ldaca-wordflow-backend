@@ -479,7 +479,7 @@ def test_inspect_rejects_invalid_topology(tmp_path: Path, invalid_graph: str) ->
         store.inspect(path)
 
 
-def test_export_snapshot_rebase_is_copy_on_write_and_keeps_revision(
+def test_relocated_snapshot_rebase_is_copy_on_write_and_keeps_revision(
     tmp_path: Path,
 ) -> None:
     original = tmp_path / "original"
@@ -499,7 +499,7 @@ def test_export_snapshot_rebase_is_copy_on_write_and_keeps_revision(
     shutil.rmtree(original)
     before = (moved / "workspace.json").read_bytes()
 
-    relocated = store.prepare_export_snapshot(moved)
+    relocated = store.rebase_snapshot_sources(moved)
     loaded = store.load(moved)
 
     assert relocated.revision == 1

@@ -1652,7 +1652,6 @@ class WorkspaceService:
         # Load before installation so malformed workspace snapshots never
         # become addressable resources.
         self._store.load(staging)
-        self._store.prepare_import_snapshot(staging, destination)
 
         write_workspace_owner(staging, user_id)
         marker.unlink()
@@ -1669,6 +1668,7 @@ class WorkspaceService:
         os.replace(staging, destination)
         _fsync_directory(root)
         try:
+            self._store.rebase_snapshot_sources(destination)
             workspace, revision, _serialized_bytes = self._load_sync(destination)
             _fsync_directory(destination)
         except BaseException:

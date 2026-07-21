@@ -194,7 +194,7 @@ class WorkspaceArchiveService:
                     self._max_export_bytes,
                 )
             await self._run_sync(
-                self._workspace_store.prepare_export_snapshot,
+                self._workspace_store.rebase_snapshot_sources,
                 source_snapshot,
             )
             loaded = await self._run_sync(self._workspace_store.load, source_snapshot)

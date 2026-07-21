@@ -952,8 +952,6 @@ def _read_workspace(
 
 def _rebase_workspace_sources(
     path: str | Path,
-    *,
-    destination_root: Path | None = None,
 ) -> None:
     """Copy stale plans, then atomically publish rebased metadata.
 
@@ -965,7 +963,7 @@ def _rebase_workspace_sources(
 
     target = _resolve_metadata_path(Path(path))
     data = _read_workspace_metadata(path)
-    data_dir = ((destination_root or target.parent) / NODE_DATA_DIR).resolve()
+    data_dir = (target.parent / NODE_DATA_DIR).resolve()
 
     changed = False
     generation = uuid.uuid4().hex
@@ -1251,8 +1249,8 @@ class WorkspaceStore:
             ) from exc
         return info
 
-    def prepare_export_snapshot(self, path: str | Path) -> WorkspaceSnapshotInfo:
-        """Rebase one private export snapshot without changing its revision."""
+    def rebase_snapshot_sources(self, path: str | Path) -> WorkspaceSnapshotInfo:
+        """Rebase one relocated snapshot without changing its revision."""
 
         self._inspect_complete(path)
         try:
@@ -1262,27 +1260,6 @@ class WorkspaceStore:
         except (OSError, ValueError) as exc:
             raise WorkspaceSnapshotInvalidError(
                 "Workspace plan sources cannot be relocated"
-            ) from exc
-        return self._inspect_complete(path)
-
-    def prepare_import_snapshot(
-        self,
-        path: str | Path,
-        destination: str | Path,
-    ) -> WorkspaceSnapshotInfo:
-        """Rebase one validated import staging tree for its final directory."""
-
-        self._inspect_complete(path)
-        try:
-            _rebase_workspace_sources(
-                path,
-                destination_root=Path(destination),
-            )
-        except WorkspaceStoreError:
-            raise
-        except (OSError, ValueError) as exc:
-            raise WorkspaceSnapshotInvalidError(
-                "Workspace plan sources cannot be prepared for relocation"
             ) from exc
         return self._inspect_complete(path)
 
