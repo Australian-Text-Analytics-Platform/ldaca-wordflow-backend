@@ -1,11 +1,9 @@
-"""Validated sample catalogue reads and import execution."""
+"""Remote sample catalogue reads and integrity-checked import execution."""
 
 from __future__ import annotations
 
-import hashlib
 import os
 import tempfile
-import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from functools import partial
@@ -20,19 +18,24 @@ from pydantic import ValidationError
 
 from ..domain import SampleUserFileImportResult
 from ..domain.background import Progress
+from ..infrastructure.storage.durable_fs import fsync_directory as _fsync_directory
+from ..models.data_sources import (
+    SampleCatalogueResource,
+    SampleCollection,
+    sample_destination_path,
+)
 from ..shared.errors import (
     BadGatewayError,
     InvalidInputError,
     ResourceConflictError,
     ResourceTooLargeError,
 )
-from ..models.data_sources import (
-    SampleCatalogueResource,
-    SampleCollection,
-    sample_destination_path,
-)
-from ..infrastructure.storage.durable_fs import fsync_directory as _fsync_directory
 from .user_files import UserFileStore
+
+SAMPLE_DATA_REMOTE_BASE_URL = (
+    "https://raw.githubusercontent.com/"
+    "Australian-Text-Analytics-Platform/ldaca-analytics-sample-data/main/"
+)
 
 T = TypeVar("T")
 
@@ -46,26 +49,22 @@ class SampleImportExecution:
 
 
 class SampleDataService:
-    """Own remote catalogue I/O and atomic per-collection installation."""
+    """Own remote sample I/O and atomic per-collection installation."""
 
     def __init__(
         self,
         files: UserFileStore,
         *,
-        remote_base_url: str,
-        bundled_root: Path,
         limiter: anyio.CapacityLimiter,
         max_import_bytes: int,
         max_import_files: int,
     ) -> None:
-        base_url = remote_base_url.rstrip("/") + "/"
         self._files = files
-        self._bundled_root = bundled_root
         self._limiter = limiter
         self._max_import_bytes = max_import_bytes
         self._max_import_files = max_import_files
         self._client = httpx.AsyncClient(
-            base_url=base_url,
+            base_url=SAMPLE_DATA_REMOTE_BASE_URL,
             timeout=httpx.Timeout(30.0),
             follow_redirects=False,
         )
@@ -76,7 +75,7 @@ class SampleDataService:
         await self._client.aclose()
 
     async def catalogue(self, user_id: str) -> SampleCatalogueResource:
-        """Fetch and strictly validate the catalogue, then mark installed entries."""
+        """Fetch the remote catalogue and attach current-user installation state."""
 
         catalogue = await self._fetch_catalogue()
         paths = {
@@ -139,7 +138,7 @@ class SampleDataService:
         execution: SampleImportExecution,
         report_progress: Callable[[Progress], Awaitable[None]],
     ) -> SampleUserFileImportResult:
-        """Copy or download a complete validated collection into staging."""
+        """Download one complete remote collection into private staging."""
 
         collection = execution.collection
         total_bytes = 0
@@ -147,26 +146,12 @@ class SampleDataService:
             relative = Path(*sample_destination_path(collection.id, entry.path).parts)
             destination = execution.staging / relative
             await self._run_io(_ensure_directory, destination.parent)
-            if collection.bundled:
-                source = _contained_bundled_path(self._bundled_root, entry.path)
-                await self._run_io(
-                    _copy_verified,
-                    source,
-                    destination,
-                    entry.sha256,
-                    entry.size,
-                )
-            else:
-                await self._download_verified(
-                    entry.path,
-                    destination,
-                    entry.sha256,
-                    entry.size,
-                )
-            size = await self._run_io(lambda path: path.stat().st_size, destination)
-            if size != entry.size:
-                raise BadGatewayError("Sample file integrity check failed")
-            total_bytes += size
+            downloaded = await self._download(
+                entry.path,
+                destination,
+                entry.size,
+            )
+            total_bytes += downloaded
             await report_progress(
                 Progress(
                     fraction=(0.95 * (index + 1)) / max(1, len(collection.files)),
@@ -184,15 +169,13 @@ class SampleDataService:
             bytes_written=total_bytes,
         )
 
-    async def _download_verified(
+    async def _download(
         self,
         remote_path: str,
         destination: Path,
-        expected_sha256: str,
         expected_size: int,
-    ) -> None:
+    ) -> int:
         temporary = await self._run_io(_new_download_path, destination)
-        digest = hashlib.sha256()
         bytes_written = 0
         try:
             async with self._client.stream(
@@ -205,14 +188,11 @@ class SampleDataService:
                         bytes_written += len(chunk)
                         if bytes_written > expected_size:
                             raise BadGatewayError("Sample file integrity check failed")
-                        digest.update(chunk)
                         await handle.write(chunk)
-            if (
-                bytes_written != expected_size
-                or digest.hexdigest().casefold() != expected_sha256.casefold()
-            ):
-                raise BadGatewayError("Sample file integrity check failed")
+            if bytes_written != expected_size:
+                raise BadGatewayError("Sample file size does not match the catalogue")
             await self._run_io(_publish_download, temporary, destination)
+            return bytes_written
         except httpx.HTTPError as exc:
             raise BadGatewayError("Sample file download failed") from exc
         finally:
@@ -246,48 +226,6 @@ class SampleDataService:
             abandon_on_cancel=False,
             limiter=self._limiter,
         )
-
-
-def _contained_bundled_path(root: Path, raw_path: str) -> Path:
-    try:
-        relative = sample_destination_path("", raw_path)
-    except ValueError as exc:
-        raise BadGatewayError("Bundled sample file path is invalid") from exc
-    destination = (root / Path(*relative.parts)).resolve(strict=True)
-    resolved_root = root.resolve(strict=True)
-    if not destination.is_relative_to(resolved_root) or not destination.is_file():
-        raise BadGatewayError("Bundled sample file is unavailable")
-    return destination
-
-
-def _copy_verified(
-    source: Path,
-    destination: Path,
-    expected_sha256: str,
-    expected_size: int,
-) -> None:
-    digest = hashlib.sha256()
-    bytes_written = 0
-    temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.copy")
-    try:
-        with source.open("rb") as reader, temporary.open("xb") as writer:
-            while chunk := reader.read(1024 * 1024):
-                bytes_written += len(chunk)
-                if bytes_written > expected_size:
-                    raise BadGatewayError("Bundled sample file integrity check failed")
-                digest.update(chunk)
-                writer.write(chunk)
-            writer.flush()
-            os.fsync(writer.fileno())
-        if (
-            bytes_written != expected_size
-            or digest.hexdigest().casefold() != expected_sha256.casefold()
-        ):
-            raise BadGatewayError("Bundled sample file integrity check failed")
-        os.replace(temporary, destination)
-        _fsync_directory(destination.parent)
-    finally:
-        temporary.unlink(missing_ok=True)
 
 
 def _publish_download(temporary: Path, destination: Path) -> None:

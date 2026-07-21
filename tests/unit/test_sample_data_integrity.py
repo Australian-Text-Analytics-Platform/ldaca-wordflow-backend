@@ -1,37 +1,18 @@
-"""Sample imports must honor catalogue size and digest declarations."""
-
-from pathlib import Path
+"""Remote sample catalogues must map to safe public destinations."""
 
 import pytest
 from pydantic import ValidationError
 
-from ldaca_wordflow.shared.errors import BadGatewayError
 from ldaca_wordflow.models.data_sources import (
     SampleCatalogueResource,
     SampleCollection,
     SampleFile,
+    sample_destination_path,
 )
-from ldaca_wordflow.services.sample_data import _copy_verified
-
-
-def test_bundled_copy_rejects_a_manifest_size_mismatch(tmp_path: Path) -> None:
-    source = tmp_path / "source.csv"
-    destination = tmp_path / "destination.csv"
-    source.write_bytes(b"abc")
-
-    with pytest.raises(BadGatewayError, match="integrity"):
-        _copy_verified(
-            source,
-            destination,
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
-            2,
-        )
-
-    assert not destination.exists()
 
 
 def test_collection_manifest_requires_exact_total_and_unique_paths() -> None:
-    file = SampleFile(path="sample/data.csv", size=3, sha256="0" * 64)
+    file = SampleFile(path="sample/data.csv", size=3)
 
     with pytest.raises(ValidationError, match="total_size_bytes"):
         SampleCollection(
@@ -47,16 +28,40 @@ def test_collection_manifest_requires_exact_total_and_unique_paths() -> None:
             total_size_bytes=6,
             files=[file, file],
         )
-    with pytest.raises(ValidationError, match="distinct"):
-        SampleCollection(
-            id="sample",
-            name="Sample",
-            total_size_bytes=6,
-            files=[
-                file,
-                SampleFile(path="data.csv", size=3, sha256="1" * 64),
+def test_hierarchical_collection_paths_are_relative_to_the_collection() -> None:
+    assert sample_destination_path(
+        "ADO/twitter",
+        "ADO/twitter/README.md",
+    ).as_posix() == "README.md"
+    with pytest.raises(ValueError, match="contained"):
+        sample_destination_path("ADO/twitter", "ADO/reddit/data.parquet")
+
+
+def test_repository_only_fields_are_not_part_of_the_public_resource() -> None:
+    catalogue = SampleCatalogueResource.model_validate(
+        {
+            "schema_version": 1,
+            "collections": [
+                {
+                    "id": "ADO/twitter",
+                    "name": "ADO Twitter",
+                    "bundled": True,
+                    "total_size_bytes": 3,
+                    "files": [
+                        {
+                            "path": "ADO/twitter/data.csv",
+                            "size": 3,
+                            "sha256": "0" * 64,
+                        }
+                    ],
+                }
             ],
-        )
+        }
+    )
+
+    payload = catalogue.model_dump(mode="json")
+    assert "bundled" not in payload["collections"][0]
+    assert "sha256" not in payload["collections"][0]["files"][0]
 
 
 def test_catalogue_requires_unique_portable_collection_ids() -> None:
@@ -66,6 +71,13 @@ def test_catalogue_requires_unique_portable_collection_ids() -> None:
         total_size_bytes=0,
         files=[],
     )
+    hierarchical = SampleCollection(
+        id="ADO/twitter",
+        name="ADO Twitter",
+        total_size_bytes=0,
+        files=[],
+    )
+    assert hierarchical.id == "ADO/twitter"
     with pytest.raises(ValidationError, match="collection IDs"):
         SampleCatalogueResource(
             schema_version=1,

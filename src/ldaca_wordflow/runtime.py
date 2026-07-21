@@ -535,8 +535,6 @@ async def runtime_context(settings: Settings) -> AsyncIterator[Runtime]:
         )
         sample_data_service = SampleDataService(
             user_file_store,
-            remote_base_url=settings.sample_data_remote_url,
-            bundled_root=Path(__file__).parent / "resources" / "sample_data",
             limiter=io_limiter,
             max_import_bytes=settings.max_user_file_import_bytes,
             max_import_files=settings.max_user_file_import_files,

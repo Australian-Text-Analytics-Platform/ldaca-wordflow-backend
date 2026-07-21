@@ -12,6 +12,7 @@ from pydantic import (
     ConfigDict,
     Field,
     StringConstraints,
+    field_validator,
     model_validator,
 )
 
@@ -33,12 +34,27 @@ def _validate_public_path(path: str) -> str:
     return "/".join(portable_relative_path_parts(path))
 
 
+def _validate_collection_id(value: str) -> str:
+    try:
+        canonical = "/".join(portable_relative_path_parts(value))
+    except ValueError as exc:
+        raise ValueError("Sample collection ID is not portable") from exc
+    if canonical != value:
+        raise ValueError("Sample collection ID is not canonical")
+    return value
+
+
 PublicUserFilePath = Annotated[str, StringConstraints(min_length=1, max_length=4_000)]
 
 
 class SampleUserFileImportRequest(_StrictModel):
     kind: Literal["sample"] = "sample"
-    collection_id: str = Field(pattern=r"^[A-Za-z0-9._-]+$")
+    collection_id: str = Field(min_length=1, max_length=1_024)
+
+    @field_validator("collection_id")
+    @classmethod
+    def validate_collection_id(cls, value: str) -> str:
+        return _validate_collection_id(value)
 
 
 class DataPortalUserFileImportRequest(_StrictModel):
@@ -55,10 +71,15 @@ UserFileImportRequest = Annotated[
 
 class SampleUserFileImportResult(_StrictModel):
     kind: Literal["sample"] = "sample"
-    collection_id: str = Field(pattern=r"^[A-Za-z0-9._-]+$")
+    collection_id: str = Field(min_length=1, max_length=1_024)
     destination_path: PublicUserFilePath
     file_count: int = Field(ge=0)
     bytes_written: int = Field(ge=0)
+
+    @field_validator("collection_id")
+    @classmethod
+    def validate_collection_id(cls, value: str) -> str:
+        return _validate_collection_id(value)
 
     @model_validator(mode="after")
     def validate_path(self) -> "SampleUserFileImportResult":

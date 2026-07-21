@@ -1,4 +1,4 @@
-"""Strict resources for packaged samples and the LDaCA Data Portal."""
+"""Strict resources for remote samples and the LDaCA Data Portal."""
 
 from __future__ import annotations
 
@@ -6,45 +6,42 @@ from enum import StrEnum
 from pathlib import PurePosixPath
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
-from ..shared.portable_names import (
-    portable_collision_key,
-    portable_name_error,
-    portable_relative_path_parts,
-)
+from ..shared.portable_names import portable_collision_key, portable_relative_path_parts
 
 
 def sample_destination_path(collection_id: str, raw_path: str) -> PurePosixPath:
-    """Canonicalize one catalogue path to its exact published destination."""
+    """Return a catalogue file's path relative to its declared collection."""
 
-    path = PurePosixPath(*portable_relative_path_parts(raw_path))
-    parts = path.parts[1:] if path.parts[0] == collection_id else path.parts
-    return PurePosixPath(
-        *portable_relative_path_parts(PurePosixPath(*parts).as_posix())
-    )
+    collection_parts = portable_relative_path_parts(collection_id)
+    path_parts = portable_relative_path_parts(raw_path)
+    if path_parts[: len(collection_parts)] != collection_parts:
+        raise ValueError("Sample file must be contained by its collection")
+    relative_parts = path_parts[len(collection_parts) :]
+    if not relative_parts:
+        raise ValueError("Sample file path must name a file")
+    return PurePosixPath(*relative_parts)
 
 
 class SampleFile(BaseModel):
-    """One integrity-pinned file in a remote sample collection."""
+    """One fetchable file in a remote sample collection."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="ignore", frozen=True)
 
     path: str
     size: int = Field(ge=0)
-    sha256: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
 
 
 class SampleCollection(BaseModel):
-    """One importable sample collection from the configured catalogue."""
+    """One importable sample collection from the remote catalogue."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
-    id: str = Field(pattern=r"^[A-Za-z0-9._-]+$")
+    id: str = Field(min_length=1, max_length=1_024)
     name: str
     description: str = ""
     language: str = ""
-    bundled: bool = False
     total_size_bytes: int = Field(ge=0)
     recommended_for: list[str] = Field(default_factory=list)
     files: list[SampleFile] = Field(max_length=10_000)
@@ -54,18 +51,24 @@ class SampleCollection(BaseModel):
     def validate_manifest(self) -> "SampleCollection":
         """Require an internally consistent, platform-unambiguous manifest."""
 
-        if portable_name_error(self.id, exact=True) is not None:
-            raise ValueError("Sample collection ID is not portable")
-        portable_relative_path_parts(self.id)
+        try:
+            collection_parts = portable_relative_path_parts(self.id)
+        except ValueError as exc:
+            raise ValueError("Sample collection ID is not portable") from exc
+        if "/".join(collection_parts) != self.id:
+            raise ValueError("Sample collection ID is not canonical")
         if sum(file.size for file in self.files) != self.total_size_bytes:
             raise ValueError("total_size_bytes must equal the sum of file sizes")
-        normalized_paths = [
-            tuple(
-                portable_collision_key(part)
-                for part in sample_destination_path(self.id, file.path).parts
-            )
-            for file in self.files
-        ]
+        try:
+            normalized_paths = [
+                tuple(
+                    portable_collision_key(part)
+                    for part in sample_destination_path(self.id, file.path).parts
+                )
+                for file in self.files
+            ]
+        except ValueError as exc:
+            raise ValueError("Sample file path is not valid for its collection") from exc
         if len(normalized_paths) != len(set(normalized_paths)):
             raise ValueError("Sample file paths must be distinct")
         return self
@@ -98,7 +101,7 @@ class DataPortalSearchMethod(StrEnum):
 
 
 class DataPortalSearchRequest(BaseModel):
-    """One one-based portal search using the configured user credential."""
+    """One one-based portal search with an optional request-only token."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -106,6 +109,27 @@ class DataPortalSearchRequest(BaseModel):
     query: str = Field(default="", max_length=2_000)
     page: int = Field(default=1, ge=1)
     page_size: int = Field(default=25, ge=1, le=100)
+    api_token: SecretStr | None = Field(
+        default=None,
+        min_length=1,
+        max_length=4_000,
+        json_schema_extra={"writeOnly": True},
+    )
+
+
+class DataPortalFeaturedRequest(BaseModel):
+    """Optional request-only token for configured featured collections."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    api_token: SecretStr | None = Field(
+        default=None,
+        min_length=1,
+        max_length=4_000,
+        json_schema_extra={"writeOnly": True},
+    )
+
+
 class DataPortalRecord(BaseModel):
     """Normalized portal record independent of Oni JSON-LD shapes."""
 
@@ -135,19 +159,27 @@ class DataPortalSearchResource(BaseModel):
 
 
 class DataPortalImportSubmitRequest(BaseModel):
-    """Portal import request resolved with the configured user credential."""
+    """Portal import request with a token excluded from retained import state."""
 
     model_config = ConfigDict(extra="forbid")
 
     identifier: str = Field(min_length=1, max_length=4_000)
     name: str | None = Field(default=None, min_length=1, max_length=500)
+    api_token: SecretStr | None = Field(
+        default=None,
+        min_length=1,
+        max_length=4_000,
+        json_schema_extra={"writeOnly": True},
+    )
 
 
 __all__ = [
+    "DataPortalFeaturedRequest",
     "DataPortalImportSubmitRequest",
     "DataPortalRecord",
     "DataPortalSearchRequest",
     "DataPortalSearchResource",
     "SampleCatalogueResource",
     "SampleCollection",
+    "sample_destination_path",
 ]

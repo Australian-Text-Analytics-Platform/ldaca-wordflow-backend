@@ -613,9 +613,7 @@ def _install_import_staging(
     if not _is_real_directory(staging):
         raise FileNotFoundError(str(staging))
     if not destination.parent.exists():
-        resolver.recheck_for_write(destination.parent)
-        destination.parent.mkdir(mode=0o700, exist_ok=False)
-        _fsync_directory(destination.parent.parent)
+        _create_missing_directories(resolver, destination.parent)
     resolver.recheck_for_write(destination)
     if destination.exists():
         raise FileExistsError(destination)
@@ -626,6 +624,23 @@ def _install_import_staging(
         staging.parent.rmdir()
     except OSError:
         pass
+
+
+def _create_missing_directories(
+    resolver: SafePathResolver,
+    destination: Path,
+) -> None:
+    """Create every missing parent for a nested atomic import destination."""
+
+    missing: list[Path] = []
+    current = destination
+    while not current.exists():
+        missing.append(current)
+        current = current.parent
+    for directory in reversed(missing):
+        resolver.recheck_for_write(directory)
+        directory.mkdir(mode=0o700, exist_ok=False)
+        _fsync_directory(directory.parent)
 
 
 def _mark_import_staging(staging: Path, import_id: str) -> None:

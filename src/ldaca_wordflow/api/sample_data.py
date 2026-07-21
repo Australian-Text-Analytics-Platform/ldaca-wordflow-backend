@@ -35,7 +35,7 @@ async def list_sample_collections(
 
 
 @router.post(
-    "/{collection_id}/imports",
+    "/{collection_id:path}/imports",
     response_model=UserFileImport,
     status_code=status.HTTP_202_ACCEPTED,
     responses=api_errors(400, 403, 409, 413, 422, 502, 507),

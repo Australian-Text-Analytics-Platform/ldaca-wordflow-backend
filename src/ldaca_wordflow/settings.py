@@ -140,15 +140,6 @@ class Settings(BaseSettings):
         description="Maximum serialized bytes in one User File Import record",
     )
     max_concurrent_workspace_imports: int = Field(default=2, ge=1, le=16)
-    sample_data_remote_url: str = Field(
-        default="https://raw.githubusercontent.com/Australian-Text-Analytics-Platform/ldaca-analytics-sample-data/main",
-        description=(
-            "Base URL for remote sample datasets. The backend fetches catalogue.json "
-            "from this URL and downloads any missing or changed files in the background "
-            "for one validated collection import."
-        ),
-    )
-
     # Server Configuration
     server_host: str = Field(default="127.0.0.1", description="Server host")
     backend_port: int = Field(
