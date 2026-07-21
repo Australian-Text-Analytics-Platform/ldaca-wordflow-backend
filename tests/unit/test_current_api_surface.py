@@ -15,11 +15,11 @@ from ldaca_wordflow.spa import _runtime_config_js
 
 HTTP_METHODS = {"delete", "get", "patch", "post", "put"}
 EXPECTED_OPERATIONS = {
-    ("GET", "/api/annotation-providers/{provider}/models", "list_annotation_models"),
+    ("POST", "/api/annotation-providers/{provider}/models", "list_annotation_models"),
     ("GET", "/api/auth/cilogon/callback", "cilogon_callback"),
     ("GET", "/api/auth/cilogon/login", "cilogon_login"),
     ("POST", "/api/auth/google/callback", "google_callback"),
-    ("GET", "/api/data-portal/featured", "list_featured_data_portal_collections"),
+    ("POST", "/api/data-portal/featured", "list_featured_data_portal_collections"),
     ("POST", "/api/data-portal/imports", "submit_data_portal_import"),
     ("POST", "/api/data-portal/search", "search_data_portal"),
     ("GET", "/api/events", "backend_events"),
@@ -34,7 +34,9 @@ EXPECTED_OPERATIONS = {
     ("DELETE", "/api/user-files", "delete_file"),
     ("GET", "/api/user-files/content", "download_file"),
     ("POST", "/api/user-files/folders", "create_folder"),
-    ("POST", "/api/user-files/preview", "preview_file"),
+    ("GET", "/api/user-files/preview", "preview_file"),
+    ("GET", "/api/user-files/preview/schema", "preview_file_schema"),
+    ("GET", "/api/user-files/worksheets", "list_file_worksheets"),
     ("GET", "/api/user-files/raw", "get_raw_file"),
     ("POST", "/api/user-files/uploads", "upload_file"),
     ("GET", "/api/sample-collections", "list_sample_collections"),
@@ -46,6 +48,7 @@ EXPECTED_OPERATIONS = {
     ("GET", "/api/session", "get_session"),
     ("DELETE", "/api/session", "delete_session"),
     ("GET", "/api/storage", "get_storage"),
+    ("GET", "/api/tokenizer-models", "list_tokenizer_models"),
     ("GET", "/api/user-file-imports", "list_user_file_imports"),
     ("GET", "/api/user-file-imports/{import_id}", "get_user_file_import"),
     (
@@ -92,12 +95,28 @@ EXPECTED_OPERATIONS = {
     ),
     (
         "GET",
+        "/api/workspaces/{workspace_id}/analyses/{analysis_id}/result/tables/{table_id}",
+        "download_analysis_table",
+    ),
+    (
+        "GET",
+        "/api/workspaces/{workspace_id}/analyses/{analysis_id}/result/tables/{table_id}/rows",
+        "get_analysis_table_rows",
+    ),
+    (
+        "GET",
+        "/api/workspaces/{workspace_id}/analyses/{analysis_id}/result/tables/{table_id}/schema",
+        "get_analysis_table_schema",
+    ),
+    (
+        "GET",
         "/api/workspaces/{workspace_id}/analyses/{analysis_id}/artifacts/{artifact_name}",
         "download_analysis_artifact",
     ),
     ("PUT", "/api/workspaces/{workspace_id}/open", "open_workspace_by_id"),
     ("DELETE", "/api/workspaces/{workspace_id}/open", "close_workspace_by_id"),
     ("GET", "/api/workspaces/{workspace_id}/archive", "export_workspace_archive"),
+    ("POST", "/api/workspaces/{workspace_id}/sql", "execute_workspace_sql"),
     ("POST", "/api/workspaces/{workspace_id}/nodes", "create_node"),
     ("GET", "/api/workspaces/{workspace_id}/nodes", "list_nodes"),
     (
@@ -111,10 +130,25 @@ EXPECTED_OPERATIONS = {
     ("DELETE", "/api/workspaces/{workspace_id}/nodes/{node_id}", "delete_node"),
     (
         "POST",
+        "/api/workspaces/{workspace_id}/nodes/{node_id}/edits",
+        "edit_node",
+    ),
+    (
+        "POST",
+        "/api/workspaces/{workspace_id}/nodes/{node_id}/undo",
+        "undo_node",
+    ),
+    (
+        "POST",
+        "/api/workspaces/{workspace_id}/nodes/{node_id}/redo",
+        "redo_node",
+    ),
+    (
+        "POST",
         "/api/workspaces/{workspace_id}/nodes/{node_id}/annotation-previews",
         "preview_annotation",
     ),
-    ("GET", "/api/workspaces/{workspace_id}/nodes/{node_id}/rows", "get_node_rows"),
+    ("GET", "/api/workspaces/{workspace_id}/nodes/{node_id}/schema", "get_node_schema"),
     ("GET", "/api/workspaces/{workspace_id}/tabs", "list_tabs"),
     ("POST", "/api/workspaces/{workspace_id}/tabs", "create_tab"),
     ("GET", "/api/workspaces/{workspace_id}/tabs/{tab_id}", "get_tab"),
@@ -186,6 +220,27 @@ def test_cookie_security_is_explicit_and_no_bearer_or_query_token_is_advertised(
         }
         assert "authorization" not in parameter_names
         assert "token" not in parameter_names
+
+
+def test_transient_provider_secrets_are_write_only_and_absent_from_resources() -> None:
+    schemas = app.openapi()["components"]["schemas"]
+    for schema_name, field_name in (
+        ("AnnotationModelsRequest", "api_key"),
+        ("AnnotationPreviewRequest", "api_key"),
+        ("AnnotationAnalysisSubmission", "api_key"),
+        ("DataPortalFeaturedRequest", "api_token"),
+        ("DataPortalSearchRequest", "api_token"),
+        ("DataPortalImportSubmitRequest", "api_token"),
+    ):
+        field = schemas[schema_name]["properties"][field_name]
+        assert field["writeOnly"] is True
+        assert field["anyOf"][0]["format"] == "password"
+        assert field["anyOf"][0]["writeOnly"] is True
+
+    assert "api_key" not in schemas["AnnotationAnalysisRequest"]["properties"]
+    assert "api_token" not in schemas["DataPortalUserFileImportRequest"][
+        "properties"
+    ]
 
 
 def test_spa_runtime_config_contains_only_the_reverse_proxy_base_path() -> None:
