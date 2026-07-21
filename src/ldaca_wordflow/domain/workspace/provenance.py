@@ -242,6 +242,13 @@ class CastDerivation(_StrictModel):
     strict: bool = False
 
 
+class SqlDerivation(_StrictModel):
+    """Exact SQL submitted when a Derived Data Block was created."""
+
+    kind: Literal["sql"] = "sql"
+    sql: str = Field(min_length=1)
+
+
 class AnnotationDerivation(_StrictModel):
     kind: Literal["annotation"] = "annotation"
     annotation_column: str = Field(min_length=1, max_length=500)
@@ -263,6 +270,11 @@ class QuotationDetachmentDerivation(_StrictModel):
     kind: Literal["quotation_detachment"] = "quotation_detachment"
 
 
+class TopicModelingDetachmentDerivation(_StrictModel):
+    kind: Literal["topic_modeling_detachment"] = "topic_modeling_detachment"
+    role: Literal["topic_data", "topic_meanings"]
+
+
 DerivationOperation = Annotated[
     CloneDerivation
     | SliceDerivation
@@ -272,10 +284,12 @@ DerivationOperation = Annotated[
     | ConcatDerivation
     | JoinDerivation
     | CastDerivation
+    | SqlDerivation
     | AnnotationDerivation
     | ConcordanceDetachmentDerivation
     | ConcordanceDispersionDetachmentDerivation
-    | QuotationDetachmentDerivation,
+    | QuotationDetachmentDerivation
+    | TopicModelingDetachmentDerivation,
     Field(discriminator="kind"),
 ]
 _DERIVATION_OPERATION_ADAPTER = TypeAdapter(DerivationOperation)
@@ -290,10 +304,12 @@ _DERIVATION_OPERATION_TYPES: dict[str, type[_StrictModel]] = {
         ConcatDerivation,
         JoinDerivation,
         CastDerivation,
+        SqlDerivation,
         AnnotationDerivation,
         ConcordanceDetachmentDerivation,
         ConcordanceDispersionDetachmentDerivation,
         QuotationDetachmentDerivation,
+        TopicModelingDetachmentDerivation,
     )
 }
 
@@ -314,7 +330,7 @@ class NodeReference(_StrictModel):
 class DerivationInput(_StrictModel):
     """One ordered, role-bearing derivation input."""
 
-    role: Literal["source", "left", "right", "member"]
+    role: Literal["source", "left", "right", "member", "input"]
     value: Annotated[
         SourceProvenance | NodeReference | "DerivationProvenance",
         Field(discriminator="type"),
@@ -341,6 +357,9 @@ class DerivationProvenance(_StrictModel):
                 raise ValueError(
                     "Concatenation provenance requires two or more members"
                 )
+        elif isinstance(self.operation, SqlDerivation):
+            if not roles or any(role != "input" for role in roles):
+                raise ValueError("SQL provenance requires one or more ordered inputs")
         elif roles != ["source"]:
             raise ValueError("Unary provenance requires exactly one source input")
         return self
@@ -456,6 +475,8 @@ def describe_provenance(
                 else "concatenation"
             )
             return f"{prefix} of {', '.join(inputs)}"
+        if isinstance(operation, SqlDerivation):
+            return f"SQL query of {', '.join(inputs)}"
         labels: dict[type[BaseModel], str] = {
             CloneDerivation: "clone",
             SliceDerivation: operation.mode
@@ -473,6 +494,7 @@ def describe_provenance(
             ConcordanceDetachmentDerivation: "concordance detachment",
             ConcordanceDispersionDetachmentDerivation: "concordance dispersion detachment",
             QuotationDetachmentDerivation: "quotation detachment",
+            TopicModelingDetachmentDerivation: "topic modeling detachment",
         }
         return f"{labels[type(operation)]} of {inputs[0]}"
 
@@ -505,9 +527,11 @@ __all__ = [
     "NodeProvenance",
     "NodeReference",
     "QuotationDetachmentDerivation",
+    "TopicModelingDetachmentDerivation",
     "ReplaceDerivation",
     "RoundExpression",
     "SliceDerivation",
+    "SqlDerivation",
     "SourceProvenance",
     "StringExpression",
     "UnaryExpression",

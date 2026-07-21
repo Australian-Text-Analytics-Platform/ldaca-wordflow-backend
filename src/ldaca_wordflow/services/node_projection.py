@@ -34,6 +34,8 @@ def canonical_node_info(node: Node) -> dict[str, Any]:
             for source, meta in node.tokenization.items()
             if meta.get("model")
         },
+        "can_undo": node.can_undo,
+        "can_redo": node.can_redo,
     }
 
 

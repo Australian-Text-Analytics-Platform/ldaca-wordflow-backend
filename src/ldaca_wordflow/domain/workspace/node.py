@@ -19,6 +19,12 @@ from .provenance import NodeProvenance, SourceProvenance, referenced_node_ids
 if TYPE_CHECKING:  # pragma: no cover
     from .graph import Workspace
 
+PLAN_HISTORY_LIMIT = 50
+PlanHistorySnapshot = tuple[
+    tuple[pl.LazyFrame, ...],
+    tuple[pl.LazyFrame, ...],
+]
+
 
 class TokenizationMeta(TypedDict):
     """Metadata for one source column's tokenization spec."""
@@ -32,10 +38,9 @@ class TokenizationMeta(TypedDict):
 class Node:
     """One lazy dataset and its explicit lineage inside a workspace.
 
-    ``Workspace`` owns graph registration and persistence. A node contains no
-    undo history and exposes no dataframe-operation facade; application
-    services construct derived nodes explicitly so every aggregate mutation is
-    visible at the use-case boundary.
+    ``Workspace`` owns graph registration and persistence. Runtime-only,
+    plan-only Undo/Redo belongs to the Data Block, while application services
+    remain responsible for constructing and validating replacement plans.
     """
 
     @staticmethod
@@ -63,6 +68,8 @@ class Node:
                 f"(received {type(data).__name__})."
             )
         self._data: pl.LazyFrame = data
+        self._undo_stack: list[pl.LazyFrame] = []
+        self._redo_stack: list[pl.LazyFrame] = []
         self._document_column: str | None = document
         self.color: str | None = color
         self.tokenization = cast(
@@ -98,8 +105,59 @@ class Node:
                 "Node data must be a polars LazyFrame "
                 f"(received {type(value).__name__})."
             )
+        if value is self._data:
+            return
 
+        self._append_bounded(self._undo_stack, self._data)
         self._data = value
+        self._redo_stack.clear()
+
+    @staticmethod
+    def _append_bounded(
+        stack: list[pl.LazyFrame],
+        plan: pl.LazyFrame,
+    ) -> None:
+        stack.append(plan)
+        if len(stack) > PLAN_HISTORY_LIMIT:
+            del stack[0]
+
+    @property
+    def can_undo(self) -> bool:
+        return bool(self._undo_stack)
+
+    @property
+    def can_redo(self) -> bool:
+        return bool(self._redo_stack)
+
+    def undo_data(self) -> bool:
+        """Restore the previous plan without recording a new checkpoint."""
+
+        if not self._undo_stack:
+            return False
+        self._append_bounded(self._redo_stack, self._data)
+        self._data = self._undo_stack.pop()
+        return True
+
+    def redo_data(self) -> bool:
+        """Restore the next plan without recording a new checkpoint."""
+
+        if not self._redo_stack:
+            return False
+        self._append_bounded(self._undo_stack, self._data)
+        self._data = self._redo_stack.pop()
+        return True
+
+    def snapshot_plan_history(self) -> PlanHistorySnapshot:
+        """Capture runtime plan stacks for transaction rollback only."""
+
+        return tuple(self._undo_stack), tuple(self._redo_stack)
+
+    def restore_plan_history(self, snapshot: PlanHistorySnapshot) -> None:
+        """Restore previously captured runtime plan stacks."""
+
+        undo_stack, redo_stack = snapshot
+        self._undo_stack = list(undo_stack[-PLAN_HISTORY_LIMIT:])
+        self._redo_stack = list(redo_stack[-PLAN_HISTORY_LIMIT:])
 
     @property
     def children(self) -> list["Node"]:
@@ -144,4 +202,4 @@ class Node:
         )
 
 
-__all__ = ["Node", "TokenizationMeta"]
+__all__ = ["Node", "PlanHistorySnapshot", "TokenizationMeta"]

@@ -1,10 +1,4 @@
-"""Canonical immutable node-creation, metadata, and row-query resources.
-
-Used by the node router and ``NodeService``. Every data-changing operation is a
-discriminated node creation request: source nodes come from user files and all
-transformations create a derived child. This avoids hidden in-place plan
-mutation and gives every successful operation one addressable resource.
-"""
+"""Canonical Data Block creation, edit, metadata, and row-query resources."""
 
 from __future__ import annotations
 
@@ -91,13 +85,6 @@ class JoinNodeCreateRequest(JoinDerivation):
     name: NodeName | None = None
 
 
-class CastNodeCreateRequest(CastDerivation):
-    """Create a child with one column cast to a supported logical type."""
-
-    source_node_id: uuid.UUID
-    name: NodeName | None = None
-
-
 NodeCreateRequest = Annotated[
     FileNodeCreateRequest
     | CloneNodeCreateRequest
@@ -106,8 +93,7 @@ NodeCreateRequest = Annotated[
     | ReplaceNodeCreateRequest
     | ExpressionNodeCreateRequest
     | ConcatNodeCreateRequest
-    | JoinNodeCreateRequest
-    | CastNodeCreateRequest,
+    | JoinNodeCreateRequest,
     Field(discriminator="kind"),
 ]
 
@@ -118,8 +104,49 @@ NodeDerivationRequest = Annotated[
     | ReplaceNodeCreateRequest
     | ExpressionNodeCreateRequest
     | ConcatNodeCreateRequest
-    | JoinNodeCreateRequest
-    | CastNodeCreateRequest,
+    | JoinNodeCreateRequest,
+    Field(discriminator="kind"),
+]
+
+
+class CastNodeEditRequest(CastDerivation):
+    """Cast one column on the target Data Block."""
+
+
+class RenameColumnNodeEditRequest(_StrictRequest):
+    """Rename one column on the target Data Block."""
+
+    kind: Literal["rename_column"] = "rename_column"
+    column: str = Field(min_length=1, max_length=200)
+    new_name: str = Field(min_length=1, max_length=200)
+
+
+class DeleteColumnNodeEditRequest(_StrictRequest):
+    """Delete one column from the target Data Block."""
+
+    kind: Literal["delete_column"] = "delete_column"
+    column: str = Field(min_length=1, max_length=200)
+
+
+class FilterNodeEditRequest(FilterDerivation):
+    """Replace the target plan with a filtered plan."""
+
+
+class ReplaceNodeEditRequest(ReplaceDerivation):
+    """Replace or extract text on the target Data Block."""
+
+
+class ExpressionNodeEditRequest(ExpressionDerivation):
+    """Apply a typed Polars expression to the target Data Block."""
+
+
+NodeEditRequest = Annotated[
+    CastNodeEditRequest
+    | RenameColumnNodeEditRequest
+    | DeleteColumnNodeEditRequest
+    | FilterNodeEditRequest
+    | ReplaceNodeEditRequest
+    | ExpressionNodeEditRequest,
     Field(discriminator="kind"),
 ]
 

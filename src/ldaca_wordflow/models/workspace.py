@@ -39,6 +39,8 @@ class WorkspaceNodeInfo(_StrictModel):
     shape: tuple[int | None, int | None] = (None, None)
     dtype_normalization: list[DtypeNormalizationChange] | None = None
     tokenizer_models: dict[str, str] = Field(default_factory=dict)
+    can_undo: bool
+    can_redo: bool
 
 
 class WorkspaceResource(_StrictModel):

@@ -1,10 +1,11 @@
-"""Pure builders for canonical immutable node derivations.
+"""Pure builders for Data Block creation and identity-preserving edits.
 
 Used by ``NodeService`` while it holds a function-scoped workspace lease. The
 module contains no FastAPI or persistence code: it resolves source nodes,
 builds and validates one lazy Polars plan, and returns a materialized ``Node``
 only for committed creation calls. Preview calls reuse the same plan builder
-without mutating the workspace graph.
+without mutating the workspace graph; edit calls return an unattached
+replacement plan.
 """
 
 from __future__ import annotations
@@ -24,10 +25,13 @@ from ..domain.workspace.provenance import (
     DerivationInput,
     DerivationOperation,
     DerivationProvenance,
+    ExpressionDerivation,
     ExpressionItem,
     ExpressionSpec,
     FilterCondition,
+    FilterDerivation,
     LiteralExpression,
+    ReplaceDerivation,
     RoundExpression,
     StringExpression,
     UnaryExpression,
@@ -40,13 +44,19 @@ from ..shared.errors import InvalidInputError, NodeNotFoundError
 from ..shared.json_data import JsonData
 from .node_casting import cast_lazyframe_column
 from ..models.node_resources import (
-    CastNodeCreateRequest,
+    CastNodeEditRequest,
     CloneNodeCreateRequest,
     ConcatNodeCreateRequest,
+    DeleteColumnNodeEditRequest,
+    ExpressionNodeEditRequest,
     ExpressionNodeCreateRequest,
+    FilterNodeEditRequest,
     FilterNodeCreateRequest,
     JoinNodeCreateRequest,
     NodeDerivationRequest,
+    NodeEditRequest,
+    RenameColumnNodeEditRequest,
+    ReplaceNodeEditRequest,
     ReplaceNodeCreateRequest,
     SliceNodeCreateRequest,
 )
@@ -173,10 +183,13 @@ def build_derived_lazyframe(
         if request.how == "cross":
             result = left.data.join(right.data, how="cross")
         else:
+            left_on = cast(str, request.left_on)
+            right_on = cast(str, request.right_on)
+            _validate_join_keys(left, right, left_on, right_on)
             result = left.data.join(
                 right.data,
-                left_on=cast(str, request.left_on),
-                right_on=cast(str, request.right_on),
+                left_on=left_on,
+                right_on=right_on,
                 how=request.how,
             )
         return (
@@ -186,23 +199,90 @@ def build_derived_lazyframe(
             [left, right],
         )
 
-    if isinstance(request, CastNodeCreateRequest):
-        source = _node(workspace, request.source_node_id)
+    raise InvalidInputError("Unsupported node operation")
+
+
+def build_edited_lazyframe(
+    node: Node,
+    request: NodeEditRequest,
+) -> tuple[pl.LazyFrame, tuple[str, str] | None]:
+    """Build a replacement plan without mutating the target Data Block."""
+
+    if isinstance(request, CastNodeEditRequest):
+        source_type = node.data.collect_schema().get(request.column)
+        if source_type is None:
+            raise InvalidInputError("Cast column is not present on the Data Block")
+        if _cast_is_no_op(
+            source_type,
+            request.target_type,
+            datetime_format=request.datetime_format,
+        ):
+            return node.data, None
         result = cast_lazyframe_column(
-            source.data,
+            node.data,
             column_name=request.column,
             target_type=request.target_type,
             datetime_format=request.datetime_format,
             strict=request.strict,
         )
-        return (
-            result.lazyframe,
-            f"{source.name}_{request.column}_{request.target_type}",
-            operation,
-            [source],
+        return result.lazyframe, None
+
+    if isinstance(request, RenameColumnNodeEditRequest):
+        schema_names = node.data.collect_schema().names()
+        if request.column not in schema_names:
+            raise InvalidInputError("Rename column is not present on the Data Block")
+        new_name = request.new_name.strip()
+        if not new_name:
+            raise InvalidInputError("New column name cannot be blank")
+        if new_name == request.column:
+            return node.data, None
+        if new_name in schema_names:
+            raise InvalidInputError("New column name already exists on the Data Block")
+        return node.data.rename({request.column: new_name}), (
+            request.column,
+            new_name,
         )
 
-    raise InvalidInputError("Unsupported node operation")
+    if isinstance(request, DeleteColumnNodeEditRequest):
+        if request.column not in node.data.collect_schema().names():
+            raise InvalidInputError("Delete column is not present on the Data Block")
+        return node.data.drop(request.column), None
+
+    if isinstance(request, FilterNodeEditRequest):
+        schema = dict(node.data.collect_schema().items())
+        return node.data.filter(_filter_expression(request, schema)), None
+
+    if isinstance(request, ReplaceNodeEditRequest):
+        _output_column, expression = _replace_expression(node, request)
+        return node.data.with_columns(expression), None
+
+    if isinstance(request, ExpressionNodeEditRequest):
+        return _apply_expression(node.data, request), None
+
+    raise InvalidInputError("Unsupported Data Block Edit")
+
+
+def _cast_is_no_op(
+    source_type: pl.DataType,
+    target_type: str,
+    *,
+    datetime_format: str | None,
+) -> bool:
+    """Return whether the requested canonical cast preserves the current dtype."""
+
+    if target_type == "string":
+        return source_type == pl.String
+    if target_type == "integer":
+        return source_type == pl.Int64
+    if target_type == "float":
+        return source_type == pl.Float64
+    if target_type == "categorical":
+        return source_type == pl.Categorical
+    return (
+        target_type == "datetime"
+        and isinstance(source_type, pl.Datetime)
+        and datetime_format is None
+    )
 
 
 def _node(workspace: Workspace, node_id: str | uuid.UUID) -> Node:
@@ -210,6 +290,48 @@ def _node(workspace: Workspace, node_id: str | uuid.UUID) -> Node:
     if node is None:
         raise NodeNotFoundError("Node not found")
     return node
+
+
+def _validate_join_keys(
+    left: Node,
+    right: Node,
+    left_on: str,
+    right_on: str,
+) -> None:
+    """Reject missing or incompatible join keys before Polars builds the plan."""
+
+    left_schema = left.data.collect_schema()
+    right_schema = right.data.collect_schema()
+    if left_on not in left_schema:
+        raise InvalidInputError(f'Join left column "{left_on}" was not found')
+    if right_on not in right_schema:
+        raise InvalidInputError(f'Join right column "{right_on}" was not found')
+
+    left_dtype = left_schema[left_on]
+    right_dtype = right_schema[right_on]
+    if left_dtype != right_dtype:
+        raise InvalidInputError(
+            "Join columns have incompatible data types: "
+            f'"{left_on}" is {_join_dtype_label(left_dtype)}, '
+            f'but "{right_on}" is {_join_dtype_label(right_dtype)}. '
+            "Choose columns with the same data type or cast one column first."
+        )
+
+
+def _join_dtype_label(dtype: pl.DataType) -> str:
+    """Format one join-key dtype in concise user-facing language."""
+
+    if dtype == pl.String:
+        return "string"
+    if dtype.is_integer():
+        return f"integer ({dtype})"
+    if dtype.is_float():
+        return f"floating-point number ({dtype})"
+    if dtype == pl.Boolean:
+        return "boolean"
+    if dtype.is_temporal():
+        return f"date/time ({dtype})"
+    return str(dtype)
 
 
 def _slice(
@@ -256,7 +378,7 @@ def _provenance_inputs(
 
 
 def _filter_expression(
-    request: FilterNodeCreateRequest,
+    request: FilterDerivation,
     schema: dict[str, pl.DataType],
 ) -> pl.Expr:
     expressions = [
@@ -404,7 +526,7 @@ def _topic_distribution_expression(condition: FilterCondition) -> pl.Expr:
 
 def _replace_expression(
     source: Node,
-    request: ReplaceNodeCreateRequest,
+    request: ReplaceDerivation,
 ) -> tuple[str, pl.Expr]:
     if request.source_column not in source.data.collect_schema().names():
         raise InvalidInputError("Replace source column is not present on the node")
@@ -547,7 +669,7 @@ def _compile_item(item: ExpressionItem, columns: set[str]) -> pl.Expr:
 
 def _apply_expression(
     lazyframe: pl.LazyFrame,
-    request: ExpressionNodeCreateRequest,
+    request: ExpressionDerivation,
 ) -> pl.LazyFrame:
     columns = set(lazyframe.collect_schema().names())
     if request.context == "filter":
@@ -667,4 +789,8 @@ def _propagated_document(parents: list[Node], lazyframe: pl.LazyFrame) -> str | 
     return next(iter(values)) if len(values) == 1 else None
 
 
-__all__ = ["build_derived_lazyframe", "build_derived_node"]
+__all__ = [
+    "build_derived_lazyframe",
+    "build_derived_node",
+    "build_edited_lazyframe",
+]

@@ -17,7 +17,7 @@ import os
 import shutil
 import stat
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -28,6 +28,7 @@ from typing import Any, Literal, TypeVar, cast
 import anyio
 from anyio.to_thread import run_sync as run_sync_in_worker_thread
 from ..domain.workspace import Tab, Workspace
+from ..domain.workspace.node import PlanHistorySnapshot
 from ..domain.events import EventResourceType
 from ..domain.background import BackgroundState, Progress
 from ..infrastructure.storage.workspace_store import (
@@ -1228,6 +1229,10 @@ class WorkspaceService:
                 if analysis_id in before_live
             }
             before_corrupt = lease.workspace.corrupt_analysis_ids & before_live
+            before_node_histories = {
+                node_id: node.snapshot_plan_history()
+                for node_id, node in lease.workspace.nodes.items()
+            }
             try:
                 yield lease
                 if lease.commit_requested:
@@ -1241,7 +1246,11 @@ class WorkspaceService:
                         lease.rollback_analysis_directories,
                         lease.path,
                     )
-                    await self._restore_slot(slot, lease.path)
+                    await self._restore_slot(
+                        slot,
+                        lease.path,
+                        node_histories=before_node_histories,
+                    )
                 raise
             else:
                 lease.rollback_paths.clear()
@@ -1255,7 +1264,13 @@ class WorkspaceService:
                         before_corrupt=before_corrupt,
                     )
 
-    async def _restore_slot(self, slot: _WorkspaceSlot, path: Path) -> None:
+    async def _restore_slot(
+        self,
+        slot: _WorkspaceSlot,
+        path: Path,
+        *,
+        node_histories: Mapping[str, PlanHistorySnapshot],
+    ) -> None:
         """Reload committed state after an in-memory command fails."""
 
         previous_bytes = slot.serialized_bytes
@@ -1269,6 +1284,10 @@ class WorkspaceService:
                 await self._reserve_open_capacity(serialized_bytes - previous_bytes)
             elif serialized_bytes < previous_bytes:
                 await self._release_open_capacity(previous_bytes - serialized_bytes)
+            for node_id, history in node_histories.items():
+                node = workspace.nodes.get(node_id)
+                if node is not None:
+                    node.restore_plan_history(history)
         except BaseException:
             logger.exception(
                 "Failed to restore Workspace after rejected mutation workspace_id=%s",

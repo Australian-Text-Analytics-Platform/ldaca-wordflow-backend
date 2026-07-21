@@ -1,6 +1,6 @@
-"""Polars column-casting use case for immutable Data Block derivations.
+"""Polars column-casting builder for identity-preserving Data Block Edits.
 
-Used by ``node_operations`` while it builds a derived lazy plan. This module
+Used by ``node_operations`` while it builds a replacement lazy plan. This module
 owns the cast expression and validation details; ``NodeService`` owns workspace
 mutation and persistence.
 
@@ -29,8 +29,8 @@ TIMEZONE_FORMAT_TOKENS = ("%z", "%:z", "%#z")
 class CastLazyFrameColumnResult:
     """Result metadata for a successful lazy-frame column cast.
 
-    Used by ``cast_lazyframe_column`` and the derivation builder, which needs
-    the new lazy frame and the before/after dtype metadata for provenance.
+    Used by ``cast_lazyframe_column`` and the edit builder, which needs the new
+    lazy frame plus before/after dtype metadata for validation.
     """
 
     lazyframe: pl.LazyFrame
@@ -147,7 +147,7 @@ def cast_lazyframe_column(
     """Return a new LazyFrame with one column cast to the requested dtype.
 
     Used by ``node_operations`` as the single operation that validates and
-    builds a casted lazy plan before the new child is attached.
+    builds a casted lazy plan before the selected Data Block is updated.
 
     Flow:
     - Capture source dtype metadata from the lazy schema.

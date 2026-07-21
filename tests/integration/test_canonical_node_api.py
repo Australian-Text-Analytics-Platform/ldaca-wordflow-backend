@@ -10,7 +10,7 @@ from ldaca_wordflow.main import create_app
 from ldaca_wordflow.settings import Settings
 
 
-def test_source_node_resource_and_one_based_rows(tmp_path: Path) -> None:
+def test_source_node_resource_schema_and_removed_rows_route(tmp_path: Path) -> None:
     settings = Settings(
         data_root=tmp_path,
         multi_user=False,
@@ -90,9 +90,16 @@ def test_source_node_resource_and_one_based_rows(tmp_path: Path) -> None:
         )
         assert empty_patch.status_code == 422
 
-        rows = client.get(
-            f"/api/workspaces/{workspace_id}/nodes/{node_id}/rows",
-            params={"page": 1, "page_size": 1},
+        rows = client.post(
+            f"/api/workspaces/{workspace_id}/sql",
+            json={
+                "mode": "query",
+                "node_ids": [node_id],
+                "sql": f'SELECT * FROM "{node_id}"',
+                "page": 1,
+                "page_size": 1,
+            },
+            headers=unsafe,
         )
         assert rows.status_code == 200
         assert rows.headers["x-wordflow-has-next"] == "true"
@@ -110,12 +117,10 @@ def test_source_node_resource_and_one_based_rows(tmp_path: Path) -> None:
             {"text": pl.String, "count": pl.Int64}
         )
 
-        zero = client.get(
+        removed_rows = client.get(
             f"/api/workspaces/{workspace_id}/nodes/{node_id}/rows",
-            params={"page": 0},
         )
-        assert zero.status_code == 422
-        assert zero.json()["code"] == "request_validation_failed"
+        assert removed_rows.status_code == 404
 
         deleted = client.delete(
             f"/api/workspaces/{workspace_id}/nodes/{node_id}",
@@ -209,3 +214,363 @@ def test_derived_nodes_share_one_creation_contract_and_preview_is_read_only(
         )
         assert next_command.status_code == 201
         assert next_command.headers["etag"] != derived.headers["etag"]
+
+
+def test_derivation_preview_reports_safe_operation_errors(tmp_path: Path) -> None:
+    """Preview explains known failures and safely classifies other Polars errors."""
+
+    settings = Settings(
+        data_root=tmp_path,
+        multi_user=False,
+        session_cookie_secure=False,
+        cors_allowed_origins=("http://testserver",),
+        trusted_hosts=("testserver",),
+    )
+    with TestClient(
+        create_app(settings, serve_frontend=False),
+        base_url="http://testserver",
+    ) as client:
+        csrf = client.get("/api/session").json()["csrf_token"]
+        unsafe = {"Origin": "http://testserver", "X-CSRF-Token": csrf}
+        for path, content in (
+            ("tweets.csv", b"tweet_id,username\n1,alice\n"),
+            ("candidates.csv", b"party,username\nExample Party,alice\n"),
+        ):
+            assert (
+                client.post(
+                    "/api/user-files/uploads",
+                    params={"path": path},
+                    content=content,
+                    headers={**unsafe, "Content-Type": "application/octet-stream"},
+                ).status_code
+                == 201
+            )
+
+        workspace = client.post(
+            "/api/workspaces",
+            json={"name": "Join validation"},
+            headers=unsafe,
+        )
+        workspace_id = workspace.json()["id"]
+        assert (
+            client.put(f"/api/workspaces/{workspace_id}/open", headers=unsafe).status_code
+            == 200
+        )
+        node_ids = [
+            client.post(
+                f"/api/workspaces/{workspace_id}/nodes",
+                json={"kind": "file", "file_path": path},
+                headers=unsafe,
+            ).json()["id"]
+            for path in ("tweets.csv", "candidates.csv")
+        ]
+
+        preview = client.post(
+            f"/api/workspaces/{workspace_id}/nodes/previews",
+            json={
+                "kind": "join",
+                "left_node_id": node_ids[0],
+                "right_node_id": node_ids[1],
+                "left_on": "tweet_id",
+                "right_on": "party",
+                "how": "left",
+            },
+            headers=unsafe,
+        )
+
+        assert preview.status_code == 400
+        assert preview.headers["access-control-allow-origin"] == "http://testserver"
+        assert preview.headers["x-request-id"] == preview.json()["request_id"]
+        assert preview.json()["code"] == "invalid_input"
+        assert preview.json()["message"] == (
+            'Join columns have incompatible data types: "tweet_id" is integer (Int64), '
+            'but "party" is string. Choose columns with the same data type or cast one '
+            "column first."
+        )
+
+        other_polars_error = client.post(
+            f"/api/workspaces/{workspace_id}/nodes/previews",
+            json={
+                "kind": "expression",
+                "source_node_id": node_ids[0],
+                "context": "with_columns",
+                "expressions": [
+                    {
+                        "alias": "username_as_integer",
+                        "expression": {
+                            "op": "cast",
+                            "operand": {"op": "column", "name": "username"},
+                            "dtype": "integer",
+                            "strict": True,
+                        },
+                    }
+                ],
+            },
+            headers=unsafe,
+        )
+
+        assert other_polars_error.status_code == 400
+        assert other_polars_error.json()["code"] == "invalid_input"
+        assert other_polars_error.json()["message"] == (
+            "The Data Block operation could not be applied to the selected data"
+        )
+        assert "alice" not in other_polars_error.text
+
+
+def test_data_block_edits_preserve_identity_history_and_frozen_descendants(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(
+        data_root=tmp_path,
+        multi_user=False,
+        session_cookie_secure=False,
+        cors_allowed_origins=("http://testserver",),
+        trusted_hosts=("testserver",),
+    )
+    with TestClient(
+        create_app(settings, serve_frontend=False),
+        base_url="http://testserver",
+    ) as client:
+        csrf = client.get("/api/session").json()["csrf_token"]
+        unsafe = {"Origin": "http://testserver", "X-CSRF-Token": csrf}
+        assert (
+            client.post(
+                "/api/user-files/uploads",
+                params={"path": "editable.csv"},
+                content=b"text,count,dropme\nhello,1,x\nworld,2,y\n",
+                headers={**unsafe, "Content-Type": "application/octet-stream"},
+            ).status_code
+            == 201
+        )
+        workspace = client.post(
+            "/api/workspaces",
+            json={"name": "Editable"},
+            headers=unsafe,
+        )
+        workspace_id = workspace.json()["id"]
+        assert (
+            client.put(f"/api/workspaces/{workspace_id}/open", headers=unsafe).status_code
+            == 200
+        )
+        source = client.post(
+            f"/api/workspaces/{workspace_id}/nodes",
+            json={"kind": "file", "file_path": "editable.csv"},
+            headers=unsafe,
+        )
+        source_id = source.json()["id"]
+        assert source.json()["can_undo"] is False
+        assert source.json()["can_redo"] is False
+        selected_document = client.patch(
+            f"/api/workspaces/{workspace_id}/nodes/{source_id}",
+            json={"document": "text"},
+            headers=unsafe,
+        )
+        assert selected_document.status_code == 200
+
+        empty_undo = client.post(
+            f"/api/workspaces/{workspace_id}/nodes/{source_id}/undo",
+            headers=unsafe,
+        )
+        assert empty_undo.status_code == 409
+        assert empty_undo.json()["code"] == "resource_conflict"
+
+        child = client.post(
+            f"/api/workspaces/{workspace_id}/nodes",
+            json={"kind": "clone", "source_node_id": source_id},
+            headers=unsafe,
+        )
+        child_id = child.json()["id"]
+        assert child.json()["can_undo"] is False
+        assert child.json()["can_redo"] is False
+        child_rows_before = client.post(
+            f"/api/workspaces/{workspace_id}/sql",
+            json={
+                "mode": "query",
+                "node_ids": [child_id],
+                "sql": f'SELECT * FROM "{child_id}"',
+            },
+            headers=unsafe,
+        ).content
+
+        edits = [
+            {"kind": "cast", "column": "count", "target_type": "string"},
+            {
+                "kind": "rename_column",
+                "column": "count",
+                "new_name": "score",
+            },
+            {"kind": "delete_column", "column": "dropme"},
+            {
+                "kind": "filter",
+                    "conditions": [
+                        {"column": "score", "operator": "contains", "value": "2"}
+                    ],
+                },
+            {
+                "kind": "replace",
+                "source_column": "text",
+                "pattern": "world",
+                "replacement": "earth",
+                "output_column": "clean_text",
+            },
+            {
+                "kind": "expression",
+                "context": "with_columns",
+                "expressions": [
+                    {
+                        "alias": "upper_text",
+                        "expression": {
+                            "op": "uppercase",
+                            "operand": {"op": "column", "name": "text"},
+                        },
+                    }
+                ],
+            },
+        ]
+        previous_etag = child.headers["etag"]
+        for edit in edits:
+            edited = client.post(
+                f"/api/workspaces/{workspace_id}/nodes/{source_id}/edits",
+                json=edit,
+                headers=unsafe,
+            )
+            assert edited.status_code == 200, edited.text
+            assert edited.json()["id"] == source_id
+            assert edited.json()["provenance"] == {"type": "source"}
+            assert edited.json()["can_undo"] is True
+            assert edited.json()["can_redo"] is False
+            assert edited.headers["etag"] != previous_etag
+            previous_etag = edited.headers["etag"]
+            nodes = client.get(f"/api/workspaces/{workspace_id}/nodes").json()
+            assert [node["id"] for node in nodes] == [source_id, child_id]
+
+        child_rows_after = client.post(
+            f"/api/workspaces/{workspace_id}/sql",
+            json={
+                "mode": "query",
+                "node_ids": [child_id],
+                "sql": f'SELECT * FROM "{child_id}"',
+            },
+            headers=unsafe,
+        ).content
+        assert child_rows_after == child_rows_before
+
+        undone = client.post(
+            f"/api/workspaces/{workspace_id}/nodes/{source_id}/undo",
+            headers=unsafe,
+        )
+        assert undone.status_code == 200
+        assert undone.json()["can_undo"] is True
+        assert undone.json()["can_redo"] is True
+        undone_schema = pl.read_ipc_stream(
+            BytesIO(
+                client.get(
+                    f"/api/workspaces/{workspace_id}/nodes/{source_id}/schema"
+                ).content
+            )
+        ).schema
+        assert "upper_text" not in undone_schema
+
+        redone = client.post(
+            f"/api/workspaces/{workspace_id}/nodes/{source_id}/redo",
+            headers=unsafe,
+        )
+        assert redone.status_code == 200
+        assert redone.json()["can_redo"] is False
+        assert "upper_text" in pl.read_ipc_stream(
+            BytesIO(
+                client.get(
+                    f"/api/workspaces/{workspace_id}/nodes/{source_id}/schema"
+                ).content
+            )
+        ).schema
+
+        renamed_document = client.post(
+            f"/api/workspaces/{workspace_id}/nodes/{source_id}/edits",
+            json={
+                "kind": "rename_column",
+                "column": "text",
+                "new_name": "body",
+            },
+            headers=unsafe,
+        )
+        assert renamed_document.status_code == 200
+        assert renamed_document.json()["document"] == "body"
+        deleted_document = client.post(
+            f"/api/workspaces/{workspace_id}/nodes/{source_id}/edits",
+            json={"kind": "delete_column", "column": "body"},
+            headers=unsafe,
+        )
+        assert deleted_document.status_code == 200
+        assert deleted_document.json()["document"] is None
+
+        assert (
+            client.delete(
+                f"/api/workspaces/{workspace_id}/open",
+                headers=unsafe,
+            ).status_code
+            == 204
+        )
+        assert (
+            client.put(f"/api/workspaces/{workspace_id}/open", headers=unsafe).status_code
+            == 200
+        )
+        reopened = client.get(
+            f"/api/workspaces/{workspace_id}/nodes/{source_id}"
+        ).json()
+        assert reopened["can_undo"] is False
+        assert reopened["can_redo"] is False
+        assert "upper_text" in pl.read_ipc_stream(
+            BytesIO(
+                client.get(
+                    f"/api/workspaces/{workspace_id}/nodes/{source_id}/schema"
+                ).content
+            )
+        ).schema
+        no_op_etag = client.get(
+            f"/api/workspaces/{workspace_id}/nodes/{source_id}"
+        ).headers["etag"]
+        no_op_cast = client.post(
+            f"/api/workspaces/{workspace_id}/nodes/{source_id}/edits",
+            json={
+                "kind": "cast",
+                "column": "score",
+                "target_type": "string",
+            },
+            headers=unsafe,
+        )
+        assert no_op_cast.status_code == 200
+        assert no_op_cast.headers["etag"] == no_op_etag
+        assert no_op_cast.json()["can_undo"] is False
+        assert no_op_cast.json()["can_redo"] is False
+        no_op_edit = client.post(
+            f"/api/workspaces/{workspace_id}/nodes/{source_id}/edits",
+            json={
+                "kind": "rename_column",
+                "column": "score",
+                "new_name": "score",
+            },
+            headers=unsafe,
+        )
+        assert no_op_edit.status_code == 200
+        assert no_op_edit.headers["etag"] == no_op_etag
+        assert no_op_edit.json()["can_undo"] is False
+        assert no_op_edit.json()["can_redo"] is False
+
+        cast_creation = client.post(
+            f"/api/workspaces/{workspace_id}/nodes",
+            json={
+                "kind": "cast",
+                "source_node_id": source_id,
+                "column": "score",
+                "target_type": "integer",
+            },
+            headers=unsafe,
+        )
+        assert cast_creation.status_code == 422
+        sample_edit = client.post(
+            f"/api/workspaces/{workspace_id}/nodes/{source_id}/edits",
+            json={"kind": "slice", "mode": "slice", "offset": 0, "length": 1},
+            headers=unsafe,
+        )
+        assert sample_edit.status_code == 422

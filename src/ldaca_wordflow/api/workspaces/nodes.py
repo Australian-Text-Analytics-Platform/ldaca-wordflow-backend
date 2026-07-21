@@ -18,6 +18,7 @@ from fastapi import (
 from ...models.node_resources import (
     NodeCreateRequest,
     NodeDerivationRequest,
+    NodeEditRequest,
     NodeUpdateRequest,
 )
 from ...models.workspace import WorkspaceNodeInfo
@@ -165,6 +166,77 @@ async def update_node(
     return node
 
 
+@router.post(
+    "/{node_id}/edits",
+    response_model=WorkspaceNodeInfo,
+    responses=api_errors(400, 403, 404, 409, 422, 507),
+)
+async def edit_node(
+    workspace_id: uuid.UUID,
+    node_id: uuid.UUID,
+    request: NodeEditRequest,
+    response: Response,
+    principal: Annotated[SessionPrincipal, Security(get_current_session)],
+    runtime: Runtime = Depends(get_runtime),
+) -> WorkspaceNodeInfo:
+    """Apply one identity-preserving Data Block Edit."""
+
+    node, revision = await runtime.node_service.edit(
+        principal.user.id,
+        str(workspace_id),
+        str(node_id),
+        request,
+    )
+    response.headers["ETag"] = workspace_etag(revision)
+    return node
+
+
+@router.post(
+    "/{node_id}/undo",
+    response_model=WorkspaceNodeInfo,
+    responses=api_errors(403, 404, 409, 422, 507),
+)
+async def undo_node(
+    workspace_id: uuid.UUID,
+    node_id: uuid.UUID,
+    response: Response,
+    principal: Annotated[SessionPrincipal, Security(get_current_session)],
+    runtime: Runtime = Depends(get_runtime),
+) -> WorkspaceNodeInfo:
+    """Restore the Data Block's previous session plan."""
+
+    node, revision = await runtime.node_service.undo(
+        principal.user.id,
+        str(workspace_id),
+        str(node_id),
+    )
+    response.headers["ETag"] = workspace_etag(revision)
+    return node
+
+
+@router.post(
+    "/{node_id}/redo",
+    response_model=WorkspaceNodeInfo,
+    responses=api_errors(403, 404, 409, 422, 507),
+)
+async def redo_node(
+    workspace_id: uuid.UUID,
+    node_id: uuid.UUID,
+    response: Response,
+    principal: Annotated[SessionPrincipal, Security(get_current_session)],
+    runtime: Runtime = Depends(get_runtime),
+) -> WorkspaceNodeInfo:
+    """Restore the Data Block's next session plan."""
+
+    node, revision = await runtime.node_service.redo(
+        principal.user.id,
+        str(workspace_id),
+        str(node_id),
+    )
+    response.headers["ETag"] = workspace_etag(revision)
+    return node
+
+
 @router.delete(
     "/{node_id}",
     status_code=status.HTTP_204_NO_CONTENT,
@@ -187,38 +259,6 @@ async def delete_node(
         status_code=status.HTTP_204_NO_CONTENT,
         headers={"ETag": workspace_etag(revision)},
     )
-
-
-@router.get(
-    "/{node_id}/rows",
-    response_class=Response,
-    responses={**api_errors(400, 404, 422), **ARROW_STREAM_RESPONSE},
-)
-async def get_node_rows(
-    workspace_id: uuid.UUID,
-    node_id: uuid.UUID,
-    response: Response,
-    principal: Annotated[SessionPrincipal, Security(get_current_session)],
-    page: int = Query(1, ge=1),
-    page_size: int = Query(50, ge=1, le=500),
-    sort_by: str | None = Query(None),
-    descending: bool = Query(False),
-    runtime: Runtime = Depends(get_runtime),
-) -> Response:
-    """Materialize one bounded, one-based page from a lazy node plan."""
-
-    rows, revision = await runtime.node_service.rows(
-        principal.user.id,
-        str(workspace_id),
-        str(node_id),
-        page=page,
-        page_size=page_size,
-        sort_by=sort_by,
-        descending=descending,
-    )
-    result = arrow_page_response(rows)
-    result.headers["ETag"] = workspace_etag(revision)
-    return result
 
 
 @router.get(

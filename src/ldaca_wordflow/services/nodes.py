@@ -7,12 +7,12 @@ import tempfile
 import uuid
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 import anyio
 import polars as pl
 from anyio.to_thread import run_sync as run_sync_in_worker_thread
-from ..domain.workspace import Node, Workspace
+from ..domain.workspace import Node, TokenizationMeta, Workspace
 
 from ..infrastructure.storage.data_loading import (
     DataFileLoadError,
@@ -37,10 +37,15 @@ from ..models.node_resources import (
     FileNodeCreateRequest,
     NodeCreateRequest,
     NodeDerivationRequest,
+    NodeEditRequest,
     NodeUpdateRequest,
 )
 from ..models.workspace import WorkspaceNodeInfo
-from .node_operations import build_derived_lazyframe, build_derived_node
+from .node_operations import (
+    build_derived_lazyframe,
+    build_derived_node,
+    build_edited_lazyframe,
+)
 from .node_projection import canonical_node_info
 from ..infrastructure.storage.layout import (
     NODE_SOURCE_STAGING_PREFIX,
@@ -287,6 +292,88 @@ class NodeService:
             info = await self._run_io(canonical_node_info, node)
         return WorkspaceNodeInfo.model_validate(info), lease.revision
 
+    async def edit(
+        self,
+        user_id: str,
+        workspace_id: str,
+        node_id: str,
+        request: NodeEditRequest,
+    ) -> tuple[WorkspaceNodeInfo, int]:
+        """Replace one Data Block plan without changing its graph identity."""
+
+        async with self._workspaces.mutation_context(
+            user_id,
+            workspace_id,
+        ) as lease:
+            node = _editable_node(lease.workspace, node_id)
+            lazyframe, renamed_column = await self._run_io(
+                build_edited_lazyframe,
+                node,
+                request,
+            )
+            if lazyframe is node.data:
+                lease.commit_requested = False
+            else:
+                await self._run_io(_validate_edit_schema, lazyframe)
+                node.data = lazyframe
+                if renamed_column is not None:
+                    _retarget_column_metadata(node, *renamed_column)
+                await self._run_io(_reconcile_node_metadata, node)
+            info = await self._run_io(canonical_node_info, node)
+        return WorkspaceNodeInfo.model_validate(info), lease.revision
+
+    async def undo(
+        self,
+        user_id: str,
+        workspace_id: str,
+        node_id: str,
+    ) -> tuple[WorkspaceNodeInfo, int]:
+        """Restore one Data Block's previous runtime plan."""
+
+        return await self._move_history(
+            user_id,
+            workspace_id,
+            node_id,
+            redo=False,
+        )
+
+    async def redo(
+        self,
+        user_id: str,
+        workspace_id: str,
+        node_id: str,
+    ) -> tuple[WorkspaceNodeInfo, int]:
+        """Restore one Data Block's next runtime plan."""
+
+        return await self._move_history(
+            user_id,
+            workspace_id,
+            node_id,
+            redo=True,
+        )
+
+    async def _move_history(
+        self,
+        user_id: str,
+        workspace_id: str,
+        node_id: str,
+        *,
+        redo: bool,
+    ) -> tuple[WorkspaceNodeInfo, int]:
+        async with self._workspaces.mutation_context(
+            user_id,
+            workspace_id,
+        ) as lease:
+            node = _editable_node(lease.workspace, node_id)
+            moved = node.redo_data() if redo else node.undo_data()
+            if not moved:
+                action = "redo" if redo else "undo"
+                raise ResourceConflictError(f"Nothing to {action}")
+            await self._run_io(_validate_edit_schema, node.data)
+            await self._run_io(_reconcile_node_metadata, node)
+            info = await self._run_io(canonical_node_info, node)
+        return WorkspaceNodeInfo.model_validate(info), lease.revision
+
     async def delete(
         self,
         user_id: str,
@@ -305,31 +392,6 @@ class NodeService:
             if not lease.workspace.remove_node(node_id):
                 raise NodeNotFoundError("Node not found")
         return lease.revision
-
-    async def rows(
-        self,
-        user_id: str,
-        workspace_id: str,
-        node_id: str,
-        *,
-        page: int,
-        page_size: int,
-        sort_by: str | None,
-        descending: bool,
-    ) -> tuple[IpcTablePage, int]:
-        async with self._workspaces.read_context(user_id, workspace_id) as lease:
-            node = lease.workspace.nodes.get(node_id)
-            if node is None:
-                raise NodeNotFoundError("Node not found")
-            response = await self._run_io(
-                _materialize_rows,
-                node.data,
-                page,
-                page_size,
-                sort_by,
-                descending,
-            )
-            return response, lease.revision
 
     async def schema(
         self,
@@ -435,15 +497,67 @@ def _preview_derivation(
     page: int,
     page_size: int,
 ) -> IpcTablePage:
-    lazyframe, _name, _operation, _parents = build_derived_lazyframe(
-        workspace,
-        request,
-    )
-    return _materialize_rows(lazyframe, page, page_size, None, False)
+    try:
+        lazyframe, _name, _operation, _parents = build_derived_lazyframe(
+            workspace,
+            request,
+        )
+        return _materialize_rows(lazyframe, page, page_size, None, False)
+    except (
+        pl.exceptions.ColumnNotFoundError,
+        pl.exceptions.InvalidOperationError,
+        pl.exceptions.SchemaError,
+        pl.exceptions.ShapeError,
+    ) as exc:
+        raise InvalidInputError(
+            "The Data Block operation could not be applied to the selected data"
+        ) from exc
 
 
 def _schema_names(lazyframe: pl.LazyFrame) -> list[str]:
     return lazyframe.collect_schema().names()
+
+
+def _editable_node(workspace: Workspace, node_id: str) -> Node:
+    node = workspace.nodes.get(node_id)
+    if node is None:
+        raise NodeNotFoundError("Node not found")
+    if node_id in workspace.reserved_node_ids():
+        raise DataBlockInUseError("Data Block is reserved by an Analysis")
+    return node
+
+
+def _validate_edit_schema(lazyframe: pl.LazyFrame) -> None:
+    try:
+        lazyframe.collect_schema()
+    except Exception as exc:
+        raise InvalidInputError(
+            "The Data Block Edit does not produce a valid schema"
+        ) from exc
+
+
+def _retarget_column_metadata(node: Node, old_name: str, new_name: str) -> None:
+    if node.document == old_name:
+        node.document = new_name
+    retargeted: dict[str, TokenizationMeta] = {}
+    for source_column, metadata in node.tokenization.items():
+        updated = dict(metadata)
+        if updated.get("column_name") == old_name:
+            updated["column_name"] = new_name
+        target_source = new_name if source_column == old_name else source_column
+        retargeted[target_source] = cast(TokenizationMeta, updated)
+    node.tokenization = retargeted
+
+
+def _reconcile_node_metadata(node: Node) -> None:
+    columns = set(node.data.collect_schema().names())
+    if node.document not in columns:
+        node.document = None
+    node.tokenization = {
+        source_column: cast(TokenizationMeta, dict(metadata))
+        for source_column, metadata in node.tokenization.items()
+        if source_column in columns and metadata.get("column_name") in columns
+    }
 
 
 def _unlink(path: Path) -> None:

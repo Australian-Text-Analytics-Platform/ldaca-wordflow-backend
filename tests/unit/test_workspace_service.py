@@ -19,7 +19,7 @@ from ldaca_wordflow.shared.errors import (
     WorkspaceNotFoundError,
     WorkspaceNotOpenError,
 )
-from ldaca_wordflow.domain.workspace import Workspace
+from ldaca_wordflow.domain.workspace import Node, Workspace
 from ldaca_wordflow.infrastructure.storage.workspace_access import (
     write_workspace_owner,
 )
@@ -367,6 +367,49 @@ async def test_failed_metadata_commit_removes_published_mutation_files(
             lease.rollback_paths.append(published)
 
     assert not published.exists()
+
+
+@pytest.mark.anyio
+async def test_failed_publication_restores_plan_and_preexisting_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service(tmp_path)
+    created = await service.create_workspace("user", "Plan rollback", "")
+    await service.open_workspace("user", created.id)
+
+    async with service.mutation_context("user", created.id) as lease:
+        node = lease.workspace.add_node(
+            Node(data=pl.DataFrame({"value": [1]}).lazy(), name="source")
+        )
+        node_id = node.id
+    async with service.mutation_context("user", created.id) as lease:
+        lease.workspace.nodes[node_id].data = pl.DataFrame({"value": [2]}).lazy()
+    async with service.mutation_context("user", created.id) as lease:
+        lease.workspace.nodes[node_id].data = pl.DataFrame({"value": [3]}).lazy()
+    async with service.mutation_context("user", created.id) as lease:
+        assert lease.workspace.nodes[node_id].undo_data()
+
+    async def fail_persist(*_args: object, **_kwargs: object) -> int:
+        raise OSError("simulated plan publication failure")
+
+    monkeypatch.setattr(service, "_persist", fail_persist)
+    with pytest.raises(OSError, match="simulated plan publication failure"):
+        async with service.mutation_context("user", created.id) as lease:
+            lease.workspace.nodes[node_id].data = pl.DataFrame(
+                {"value": [4]}
+            ).lazy()
+
+    async with service.read_context("user", created.id) as lease:
+        restored = lease.workspace.nodes[node_id]
+        assert restored.data.collect().item() == 2
+        assert restored.can_undo
+        assert restored.can_redo
+        assert restored.redo_data()
+        assert restored.data.collect().item() == 3
+        assert restored.undo_data()
+        assert restored.undo_data()
+        assert restored.data.collect().item() == 1
 
 
 @pytest.mark.anyio
