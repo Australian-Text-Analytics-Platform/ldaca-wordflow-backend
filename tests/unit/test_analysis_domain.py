@@ -14,6 +14,7 @@ from ldaca_wordflow.domain.workspace import (
     AnalysisState,
     AnalysisKind,
     AnnotationAnalysisRequest,
+    AnnotationAnalysisSubmission,
     ConcordanceAnalysisRequest,
     ConcordanceDetachmentAnalysisRequest,
     Failure,
@@ -21,6 +22,7 @@ from ldaca_wordflow.domain.workspace import (
     Tab,
     ValidAnalysisIntegrity,
     Workspace,
+    TopicModelingDetachmentAnalysisRequest,
     persisted_submission,
     public_analysis,
 )
@@ -46,6 +48,41 @@ def test_analysis_request_union_is_strict_and_discriminated() -> None:
         TypeAdapter(AnalysisRequest).validate_python(
             {**request.model_dump(mode="json"), "unknown": True}
         )
+
+
+def test_topic_modeling_detachment_request_preserves_ordered_sources() -> None:
+    first = uuid.uuid4()
+    second = uuid.uuid4()
+    request = TopicModelingDetachmentAnalysisRequest(
+        node_ids=[first, second],
+        selected_columns={first: ["text"], second: []},
+        new_node_names={first: "First topics", second: "Second topics"},
+        topic_ids=[3, 1],
+        topic_meanings_override=[
+            {"topic_id": 3, "words": ["one", "two"]},
+            {"topic_id": 1, "words": ["three"]},
+        ],
+    )
+
+    restored = TypeAdapter(AnalysisRequest).validate_python(
+        request.model_dump(mode="json")
+    )
+    assert restored == request
+    assert tuple(restored.node_ids) == (first, second)
+    assert restored.selected_columns[second] == []
+
+    with pytest.raises(ValidationError, match="unique"):
+        TopicModelingDetachmentAnalysisRequest(
+            node_ids=[first, first],
+            selected_columns={first: ["text"]},
+            new_node_names={first: "Topics"},
+        )
+    with pytest.raises(ValidationError, match="align"):
+        TopicModelingDetachmentAnalysisRequest(
+            node_ids=[first, second],
+            selected_columns={first: ["text"]},
+            new_node_names={first: "Topics", second: "Other topics"},
+        )
     with pytest.raises(ValidationError):
         ConcordanceAnalysisRequest(
             node_ids=request.node_ids,
@@ -54,8 +91,8 @@ def test_analysis_request_union_is_strict_and_discriminated() -> None:
         )
 
 
-def test_annotation_request_is_secret_free_and_persisted_unchanged() -> None:
-    request = AnnotationAnalysisRequest(
+def test_annotation_submission_strips_transient_secret_before_persistence() -> None:
+    submission = AnnotationAnalysisSubmission(
         node_id=uuid.uuid4(),
         text_column="text",
         annotation_column="class",
@@ -64,12 +101,15 @@ def test_annotation_request_is_secret_free_and_persisted_unchanged() -> None:
         model="model",
         instruction="Classify the text",
         output_node_name="Annotated",
+        api_key="transient-secret",
     )
 
-    persisted = persisted_submission(request)
+    persisted = persisted_submission(submission)
 
+    assert isinstance(persisted, AnnotationAnalysisRequest)
     assert persisted.kind == "annotation"
     assert "api_key" not in persisted.model_dump(mode="json")
+    assert "transient-secret" not in repr(submission)
 
 
 @pytest.mark.parametrize(
@@ -110,9 +150,12 @@ def test_analysis_lifecycle_and_public_shape_are_exact() -> None:
         "started_at",
         "finished_at",
         "revision",
+        "output_node_ids",
     }
     assert record.state is AnalysisState.QUEUED
     assert record.progress == Progress(fraction=0.0, message="Queued")
+    assert record.output_node_ids == []
+    assert public.output_node_ids == []
 
     payload = record.model_dump()
     payload.update(
@@ -272,5 +315,38 @@ def test_success_is_one_atomic_validated_transition() -> None:
     assert succeeded.state is AnalysisState.SUCCEEDED
     assert succeeded.progress.fraction == 1.0
     assert succeeded.result_payload == {"kind": "concordance"}
+    assert succeeded.output_node_ids == []
     with pytest.raises(ValueError, match="running"):
         record.succeed(created_at, result_payload={"kind": "concordance"})
+
+
+def test_analysis_output_node_ids_are_required_unique_and_strictly_plural() -> None:
+    created_at = datetime.now(UTC)
+    first = uuid.uuid4()
+    second = uuid.uuid4()
+    succeeded = AnalysisRecord.create(
+        _concordance(), timestamp=created_at
+    ).start(created_at + timedelta(seconds=1)).succeed(
+        created_at + timedelta(seconds=2),
+        result_payload={"kind": "concordance"},
+        output_node_ids=[first, second],
+    )
+
+    assert succeeded.output_node_ids == [first, second]
+    assert public_analysis(
+        succeeded, integrity=ValidAnalysisIntegrity()
+    ).output_node_ids == [first, second]
+
+    missing = succeeded.model_dump(exclude={"output_node_ids"})
+    with pytest.raises(ValidationError):
+        AnalysisRecord.model_validate(missing)
+
+    singular = succeeded.model_dump(exclude={"output_node_ids"})
+    singular["output_node_id"] = first
+    with pytest.raises(ValidationError):
+        AnalysisRecord.model_validate(singular)
+
+    duplicate = succeeded.model_dump()
+    duplicate["output_node_ids"] = [first, first]
+    with pytest.raises(ValidationError, match="unique"):
+        AnalysisRecord.model_validate(duplicate)

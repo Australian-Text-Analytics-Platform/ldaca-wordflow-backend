@@ -30,10 +30,12 @@ from ..domain.workspace import (
     SequentialAnalysisRequest,
     TokenFrequencyAnalysisRequest,
     TopicModelingAnalysisRequest,
+    TopicModelingDetachmentAnalysisRequest,
     Workspace,
 )
 from ..infrastructure.storage.embedding_cache import embeddings_cache_path
 from ..models.quotation import QuotationEngineType, ResolvedQuotationEngine
+from ..models.analysis_results import TopicModelingStoredResult
 from ..settings import Settings
 from ..shared.errors import InvalidInputError
 from ..workers.entrypoints import (
@@ -46,6 +48,7 @@ from ..workers.entrypoints import (
     sequential_process,
     token_frequency_process,
     topic_modeling_process,
+    topic_modeling_detachment_process,
 )
 from ..workers.input_snapshots import create_worker_input_snapshot
 from .analysis_execution_types import AnalysisInvocation
@@ -83,6 +86,7 @@ class AnalysisExecutionPreparer:
         execution_dir = analysis_dir / ".execution"
         snapshot_dir = execution_dir / "input"
         artifact_dir = execution_dir / "output"
+        scratch_dir = execution_dir / "scratch"
         try:
             await run_sync_in_worker_thread(
                 partial(
@@ -102,8 +106,10 @@ class AnalysisExecutionPreparer:
                 user_id=user_id,
                 workspace_id=workspace.id,
                 workspace=workspace,
+                workspace_path=lease.path,
                 snapshot_dir=snapshot_dir,
                 artifact_dir=artifact_dir,
+                scratch_dir=scratch_dir,
                 credential=credential,
             )
         except BaseException:
@@ -123,8 +129,10 @@ class AnalysisExecutionPreparer:
         user_id: str,
         workspace_id: str,
         workspace: Workspace,
+        workspace_path: Path,
         snapshot_dir: Path,
         artifact_dir: Path,
+        scratch_dir: Path,
         credential: str | None,
     ) -> AnalysisInvocation:
         request = record.request
@@ -181,6 +189,7 @@ class AnalysisExecutionPreparer:
                     "node_ids": node_ids,
                     "node_columns": node_columns,
                     "artifact_dir": str(artifact_dir),
+                    "scratch_dir": str(scratch_dir),
                     "artifact_prefix": "token_frequency",
                     "token_limit": request.token_limit,
                     "stop_words": sanitize_stop_words(request.stop_words),
@@ -253,6 +262,7 @@ class AnalysisExecutionPreparer:
                 {
                     **common,
                     "node_id": str(request.node_id),
+                    "artifact_dir": str(artifact_dir),
                     "request_payload": request.model_dump(
                         mode="json",
                         exclude={"kind", "node_id"},
@@ -266,6 +276,41 @@ class AnalysisExecutionPreparer:
             else None
         )
         parent_request = parent.request if parent is not None else None
+        if isinstance(request, TopicModelingDetachmentAnalysisRequest) and isinstance(
+            parent_request,
+            TopicModelingAnalysisRequest,
+        ):
+            if parent is None or parent.result_payload is None:
+                raise InvalidInputError("Topic Modeling Result is unavailable")
+            stored = TopicModelingStoredResult.model_validate(parent.result_payload)
+            artifact_paths = {
+                reference.name: str(
+                    (
+                        workspace_path
+                        / "analyses"
+                        / str(parent.id)
+                        / reference.relative_path
+                    ).resolve(strict=True)
+                )
+                for reference in parent.artifact_references
+            }
+            assignments = {
+                str(node.node_id): artifact_paths[node.assignments.artifact.name]
+                for node in stored.artifacts.nodes
+                if node.node_id in request.node_ids
+            }
+            return owned(
+                topic_modeling_detachment_process,
+                {
+                    "input_snapshot_dir": str(snapshot_dir),
+                    "output_dir": str(artifact_dir),
+                    "request_payload": request.model_dump(mode="json"),
+                    "assignment_paths": assignments,
+                    "topic_meanings_path": artifact_paths[
+                        stored.artifacts.topic_meanings_parquet_path.name
+                    ],
+                },
+            )
         if isinstance(request, ConcordanceDetachmentAnalysisRequest) and isinstance(
             parent_request,
             ConcordanceAnalysisRequest,
@@ -402,6 +447,7 @@ def _request_node_ids(record: AnalysisRecord) -> list[str]:
             TokenFrequencyAnalysisRequest,
             TopicModelingAnalysisRequest,
             ConcordanceAnalysisRequest,
+            TopicModelingDetachmentAnalysisRequest,
         ),
     ):
         return [str(node_id) for node_id in request.node_ids]

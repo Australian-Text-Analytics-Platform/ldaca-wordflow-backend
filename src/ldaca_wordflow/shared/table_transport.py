@@ -8,13 +8,10 @@ from io import BytesIO
 import polars as pl
 
 from .errors import InvalidInputError
-from .topic_types import topic_distribution_storage_dtype
+from .topic_types import TOPIC_DISTRIBUTION_EXTENSION, topic_distribution_dtype
 
 ARROW_STREAM_MEDIA_TYPE = "application/vnd.apache.arrow.stream"
 HAS_NEXT_HEADER = "X-Wordflow-Has-Next"
-TOPIC_DISTRIBUTION_EXTENSION = "org.ldaca.wordflow.topic_distribution.v1"
-
-
 @dataclass(frozen=True, slots=True)
 class IpcTablePage:
     """One self-contained page and whether another page can exist."""
@@ -65,16 +62,6 @@ def materialize_page(
     if has_next:
         frame = frame.head(page_size)
     return IpcTablePage(content=encode_ipc_stream(frame), has_next=has_next)
-
-
-def topic_distribution_dtype(topic_count: int) -> pl.Extension:
-    """Return the one semantic Arrow extension owned by Wordflow."""
-
-    return pl.Extension(
-        TOPIC_DISTRIBUTION_EXTENSION,
-        topic_distribution_storage_dtype(topic_count),
-        '{"version":1}',
-    )
 
 
 __all__ = [

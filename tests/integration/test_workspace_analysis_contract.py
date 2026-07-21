@@ -343,7 +343,8 @@ def test_child_analysis_publishes_an_independent_data_block(tmp_path: Path) -> N
         payload = result.json()
         assert payload["kind"] == "concordance_detachment"
         assert payload["output_columns"] == ["source", "CONC_matched_text"]
-        output_node_id = payload["output_node_id"]
+        assert len(payload["output_node_ids"]) == 1
+        output_node_id = payload["output_node_ids"][0]
         output = client.get(f"/api/workspaces/{workspace_id}/nodes/{output_node_id}")
         assert output.status_code == 200, output.text
         assert output.json()["name"] == "Hello matches"

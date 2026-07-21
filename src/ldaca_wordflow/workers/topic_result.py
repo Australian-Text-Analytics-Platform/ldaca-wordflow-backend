@@ -25,7 +25,7 @@ from ..analysis.generated_columns import (
     TOPIC_DISTRIBUTION_COLUMN,
     TOPIC_MEANING_COLUMN,
 )
-from ..shared.topic_types import topic_distribution_storage_dtype
+from ..shared.topic_types import topic_distribution_dtype
 from .topic_pipeline import (
     _resolve_top_n_words,
 )
@@ -147,7 +147,7 @@ def _build_topic_result_payload(
     distribution_by_index = _distribution_by_doc_index(
         documents, total_docs, topic_ids
     )
-    distribution_dtype = topic_distribution_storage_dtype(len(topic_ids))
+    distribution_dtype = topic_distribution_dtype(len(topic_ids))
 
     assignments: list[list[int]] = []
     node_artifacts: list[dict[str, Any]] = []

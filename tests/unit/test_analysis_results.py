@@ -6,7 +6,10 @@ import polars as pl
 import pytest
 
 from ldaca_wordflow.analysis.generated_columns import TOPIC_DISTRIBUTION_COLUMN
-from ldaca_wordflow.shared.topic_types import topic_distribution_storage_dtype
+from ldaca_wordflow.shared.topic_types import (
+    topic_distribution_dtype,
+    topic_distribution_storage_dtype,
+)
 from ldaca_wordflow.services.analysis_results import (
     _paged_artifact_page,
     _paged_artifact_schema,
@@ -81,8 +84,7 @@ def test_topic_assignment_pages_use_ipc_and_preserve_semantic_storage(
     ).write_parquet(path)
 
     page = _paged_artifact_page(path, 1, 1, None, False)
-    with pytest.warns(UserWarning, match="Extension type"):
-        frame = pl.read_ipc_stream(BytesIO(page.content))
+    frame = pl.read_ipc_stream(BytesIO(page.content))
     schema = pl.read_ipc_stream(BytesIO(_paged_artifact_schema(path)))
 
     assert page.has_next is True
@@ -93,7 +95,7 @@ def test_topic_assignment_pages_use_ipc_and_preserve_semantic_storage(
         ]
     ]
     assert schema.height == 0
-    assert schema.schema[TOPIC_DISTRIBUTION_COLUMN] == topic_distribution_storage_dtype(1)
+    assert schema.schema[TOPIC_DISTRIBUTION_COLUMN] == topic_distribution_dtype(1)
 
 
 def test_variable_list_topic_assignment_artifact_is_rejected(tmp_path) -> None:

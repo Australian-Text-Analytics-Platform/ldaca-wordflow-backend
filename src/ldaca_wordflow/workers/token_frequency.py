@@ -20,6 +20,16 @@ from .utils import process_entrypoint
 logger = logging.getLogger(__name__)
 
 _PLAIN_WORDS_EN_MODEL = "native:plain_words_en"
+_COMPARATIVE_STATISTICS_COLUMN_NAMES = {
+    "freq_corpus_0": "freq_reference",
+    "percent_corpus_0": "percent_reference",
+    "expected_0": "expected_reference",
+    "corpus_0_total": "reference_total",
+    "freq_corpus_1": "freq_study",
+    "percent_corpus_1": "percent_study",
+    "expected_1": "expected_study",
+    "corpus_1_total": "study_total",
+}
 
 
 def _compute_token_frequencies(
@@ -259,6 +269,13 @@ def _compute_token_frequencies(
             stats_df = pt.token_frequency_stats(
                 frequency_results[prepared_node_ids[0]],
                 frequency_results[prepared_node_ids[1]],
+            )
+            stats_df = stats_df.rename(
+                {
+                    source: target
+                    for source, target in _COMPARATIVE_STATISTICS_COLUMN_NAMES.items()
+                    if source in stats_df.columns
+                }
             )
 
         if progress_callback:

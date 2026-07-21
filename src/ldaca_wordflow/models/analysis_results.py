@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from typing import Annotated, Generic, Literal, TypeVar, cast
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..domain.workspace import NodeProvenance
 from ..shared.json_data import JsonData
@@ -362,8 +362,34 @@ class AnnotationWorkerResult(DetachmentWorkerResult):
     pass
 
 
+class TopicModelingDetachmentWorkerOutput(_StrictModel):
+    source_node_id: uuid.UUID
+    topic_data: _DetachmentWorkerData
+    topic_meanings: _DetachmentWorkerData
+
+
+class TopicModelingDetachmentWorkerResult(_StrictModel):
+    state: Literal["successful"]
+    outputs: list[TopicModelingDetachmentWorkerOutput] = Field(min_length=1)
+    message: str
+
+    @model_validator(mode="after")
+    def validate_outputs(self) -> "TopicModelingDetachmentWorkerResult":
+        source_ids = [item.source_node_id for item in self.outputs]
+        output_ids = [
+            data.data_block.id
+            for output in self.outputs
+            for data in (output.topic_data, output.topic_meanings)
+        ]
+        if len(source_ids) != len(set(source_ids)):
+            raise ValueError("Topic Modeling detached sources must be unique")
+        if len(output_ids) != len(set(output_ids)):
+            raise ValueError("Topic Modeling output Data Block IDs must be unique")
+        return self
+
+
 class DetachmentStoredResult(_StrictModel):
-    output_node_id: uuid.UUID
+    output_node_ids: list[uuid.UUID] = Field(min_length=1)
     output_columns: list[str]
     record_count: int = Field(ge=0)
 
@@ -390,6 +416,40 @@ class AnnotationResult(AnnotationStoredResult):
     kind: Literal["annotation"] = "annotation"
 
 
+class TopicModelingDetachedOutput(_StrictModel):
+    source_node_id: uuid.UUID
+    topic_data_node_id: uuid.UUID
+    topic_meanings_node_id: uuid.UUID
+    topic_data_columns: list[str]
+    topic_data_record_count: int = Field(ge=0)
+    topic_meanings_record_count: int = Field(ge=0)
+
+
+class TopicModelingDetachmentStoredResult(_StrictModel):
+    output_node_ids: list[uuid.UUID] = Field(min_length=2)
+    outputs: list[TopicModelingDetachedOutput] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_output_identity(self) -> "TopicModelingDetachmentStoredResult":
+        expected = [
+            node_id
+            for output in self.outputs
+            for node_id in (
+                output.topic_data_node_id,
+                output.topic_meanings_node_id,
+            )
+        ]
+        if self.output_node_ids != expected:
+            raise ValueError("Topic Modeling output order does not match its Results")
+        if len(self.output_node_ids) != len(set(self.output_node_ids)):
+            raise ValueError("Topic Modeling output Data Block IDs must be unique")
+        return self
+
+
+class TopicModelingDetachmentResult(TopicModelingDetachmentStoredResult):
+    kind: Literal["topic_modeling_detachment"] = "topic_modeling_detachment"
+
+
 AnalysisResult = Annotated[
     TokenFrequencyResult
     | TopicModelingResult
@@ -399,7 +459,8 @@ AnalysisResult = Annotated[
     | AnnotationResult
     | ConcordanceDetachmentResult
     | ConcordanceDispersionDetachmentResult
-    | QuotationDetachmentResult,
+    | QuotationDetachmentResult
+    | TopicModelingDetachmentResult,
     Field(discriminator="kind"),
 ]
 
@@ -413,6 +474,7 @@ ANALYSIS_WORKER_RESULT_MODELS: dict[str, type[BaseModel]] = {
     "concordance_detachment": ConcordanceDetachmentWorkerResult,
     "concordance_dispersion_detachment": (ConcordanceDispersionDetachmentWorkerResult),
     "quotation_detachment": QuotationDetachmentWorkerResult,
+    "topic_modeling_detachment": TopicModelingDetachmentWorkerResult,
 }
 
 ANALYSIS_STORED_RESULT_MODELS: dict[str, type[BaseModel]] = {
@@ -425,6 +487,7 @@ ANALYSIS_STORED_RESULT_MODELS: dict[str, type[BaseModel]] = {
     "concordance_detachment": DetachmentStoredResult,
     "concordance_dispersion_detachment": DetachmentStoredResult,
     "quotation_detachment": DetachmentStoredResult,
+    "topic_modeling_detachment": TopicModelingDetachmentStoredResult,
 }
 
 
@@ -482,5 +545,8 @@ __all__ = [
     "TopicModelingResultQuery",
     "TopicModelingStoredResult",
     "TopicModelingWorkerResult",
+    "TopicModelingDetachmentResult",
+    "TopicModelingDetachmentStoredResult",
+    "TopicModelingDetachmentWorkerResult",
     "stored_result_payload",
 ]

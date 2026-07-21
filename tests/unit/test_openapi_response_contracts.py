@@ -132,8 +132,9 @@ def test_workspace_owned_analysis_representation_is_exact() -> None:
         "created_at",
         "started_at",
         "finished_at",
-        "revision",
-    }
+            "revision",
+            "output_node_ids",
+        }
     assert set(analysis["required"]) == set(analysis["properties"])
 
 

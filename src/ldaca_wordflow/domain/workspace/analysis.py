@@ -13,6 +13,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    SecretStr,
     StringConstraints,
     model_validator,
 )
@@ -110,7 +111,7 @@ class TopicModelingAnalysisRequest(_StrictModel):
     node_ids: list[uuid.UUID] = Field(min_length=1, max_length=2)
     node_columns: dict[uuid.UUID, NonEmptyText]
     min_topic_size: int = Field(default=10, ge=2)
-    random_seed: int = 42
+    random_seed: int = 0
     representative_words_count: int = Field(default=5, ge=1, le=100)
     sample_fractions: list[float | None] | None = None
 
@@ -227,6 +228,22 @@ class AnnotationAnalysisRequest(_AnnotationFields):
     """Secret-free immutable Annotation request stored in a Workspace."""
 
 
+class AnnotationAnalysisSubmission(_AnnotationFields):
+    """Annotation creation command with an optional request-only credential."""
+
+    api_key: SecretStr | None = Field(
+        default=None,
+        min_length=1,
+        max_length=4_000,
+        json_schema_extra={"writeOnly": True},
+    )
+
+    def persisted_request(self) -> AnnotationAnalysisRequest:
+        return AnnotationAnalysisRequest.model_validate(
+            self.model_dump(exclude={"api_key"})
+        )
+
+
 RootAnalysisRequest = Annotated[
     TokenFrequencyAnalysisRequest
     | TopicModelingAnalysisRequest
@@ -243,7 +260,7 @@ AnalysisSubmission = Annotated[
     | ConcordanceAnalysisRequest
     | QuotationAnalysisRequest
     | SequentialAnalysisRequest
-    | AnnotationAnalysisRequest,
+    | AnnotationAnalysisSubmission,
     Field(discriminator="kind"),
 ]
 
@@ -275,10 +292,41 @@ class QuotationDetachmentAnalysisRequest(_StrictModel):
     name: NonEmptyText | None = Field(default=None, max_length=500)
 
 
+class TopicMeaningOverride(_StrictModel):
+    topic_id: int
+    words: list[NonEmptyText]
+
+
+class TopicModelingDetachmentAnalysisRequest(_StrictModel):
+    kind: Literal["topic_modeling_detachment"] = "topic_modeling_detachment"
+    node_ids: list[uuid.UUID] = Field(min_length=1, max_length=2)
+    selected_columns: dict[uuid.UUID, list[NonEmptyText]]
+    new_node_names: dict[uuid.UUID, NonEmptyText]
+    topic_ids: list[int] | None = None
+    topic_meanings_override: list[TopicMeaningOverride] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_sources_and_topics(self) -> "TopicModelingDetachmentAnalysisRequest":
+        if len(self.node_ids) != len(set(self.node_ids)):
+            raise ValueError("Topic Modeling detachment Data Block IDs must be unique")
+        expected = set(self.node_ids)
+        if set(self.selected_columns) != expected or set(self.new_node_names) != expected:
+            raise ValueError("Topic Modeling detachment source fields must align")
+        if any(len(name) > 475 for name in self.new_node_names.values()):
+            raise ValueError("Topic Modeling detached Data Block names are too long")
+        if self.topic_ids is not None and len(self.topic_ids) != len(set(self.topic_ids)):
+            raise ValueError("Selected Topic IDs must be unique")
+        override_ids = [item.topic_id for item in self.topic_meanings_override]
+        if len(override_ids) != len(set(override_ids)):
+            raise ValueError("Topic meaning overrides must be unique")
+        return self
+
+
 ChildAnalysisRequest = Annotated[
     ConcordanceDetachmentAnalysisRequest
     | ConcordanceDispersionDetachmentAnalysisRequest
-    | QuotationDetachmentAnalysisRequest,
+    | QuotationDetachmentAnalysisRequest
+    | TopicModelingDetachmentAnalysisRequest,
     Field(discriminator="kind"),
 ]
 
@@ -286,6 +334,8 @@ AnalysisRequest = RootAnalysisRequest | ChildAnalysisRequest
 
 
 def persisted_submission(submission: AnalysisSubmission) -> RootAnalysisRequest:
+    if isinstance(submission, AnnotationAnalysisSubmission):
+        return submission.persisted_request()
     return submission
 
 
@@ -296,6 +346,7 @@ def analysis_input_ids(request: AnalysisRequest) -> tuple[uuid.UUID, ...]:
             TokenFrequencyAnalysisRequest,
             TopicModelingAnalysisRequest,
             ConcordanceAnalysisRequest,
+            TopicModelingDetachmentAnalysisRequest,
         ),
     ):
         return tuple(request.node_ids)
@@ -322,6 +373,7 @@ class _AnalysisLifecycle(_StrictModel):
     started_at: AwareDatetime | None
     finished_at: AwareDatetime | None
     revision: int = Field(ge=1)
+    output_node_ids: list[uuid.UUID]
 
     @model_validator(mode="after")
     def validate_lifecycle(self) -> "_AnalysisLifecycle":
@@ -331,6 +383,7 @@ class _AnalysisLifecycle(_StrictModel):
                 ConcordanceDetachmentAnalysisRequest,
                 ConcordanceDispersionDetachmentAnalysisRequest,
                 QuotationDetachmentAnalysisRequest,
+                TopicModelingDetachmentAnalysisRequest,
             ),
         )
         if is_child != (self.parent_analysis_id is not None):
@@ -377,8 +430,6 @@ class AnalysisRecord(_AnalysisLifecycle):
 
     result_payload: dict[str, JsonData] | None = None
     artifact_references: list[AnalysisArtifactRecord] = Field(default_factory=list)
-    output_node_id: uuid.UUID | None = None
-
     @model_validator(mode="after")
     def validate_result(self) -> "AnalysisRecord":
         succeeded = self.state is AnalysisState.SUCCEEDED
@@ -390,6 +441,10 @@ class AnalysisRecord(_AnalysisLifecycle):
         paths = [artifact.relative_path for artifact in self.artifact_references]
         if len(names) != len(set(names)) or len(paths) != len(set(paths)):
             raise ValueError("Analysis Artifact references must be unique")
+        if len(self.output_node_ids) != len(set(self.output_node_ids)):
+            raise ValueError("Analysis output Data Block IDs must be unique")
+        if not succeeded and self.output_node_ids:
+            raise ValueError("Only a successful Analysis may publish Data Blocks")
         return self
 
     def _transition(self, **changes: object) -> "AnalysisRecord":
@@ -461,7 +516,7 @@ class AnalysisRecord(_AnalysisLifecycle):
         *,
         result_payload: dict[str, JsonData],
         artifact_references: list[AnalysisArtifactRecord] | None = None,
-        output_node_id: uuid.UUID | None = None,
+        output_node_ids: list[uuid.UUID] | None = None,
     ) -> "AnalysisRecord":
         if self.state is not AnalysisState.RUNNING:
             raise ValueError("Only a running Analysis can succeed")
@@ -470,7 +525,7 @@ class AnalysisRecord(_AnalysisLifecycle):
             progress=Progress(fraction=1.0, message="Complete"),
             result_payload=result_payload,
             artifact_references=artifact_references or [],
-            output_node_id=output_node_id,
+            output_node_ids=output_node_ids or [],
             finished_at=timestamp,
         )
 
@@ -482,7 +537,6 @@ class AnalysisRecord(_AnalysisLifecycle):
         timestamp: datetime,
         parent_analysis_id: uuid.UUID | None = None,
         analysis_id: uuid.UUID | None = None,
-        output_node_id: uuid.UUID | None = None,
     ) -> "AnalysisRecord":
         return cls(
             id=analysis_id or uuid.uuid4(),
@@ -498,7 +552,7 @@ class AnalysisRecord(_AnalysisLifecycle):
             revision=1,
             result_payload=None,
             artifact_references=[],
-            output_node_id=output_node_id,
+            output_node_ids=[],
         )
 
 
@@ -527,7 +581,6 @@ def public_analysis(
         exclude={
             "result_payload",
             "artifact_references",
-            "output_node_id",
         }
     )
     payload["progress"] = progress or record.progress
@@ -544,6 +597,7 @@ __all__ = [
     "AnalysisState",
     "AnalysisSubmission",
     "AnnotationAnalysisRequest",
+    "AnnotationAnalysisSubmission",
     "ChildAnalysisRequest",
     "ConcordanceAnalysisRequest",
     "ConcordanceDetachmentAnalysisRequest",
@@ -560,6 +614,8 @@ __all__ = [
     "SequentialAnalysisRequest",
     "TokenFrequencyAnalysisRequest",
     "TopicModelingAnalysisRequest",
+    "TopicModelingDetachmentAnalysisRequest",
+    "TopicMeaningOverride",
     "ValidAnalysisIntegrity",
     "analysis_input_ids",
     "persisted_submission",

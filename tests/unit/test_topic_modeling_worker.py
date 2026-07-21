@@ -55,11 +55,11 @@ def test_topic_distribution_rejects_noncanonical_entries(entries) -> None:
 
 def test_sample_corpus_reduces_length_and_is_reproducible():
     docs = [f"doc {i}" for i in range(100)]
-    sampled_docs, sampled_idx = _sample_corpus(docs, 0.5, seed=42)
+    sampled_docs, sampled_idx = _sample_corpus(docs, 0.5, seed=0)
     assert len(sampled_docs) == 50
     assert len(sampled_idx) == 50
     # Same seed reproduces the exact sample.
-    docs2, idx2 = _sample_corpus(docs, 0.5, seed=42)
+    docs2, idx2 = _sample_corpus(docs, 0.5, seed=0)
     assert docs2 == sampled_docs
     assert idx2 == sampled_idx
     # A different seed selects a different sample.
@@ -77,16 +77,16 @@ def test_sample_corpus_indices_are_original_sorted_positions():
 
 def test_sample_corpus_fraction_at_or_above_one_returns_original():
     docs = ["a", "b", "c"]
-    result_docs, result_idx = _sample_corpus(docs, 1.0, seed=42)
+    result_docs, result_idx = _sample_corpus(docs, 1.0, seed=0)
     assert result_docs is docs
     assert result_idx == [0, 1, 2]
-    result_docs2, _ = _sample_corpus(docs, 2.0, seed=42)
+    result_docs2, _ = _sample_corpus(docs, 2.0, seed=0)
     assert result_docs2 is docs
 
 
 def test_sample_corpus_min_k_is_one():
     docs = ["only"]
-    result_docs, result_idx = _sample_corpus(docs, 0.01, seed=42)
+    result_docs, result_idx = _sample_corpus(docs, 0.01, seed=0)
     assert len(result_docs) == 1
     assert len(result_idx) == 1
 
@@ -178,7 +178,7 @@ def test_run_rust_topic_modeling_reconstructs_result_dict(monkeypatch):
 
     result = topic_pipeline._run_rust_topic_modeling(
         all_docs=["d0", "d1", "d2", "d3"],
-        seed=42,
+        seed=0,
         top_k=50,
         min_cluster_size=10,
         vectorizer_model="native:plain_words_en",
@@ -340,7 +340,12 @@ def test__compute_topic_modeling_writes_parquet_and_meaning_lists(
     ]
     assert assignments.schema["TOPIC_topic"] == pl.Int64
     assert assignments["TOPIC_topic"].to_list() == [0, 0]
-    assert assignments.schema["TOPIC_topic_distribution"] == pl.Array(
+    distribution_dtype = assignments.schema["TOPIC_topic_distribution"]
+    assert isinstance(distribution_dtype, pl.Extension)
+    assert distribution_dtype.ext_name() == (
+        "org.ldaca.wordflow.topic_distribution.v1"
+    )
+    assert distribution_dtype.ext_storage() == pl.Array(
         pl.Struct({"topic_id": pl.Int64, "proportion": pl.Float64}), 3
     )
     assert assignments["TOPIC_topic_distribution"].to_list() == [

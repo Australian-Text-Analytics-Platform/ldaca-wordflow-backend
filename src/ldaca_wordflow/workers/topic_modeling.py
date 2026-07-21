@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import os
+import uuid
 from pathlib import Path
 from typing import Any, Callable
 
@@ -48,7 +49,190 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "run_topic_modeling_analysis",
+    "run_topic_modeling_detachment",
 ]
+
+
+@process_entrypoint
+def run_topic_modeling_detachment(
+    *,
+    input_snapshot_dir: str,
+    output_dir: str,
+    request_payload: dict[str, Any],
+    assignment_paths: dict[str, str],
+    topic_meanings_path: str,
+    progress_callback: Callable[[float, str], None] | None = None,
+) -> dict[str, Any]:
+    """Materialize selected Topic Modeling rows and meanings as Data Blocks."""
+
+    import polars as pl
+
+    from ..analysis.generated_columns import (
+        TOPIC_COLUMN,
+        TOPIC_DISTRIBUTION_COLUMN,
+        TOPIC_DISTRIBUTION_OUTPUT_COLUMN,
+        TOPIC_MEANING_COLUMN,
+        TOPIC_TOP1_COLUMN,
+    )
+    from ..domain.workspace import TopicModelingDetachmentAnalysisRequest
+    from ..shared.topic_types import topic_distribution_dtype
+    from .input_snapshots import load_snapshot_node
+
+    request = TopicModelingDetachmentAnalysisRequest.model_validate(request_payload)
+    destination = Path(output_dir)
+    destination.mkdir(parents=True, exist_ok=True)
+    meanings = pl.read_parquet(topic_meanings_path)
+    meaning_values = {
+        int(topic_id): list(words or [])
+        for topic_id, words in meanings.select(
+            TOPIC_COLUMN, TOPIC_MEANING_COLUMN
+        ).iter_rows()
+    }
+    meaning_values.update(
+        {item.topic_id: list(item.words) for item in request.topic_meanings_override}
+    )
+
+    outputs: list[dict[str, Any]] = []
+    total = len(request.node_ids)
+    for index, source_uuid in enumerate(request.node_ids):
+        source_id = str(source_uuid)
+        source = load_snapshot_node(input_snapshot_dir, source_id)
+        selected_columns = list(request.selected_columns[source_uuid])
+        schema = source.data.collect_schema()
+        missing = [column for column in selected_columns if column not in schema]
+        if missing:
+            raise ValueError(f"Topic Modeling detachment columns not found: {missing}")
+        assignment_path = assignment_paths.get(source_id)
+        if assignment_path is None:
+            raise ValueError("Topic Modeling assignment Artifact is unavailable")
+
+        assignments = pl.scan_parquet(assignment_path)
+        if TOPIC_DISTRIBUTION_COLUMN not in assignments.collect_schema():
+            assignments = assignments.with_columns(
+                pl.lit(
+                    None,
+                    dtype=topic_distribution_dtype(len(meaning_values)),
+                ).alias(TOPIC_DISTRIBUTION_COLUMN)
+            )
+        if request.topic_ids is not None:
+            assignments = assignments.filter(pl.col(TOPIC_COLUMN).is_in(request.topic_ids))
+        joined = (
+            source.data.with_row_index("__row_nr__")
+            .with_columns(pl.col("__row_nr__").cast(pl.Int64))
+            .join(assignments, on="__row_nr__", how="inner", maintain_order="left")
+            .select(
+                *[pl.col(column) for column in selected_columns],
+                pl.col(TOPIC_COLUMN).alias(TOPIC_TOP1_COLUMN),
+                pl.col(TOPIC_DISTRIBUTION_COLUMN).alias(
+                    TOPIC_DISTRIBUTION_OUTPUT_COLUMN
+                ),
+            )
+        )
+        topic_data_id = uuid.uuid4()
+        topic_meanings_id = uuid.uuid4()
+        topic_data_path = destination / f"{topic_data_id}.parquet"
+        joined.sink_parquet(topic_data_path)
+        topic_data = pl.scan_parquet(topic_data_path)
+        output_columns = topic_data.collect_schema().names()
+        record_count = int(topic_data.select(pl.len()).collect().item())
+        present_topic_ids = sorted(
+            int(value)
+            for value in topic_data.select(TOPIC_TOP1_COLUMN)
+            .unique()
+            .collect()[TOPIC_TOP1_COLUMN]
+            .drop_nulls()
+            .to_list()
+            if int(value) >= 0
+        )
+        topic_meanings_frame = pl.DataFrame(
+            {
+                TOPIC_COLUMN: present_topic_ids,
+                TOPIC_MEANING_COLUMN: [
+                    meaning_values.get(topic_id, []) for topic_id in present_topic_ids
+                ],
+            },
+            schema={
+                TOPIC_COLUMN: pl.Int64,
+                TOPIC_MEANING_COLUMN: pl.List(pl.String),
+            },
+        )
+        topic_meanings_output_path = destination / f"{topic_meanings_id}.parquet"
+        topic_meanings_frame.lazy().sink_parquet(topic_meanings_output_path)
+
+        topic_name = request.new_node_names[source_uuid]
+        topic_data_provenance = {
+            "type": "derivation",
+            "operation": {
+                "kind": "topic_modeling_detachment",
+                "role": "topic_data",
+            },
+            "inputs": [
+                {
+                    "role": "source",
+                    "value": {"type": "node", "node_id": source_id},
+                }
+            ],
+        }
+        topic_meanings_provenance = {
+            "type": "derivation",
+            "operation": {
+                "kind": "topic_modeling_detachment",
+                "role": "topic_meanings",
+            },
+            "inputs": [
+                {
+                    "role": "source",
+                    "value": {"type": "node", "node_id": str(topic_data_id)},
+                }
+            ],
+        }
+        outputs.append(
+            {
+                "source_node_id": source_id,
+                "topic_data": {
+                    "data_block": {
+                        "id": str(topic_data_id),
+                        "name": topic_name,
+                        "provenance": topic_data_provenance,
+                        "document": source.document
+                        if source.document in selected_columns
+                        else None,
+                        "color": source.color,
+                        "tokenization": {
+                            column: metadata
+                            for column, metadata in source.tokenization.items()
+                            if column in selected_columns
+                        },
+                    },
+                    "parquet_path": str(topic_data_path),
+                    "output_columns": output_columns,
+                    "record_count": record_count,
+                },
+                "topic_meanings": {
+                    "data_block": {
+                        "id": str(topic_meanings_id),
+                        "name": f"{topic_name} topic meanings",
+                        "provenance": topic_meanings_provenance,
+                        "document": None,
+                        "color": source.color,
+                        "tokenization": {},
+                    },
+                    "parquet_path": str(topic_meanings_output_path),
+                    "output_columns": [TOPIC_COLUMN, TOPIC_MEANING_COLUMN],
+                    "record_count": len(present_topic_ids),
+                },
+            }
+        )
+        if progress_callback:
+            progress_callback(
+                0.95 * (index + 1) / total,
+                "Detaching Topic Modeling results...",
+            )
+    return {
+        "state": "successful",
+        "outputs": outputs,
+        "message": "Topic Modeling results added to the Workspace",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -266,7 +450,7 @@ def _compute_topic_modeling(
     min_topic_size: int = 10,
     input_snapshot_dir: str | None = None,
     corpora: list[list[str]] | None = None,
-    random_seed: int = 42,
+    random_seed: int = 0,
     representative_words_count: int = 5,
     progress_callback: Callable[[float, str], None] | None = None,
     sample_fractions: list[float | None] | None = None,
@@ -358,7 +542,7 @@ def run_topic_modeling_analysis(
     input_snapshot_dir: str,
     embedding_cache_path: str,
     min_topic_size: int = 10,
-    random_seed: int = 42,
+    random_seed: int = 0,
     representative_words_count: int = 5,
     progress_callback: Callable[[float, str], None] | None = None,
     sample_fractions: list[float | None] | None = None,

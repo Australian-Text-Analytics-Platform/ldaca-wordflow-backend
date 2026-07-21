@@ -45,6 +45,7 @@ from .api.files import router as files_router
 from .api.security import CsrfOriginMiddleware, ExactHostMiddleware
 from .api.sample_data import router as sample_data_router
 from .api.storage import router as storage_router
+from .api.tokenizers import router as tokenizers_router
 from .api.user_file_imports import router as user_file_imports_router
 from .api.workspaces import router as workspaces_router
 from .shared.errors import AppError
@@ -190,6 +191,7 @@ def _register_routers(app: FastAPI) -> None:
         files_router,
         sample_data_router,
         storage_router,
+        tokenizers_router,
         user_file_imports_router,
         workspaces_router,
     ):

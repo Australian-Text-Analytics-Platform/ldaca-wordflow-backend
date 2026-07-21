@@ -15,6 +15,7 @@ from ldaca_wordflow.domain.workspace import (
     AnalysisKind,
     AnalysisRecord,
     AnalysisState,
+    AnnotationAnalysisSubmission,
     ConcordanceAnalysisRequest,
     ConcordanceDetachmentAnalysisRequest,
     DerivationInput,
@@ -28,7 +29,10 @@ from ldaca_wordflow.domain.workspace import (
 from ldaca_wordflow.domain.workspace.provenance import CloneDerivation
 from ldaca_wordflow.infrastructure.storage.workspace_store import WorkspaceStore
 from ldaca_wordflow.models.tabs import TabCreate
-from ldaca_wordflow.models.node_resources import NodeUpdateRequest
+from ldaca_wordflow.models.node_resources import (
+    CastNodeEditRequest,
+    NodeUpdateRequest,
+)
 from ldaca_wordflow.services.analysis_execution_types import (
     AnalysisExecutionKey,
     AnalysisInvocation,
@@ -38,7 +42,6 @@ from ldaca_wordflow.services.events import EventHub
 from ldaca_wordflow.services.analyses import AnalysisService, PublishedAnalysisResult
 from ldaca_wordflow.services.nodes import NodeService
 from ldaca_wordflow.services.provider_credentials import ProviderCredentialStore
-from ldaca_wordflow.services.user_preferences import UserPreferenceStore
 from ldaca_wordflow.services.workspace import WorkspaceLease
 from ldaca_wordflow.services.workspace import WorkspaceService
 from ldaca_wordflow.settings import Settings
@@ -50,6 +53,8 @@ from ldaca_wordflow.shared.errors import (
     AnalysisParentInvalidError,
     BackendStoppingError,
     DataBlockInUseError,
+    InvalidInputError,
+    ProviderCredentialMissingError,
     TabAnalysisExistsError,
 )
 from ldaca_wordflow.shared.json_data import JsonData
@@ -90,6 +95,7 @@ class _Artifacts:
         return PublishedAnalysisResult(
             payload=cast(dict[str, JsonData], raw_result),
             artifacts=[],
+            output_node_ids=[],
         )
 
 
@@ -110,6 +116,8 @@ def _workspace_service(tmp_path: Path) -> WorkspaceService:
 
 async def _opened_workspace_with_tab(
     tmp_path: Path,
+    *,
+    kind: AnalysisKind = AnalysisKind.CONCORDANCE,
 ) -> tuple[WorkspaceService, str, str, str]:
     workspaces = _workspace_service(tmp_path)
     created = await workspaces.create_workspace("user", "Analyses")
@@ -129,7 +137,7 @@ async def _opened_workspace_with_tab(
     tab = await workspaces.create_tab(
         "user",
         created.id,
-        TabCreate(kind=AnalysisKind.CONCORDANCE, name="Concordance"),
+        TabCreate(kind=kind, name=kind.value),
     )
     return workspaces, created.id, node_id, str(tab.id)
 
@@ -148,13 +156,20 @@ def _worker(*, progress_queue: object) -> dict[str, str]:
     return {"kind": "concordance"}
 
 
-def _credential_store(tmp_path: Path) -> ProviderCredentialStore:
-    settings = Settings(data_root=tmp_path, multi_user=False)
-    preferences = UserPreferenceStore(
+def _credential_store(
+    tmp_path: Path,
+    *,
+    multi_user: bool = False,
+) -> ProviderCredentialStore:
+    settings = Settings(
+        data_root=tmp_path,
+        multi_user=multi_user,
+        google_client_id="google-client" if multi_user else "",
+    )
+    return ProviderCredentialStore(
         settings,
         io_limiter=anyio.CapacityLimiter(4),
     )
-    return ProviderCredentialStore(settings, preferences)
 
 
 def _analysis_service(
@@ -163,8 +178,11 @@ def _analysis_service(
     execution: _ExecutionControl,
     *,
     clock: Any = None,
+    multi_user: bool = False,
 ) -> AnalysisService:
-    kwargs: dict[str, Any] = {"credentials": _credential_store(tmp_path)}
+    kwargs: dict[str, Any] = {
+        "credentials": _credential_store(tmp_path, multi_user=multi_user)
+    }
     if clock is not None:
         kwargs["clock"] = clock
     return AnalysisService(workspaces, execution, _Artifacts(), **kwargs)
@@ -217,6 +235,58 @@ async def test_submission_atomically_assigns_one_queued_analysis(
 
     with pytest.raises(TabAnalysisExistsError):
         await service.submit_root("user", workspace_id, tab_id, _request(node_id))
+
+
+@pytest.mark.anyio
+async def test_multi_user_annotation_secret_reaches_execution_but_not_workspace_state(
+    tmp_path: Path,
+) -> None:
+    workspaces, workspace_id, node_id, tab_id = await _opened_workspace_with_tab(
+        tmp_path,
+        kind=AnalysisKind.ANNOTATION,
+    )
+    execution = _ExecutionControl()
+    service = _analysis_service(
+        tmp_path,
+        workspaces,
+        execution,
+        multi_user=True,
+    )
+    submission = AnnotationAnalysisSubmission(
+        node_id=uuid.UUID(node_id),
+        text_column="text",
+        annotation_column="class",
+        classes=[{"name": "Relevant", "description": ""}],
+        provider="openai",
+        model="model",
+        instruction="Classify the text",
+        output_node_name="Annotated",
+        api_key="request-only-secret",
+    )
+
+    with pytest.raises(ProviderCredentialMissingError):
+        await service.submit_root(
+            "user",
+            workspace_id,
+            tab_id,
+            submission.model_copy(update={"api_key": None}),
+        )
+    assert (await workspaces.get_tab("user", workspace_id, tab_id)).analysis_id is None
+
+    created = await service.submit_root(
+        "user",
+        workspace_id,
+        tab_id,
+        submission,
+    )
+
+    assert "api_key" not in created.request.model_dump(mode="json")
+    assert execution.enqueued[0][2] == "request-only-secret"
+    assert all(
+        b"request-only-secret" not in path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    )
 
 
 @pytest.mark.anyio
@@ -434,6 +504,77 @@ async def test_clear_hides_analysis_and_allows_immediate_resubmission(
     assert page.items == []
     second = await service.submit_root("user", workspace_id, tab_id, _request(node_id))
     assert second.id != first.id
+
+
+@pytest.mark.anyio
+async def test_dispatch_preserves_expected_domain_failure(
+    tmp_path: Path,
+) -> None:
+    workspaces, workspace_id, node_id, tab_id = await _opened_workspace_with_tab(
+        tmp_path
+    )
+    service = _analysis_service(tmp_path, workspaces, _ExecutionControl())
+    created = await service.submit_root(
+        "user", workspace_id, tab_id, _request(node_id)
+    )
+    key = AnalysisExecutionKey("user", workspace_id, str(created.id))
+
+    async def prepare(_lease, _record, _credential: str | None) -> AnalysisInvocation:
+        raise InvalidInputError("Raw-text Data Blocks require a tokenizer model")
+
+    async def launch_control(_key: AnalysisExecutionKey) -> None:
+        return None
+
+    invocation = await service.admit_execution(
+        key,
+        credential=None,
+        prepare=prepare,
+        reserve_launch=launch_control,
+        discard_launch=launch_control,
+    )
+    failed = await service.get("user", workspace_id, str(created.id))
+
+    assert invocation is None
+    assert failed.state is AnalysisState.FAILED
+    assert failed.started_at is None
+    assert failed.error is not None
+    assert failed.error.code == "invalid_input"
+    assert failed.error.message == "Raw-text Data Blocks require a tokenizer model"
+
+
+@pytest.mark.anyio
+async def test_dispatch_hides_unexpected_admission_failure(
+    tmp_path: Path,
+) -> None:
+    workspaces, workspace_id, node_id, tab_id = await _opened_workspace_with_tab(
+        tmp_path
+    )
+    service = _analysis_service(tmp_path, workspaces, _ExecutionControl())
+    created = await service.submit_root(
+        "user", workspace_id, tab_id, _request(node_id)
+    )
+    key = AnalysisExecutionKey("user", workspace_id, str(created.id))
+
+    async def prepare(_lease, _record, _credential: str | None) -> AnalysisInvocation:
+        raise RuntimeError("private diagnostic")
+
+    async def launch_control(_key: AnalysisExecutionKey) -> None:
+        return None
+
+    invocation = await service.admit_execution(
+        key,
+        credential=None,
+        prepare=prepare,
+        reserve_launch=launch_control,
+        discard_launch=launch_control,
+    )
+    failed = await service.get("user", workspace_id, str(created.id))
+
+    assert invocation is None
+    assert failed.state is AnalysisState.FAILED
+    assert failed.error is not None
+    assert failed.error.code == "analysis_start_failed"
+    assert failed.error.message == "Analysis could not start"
 
 
 @pytest.mark.anyio
@@ -749,6 +890,17 @@ async def test_active_analysis_reservation_blocks_input_and_ancestor_mutation(
         )
     with pytest.raises(DataBlockInUseError):
         await nodes.delete("user", workspace_id, source_id)
+    with pytest.raises(DataBlockInUseError):
+        await nodes.edit(
+            "user",
+            workspace_id,
+            child_id,
+            CastNodeEditRequest(column="text", target_type="string"),
+        )
+    with pytest.raises(DataBlockInUseError):
+        await nodes.undo("user", workspace_id, child_id)
+    with pytest.raises(DataBlockInUseError):
+        await nodes.redo("user", workspace_id, child_id)
 
     async with workspaces.read_context("user", workspace_id) as lease:
         assert set(lease.workspace.nodes) == {source_id, child_id}

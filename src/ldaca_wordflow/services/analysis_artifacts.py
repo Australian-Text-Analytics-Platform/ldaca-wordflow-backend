@@ -31,6 +31,9 @@ from ..domain.workspace import (
     QuotationAnalysisRequest,
     QuotationDetachmentAnalysisRequest,
     QuotationDetachmentDerivation,
+    TopicModelingAnalysisRequest,
+    TopicModelingDetachmentAnalysisRequest,
+    TopicModelingDetachmentDerivation,
     Workspace,
     node_reference,
     referenced_node_ids,
@@ -43,6 +46,9 @@ from ..models.analysis_results import (
     DetachedDataBlockMetadata,
     DetachmentStoredResult,
     DetachmentWorkerResult,
+    TopicModelingDetachedOutput,
+    TopicModelingDetachmentStoredResult,
+    TopicModelingDetachmentWorkerResult,
     stored_result_payload,
 )
 from ..shared.errors import ArtifactGoneError
@@ -82,6 +88,29 @@ class AnalysisArtifactService:
         if worker_model is None or stored_model is None:
             raise ValueError("Analysis kind has no Result contract")
         result = worker_model.model_validate(raw_result)
+        if isinstance(result, TopicModelingDetachmentWorkerResult):
+            stored = await run_sync_in_worker_thread(
+                partial(
+                    _publish_topic_modeling_data_blocks,
+                    lease.path / "analyses" / str(record.id),
+                    lease.workspace,
+                    lease.path,
+                    record,
+                    result,
+                    self._max_node_bytes,
+                ),
+                abandon_on_cancel=False,
+                limiter=self._limiter,
+            )
+            lease.rollback_paths.extend(
+                lease.path / "data" / f"{node_id}.parquet"
+                for node_id in stored.output_node_ids
+            )
+            return PublishedAnalysisResult(
+                payload=cast(dict[str, JsonData], stored.model_dump(mode="json")),
+                artifacts=[],
+                output_node_ids=stored.output_node_ids,
+            )
         if isinstance(result, DetachmentWorkerResult):
             stored = await run_sync_in_worker_thread(
                 partial(
@@ -97,7 +126,7 @@ class AnalysisArtifactService:
                 limiter=self._limiter,
             )
             lease.rollback_paths.append(
-                lease.path / "data" / f"{stored.output_node_id}.parquet"
+                lease.path / "data" / f"{stored.output_node_ids[0]}.parquet"
             )
             return PublishedAnalysisResult(
                 payload=cast(
@@ -105,7 +134,7 @@ class AnalysisArtifactService:
                     stored.model_dump(mode="json"),
                 ),
                 artifacts=[],
-                output_node_id=stored.output_node_id,
+                output_node_ids=stored.output_node_ids,
             )
 
         projector = ANALYSIS_ARTIFACT_PROJECTORS.get(kind)
@@ -130,6 +159,7 @@ class AnalysisArtifactService:
         return PublishedAnalysisResult(
             payload=cast(dict[str, JsonData], stored.model_dump(mode="json")),
             artifacts=publication.artifacts,
+            output_node_ids=[],
         )
 
     async def response_snapshot(
@@ -197,6 +227,7 @@ def _publish_analysis_data_block(
     record: AnalysisRecord,
     result: DetachmentWorkerResult,
     max_node_bytes: int,
+    expected_output_files: set[Path] | None = None,
 ) -> DetachmentStoredResult:
     """Validate and transfer one Analysis output into independent graph ownership."""
 
@@ -204,7 +235,7 @@ def _publish_analysis_data_block(
     _validate_published_data_block_identity(workspace, record, metadata)
     output_dir = analysis_dir / ".execution" / "output"
     source, _relative = _resolve_output_file(output_dir, result.result.parquet_path)
-    if _owned_regular_files(output_dir) != {source}:
+    if _owned_regular_files(output_dir) != (expected_output_files or {source}):
         raise ValueError("Analysis Data Block output contains undeclared files")
     if source.stat().st_size > max_node_bytes:
         raise ValueError("Analysis Data Block exceeds its storage budget")
@@ -249,7 +280,7 @@ def _publish_analysis_data_block(
             fsync_directory(data_dir)
         raise
     payload = {
-        "output_node_id": metadata.id,
+        "output_node_ids": [metadata.id],
         "output_columns": result.result.output_columns,
         "record_count": result.result.record_count,
     }
@@ -259,6 +290,78 @@ def _publish_analysis_data_block(
             annotation_column=record.request.annotation_column,
         )
     return DetachmentStoredResult(**payload)
+
+
+def _publish_topic_modeling_data_blocks(
+    analysis_dir: Path,
+    workspace: Workspace,
+    workspace_path: Path,
+    record: AnalysisRecord,
+    result: TopicModelingDetachmentWorkerResult,
+    max_node_bytes: int,
+) -> TopicModelingDetachmentStoredResult:
+    output_dir = analysis_dir / ".execution" / "output"
+    declared_files = {
+        _resolve_output_file(output_dir, data.parquet_path)[0]
+        for output in result.outputs
+        for data in (output.topic_data, output.topic_meanings)
+    }
+    if len(declared_files) != len(result.outputs) * 2:
+        raise ValueError("Topic Modeling output files must be unique")
+    created_ids: list[uuid.UUID] = []
+    stored_outputs: list[TopicModelingDetachedOutput] = []
+    try:
+        for output in result.outputs:
+            topic_data = _publish_analysis_data_block(
+                analysis_dir,
+                workspace,
+                workspace_path,
+                record,
+                DetachmentWorkerResult(
+                    state="successful",
+                    result=output.topic_data,
+                    message=result.message,
+                ),
+                max_node_bytes,
+                declared_files,
+            )
+            created_ids.extend(topic_data.output_node_ids)
+            topic_meanings = _publish_analysis_data_block(
+                analysis_dir,
+                workspace,
+                workspace_path,
+                record,
+                DetachmentWorkerResult(
+                    state="successful",
+                    result=output.topic_meanings,
+                    message=result.message,
+                ),
+                max_node_bytes,
+                declared_files,
+            )
+            created_ids.extend(topic_meanings.output_node_ids)
+            stored_outputs.append(
+                TopicModelingDetachedOutput(
+                    source_node_id=output.source_node_id,
+                    topic_data_node_id=topic_data.output_node_ids[0],
+                    topic_meanings_node_id=topic_meanings.output_node_ids[0],
+                    topic_data_columns=topic_data.output_columns,
+                    topic_data_record_count=topic_data.record_count,
+                    topic_meanings_record_count=topic_meanings.record_count,
+                )
+            )
+    except BaseException:
+        data_dir = workspace_path / "data"
+        for node_id in reversed(created_ids):
+            workspace.remove_node(str(node_id))
+            (data_dir / f"{node_id}.parquet").unlink(missing_ok=True)
+        if created_ids:
+            fsync_directory(data_dir)
+        raise
+    return TopicModelingDetachmentStoredResult(
+        output_node_ids=created_ids,
+        outputs=stored_outputs,
+    )
 
 
 def _validate_published_data_block_identity(
@@ -330,6 +433,56 @@ def _validate_published_data_block_identity(
         operation = QuotationDetachmentDerivation()
         default_name = f"Quotations {str(request.node_id)[:8]}"
         document = parent_request.column
+    elif isinstance(request, TopicModelingDetachmentAnalysisRequest) and isinstance(
+        parent_request,
+        TopicModelingAnalysisRequest,
+    ):
+        if not isinstance(metadata.provenance, DerivationProvenance):
+            raise ValueError("Topic Modeling detachment provenance is invalid")
+        references = referenced_node_ids(metadata.provenance)
+        operation_value = metadata.provenance.operation
+        if (
+            len(references) != 1
+            or not isinstance(operation_value, TopicModelingDetachmentDerivation)
+        ):
+            raise ValueError("Topic Modeling detachment provenance is invalid")
+        source_id = references[0]
+        if operation_value.role == "topic_data":
+            source_uuid = uuid.UUID(source_id)
+            source = workspace.nodes.get(source_id)
+            if source is None or source_uuid not in request.node_ids:
+                raise ValueError("Topic Modeling source Data Block is unavailable")
+            selected = request.selected_columns[source_uuid]
+            expected_tokenization = {
+                column: value
+                for column, value in source.tokenization.items()
+                if column in selected
+            }
+            if (
+                metadata.name != request.new_node_names[source_uuid]
+                or metadata.document
+                != (source.document if source.document in selected else None)
+                or metadata.color != source.color
+                or {
+                    name: value.model_dump(mode="python")
+                    for name, value in metadata.tokenization.items()
+                }
+                != expected_tokenization
+                or str(metadata.id) in workspace.nodes
+            ):
+                raise ValueError("Topic Modeling Data Block metadata is invalid")
+            return
+        topic_data = workspace.nodes.get(source_id)
+        if (
+            topic_data is None
+            or metadata.name != f"{topic_data.name} topic meanings"
+            or metadata.document is not None
+            or metadata.color != topic_data.color
+            or metadata.tokenization
+            or str(metadata.id) in workspace.nodes
+        ):
+            raise ValueError("Topic meanings Data Block metadata is invalid")
+        return
     else:
         raise ValueError("Child Analysis no longer has a compatible parent")
     expected_provenance = DerivationProvenance(

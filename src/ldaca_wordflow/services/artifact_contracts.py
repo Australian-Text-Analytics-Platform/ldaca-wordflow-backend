@@ -7,6 +7,7 @@ from collections.abc import Callable
 from pydantic import BaseModel
 
 from ..models.analysis_results import (
+    SequentialWorkerResult,
     TokenFrequencyWorkerResult,
     TopicModelingWorkerResult,
 )
@@ -26,26 +27,24 @@ def token_frequency_artifacts(result: BaseModel) -> list[ArtifactProjection]:
     value = TokenFrequencyWorkerResult.model_validate(result)
     projected: list[ArtifactProjection] = [
         (
-            ("artifacts", "nodes", index, "token_parquet_path"),
-            node.token_parquet_path,
+            ("tables", "nodes", index, "table", "artifact"),
+            node.table.artifact,
         )
-        for index, node in enumerate(value.artifacts.nodes)
+        for index, node in enumerate(value.tables.nodes)
     ]
-    if value.artifacts.statistics_parquet_path is not None:
+    if value.tables.statistics is not None:
         projected.append(
             (
-                ("artifacts", "statistics_parquet_path"),
-                value.artifacts.statistics_parquet_path,
+                ("tables", "statistics", "artifact"),
+                value.tables.statistics.artifact,
             )
         )
-    projected.extend(
-        (
-            ("artifacts", "input_token_streams", index, "token_stream_parquet_path"),
-            stream.token_stream_parquet_path,
-        )
-        for index, stream in enumerate(value.artifacts.input_token_streams)
-    )
     return projected
+
+
+def sequential_artifacts(result: BaseModel) -> list[ArtifactProjection]:
+    value = SequentialWorkerResult.model_validate(result)
+    return [(("table", "artifact"), value.table.artifact)]
 
 
 def topic_modeling_artifacts(result: BaseModel) -> list[ArtifactProjection]:
@@ -57,8 +56,8 @@ def topic_modeling_artifacts(result: BaseModel) -> list[ArtifactProjection]:
         ),
         *[
             (
-                ("artifacts", "nodes", index, "assignments_parquet_path"),
-                node.assignments_parquet_path,
+                ("artifacts", "nodes", index, "assignments", "artifact"),
+                node.assignments.artifact,
             )
             for index, node in enumerate(value.artifacts.nodes)
         ],
@@ -70,7 +69,7 @@ ANALYSIS_ARTIFACT_PROJECTORS: dict[str, ArtifactProjector] = {
     "topic_modeling": topic_modeling_artifacts,
     "concordance": no_artifacts,
     "quotation": no_artifacts,
-    "sequential": no_artifacts,
+    "sequential": sequential_artifacts,
 }
 
 

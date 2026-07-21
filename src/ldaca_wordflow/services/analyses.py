@@ -21,6 +21,7 @@ from ..domain.workspace import (
     AnalysisState,
     AnalysisSubmission,
     AnnotationAnalysisRequest,
+    AnnotationAnalysisSubmission,
     ChildAnalysisRequest,
     ConcordanceAnalysisRequest,
     ConcordanceDetachmentAnalysisRequest,
@@ -31,6 +32,8 @@ from ..domain.workspace import (
     Progress,
     QuotationAnalysisRequest,
     QuotationDetachmentAnalysisRequest,
+    TopicModelingAnalysisRequest,
+    TopicModelingDetachmentAnalysisRequest,
     ValidAnalysisIntegrity,
     Workspace,
     analysis_input_ids,
@@ -39,6 +42,7 @@ from ..domain.workspace import (
 )
 from ..models.analyses import AnalysisPage
 from ..shared.errors import (
+    AppError,
     AnalysisCorruptError,
     AnalysisInputGoneError,
     AnalysisInputMissingError,
@@ -74,7 +78,7 @@ class PublishedAnalysisResult:
 
     payload: dict[str, JsonData]
     artifacts: list[AnalysisArtifactRecord]
-    output_node_id: uuid.UUID | None = None
+    output_node_ids: list[uuid.UUID]
 
 
 class AnalysisResultPublisher(Protocol):
@@ -192,7 +196,14 @@ class AnalysisService:
             raise BackendStoppingError()
         request = persisted_submission(submission)
         credential = (
-            await self._credentials.annotation_credential(user_id, request.provider)
+            await self._credentials.annotation_credential(
+                request.provider,
+                supplied=(
+                    submission.api_key
+                    if isinstance(submission, AnnotationAnalysisSubmission)
+                    else None
+                ),
+            )
             if isinstance(request, AnnotationAnalysisRequest)
             else None
         )
@@ -268,10 +279,13 @@ class AnalysisService:
             ) or (
                 isinstance(parent.request, QuotationAnalysisRequest)
                 and isinstance(request, QuotationDetachmentAnalysisRequest)
+            ) or (
+                isinstance(parent.request, TopicModelingAnalysisRequest)
+                and isinstance(request, TopicModelingDetachmentAnalysisRequest)
             )
-            if not compatible or request.node_id not in analysis_input_ids(
-                parent.request
-            ):
+            requested_ids = set(analysis_input_ids(request))
+            parent_ids = set(analysis_input_ids(parent.request))
+            if not compatible or not requested_ids.issubset(parent_ids):
                 raise AnalysisParentInvalidError(
                     "Child Analysis does not match its parent"
                 )
@@ -572,21 +586,32 @@ class AnalysisService:
                     await reserve_launch(key)
                     reserved = True
                     lease.workspace.replace_analysis(record.start(self._clock()))
-                except Exception:
-                    logger.exception(
-                        "Analysis dispatch admission failed analysis_id=%s user_id=%s",
-                        key.analysis_id,
-                        key.user_id,
-                    )
+                except Exception as exc:
+                    if isinstance(exc, AppError):
+                        failure = Failure(
+                            code=exc.code,
+                            message=(
+                                exc.message
+                                if exc.status_code < 500 or exc.expose_message
+                                else "Analysis failed"
+                            ),
+                        )
+                    else:
+                        logger.exception(
+                            "Analysis dispatch admission failed analysis_id=%s user_id=%s",
+                            key.analysis_id,
+                            key.user_id,
+                        )
+                        failure = Failure(
+                            code="analysis_start_failed",
+                            message="Analysis could not start",
+                        )
                     if reserved:
                         await discard_launch(key)
                         reserved = False
                     failed = record.fail(
                         self._clock(),
-                        failure=Failure(
-                            code="analysis_start_failed",
-                            message="Analysis could not start",
-                        ),
+                        failure=failure,
                         progress=record.progress,
                     )
                     lease.workspace.replace_analysis(failed)
@@ -720,7 +745,7 @@ class AnalysisService:
                         self._clock(),
                         result_payload=publication.payload,
                         artifact_references=publication.artifacts,
-                        output_node_id=publication.output_node_id,
+                        output_node_ids=publication.output_node_ids,
                     )
                 except OSError, TypeError, ValidationError, ValueError:
                     logger.exception(

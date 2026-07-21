@@ -41,6 +41,17 @@ def topic_modeling_process(
     )
 
 
+def topic_modeling_detachment_process(
+    *, progress_queue: Queue[Any], **kwargs: Any
+) -> dict[str, Any]:
+    from .topic_modeling import run_topic_modeling_detachment
+
+    return run_topic_modeling_detachment(
+        progress_callback=_progress_callback(progress_queue),
+        **kwargs,
+    )
+
+
 def concordance_process(*, progress_queue: Queue[Any], **kwargs: Any) -> dict[str, Any]:
     from .concordance import run_concordance_analysis
 

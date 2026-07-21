@@ -22,8 +22,12 @@ def test_token_frequency_worker_emits_early_progress_updates(tmp_path, monkeypat
             "token": ["alpha"],
             "freq_corpus_0": [3],
             "percent_corpus_0": [0.75],
+            "expected_0": [2.5],
+            "corpus_0_total": [4],
             "freq_corpus_1": [2],
             "percent_corpus_1": [0.5],
+            "expected_1": [2.5],
+            "corpus_1_total": [4],
             "log_likelihood_llv": [1.2],
             "percent_diff": [0.25],
             "bayes_factor_bic": [0.5],
@@ -43,7 +47,8 @@ def test_token_frequency_worker_emits_early_progress_updates(tmp_path, monkeypat
             "node-2": ["alpha beta"],
         },
         node_display_names={"node-1": "Data Block 1", "node-2": "Data Block 2"},
-        artifact_dir=str(tmp_path),
+        artifact_dir=str(tmp_path / "output"),
+        scratch_dir=str(tmp_path / "scratch"),
         artifact_prefix="token_frequency_test",
         progress_callback=lambda progress, message: progress_updates.append(
             (
@@ -65,6 +70,29 @@ def test_token_frequency_worker_emits_early_progress_updates(tmp_path, monkeypat
     )
     assert progress_updates[-1] == (0.85, "Writing token-frequency results...")
     assert all(0.0 <= fraction < 1.0 for fraction, _message in progress_updates)
+
+    statistics_artifact = result["tables"]["statistics"]["artifact"]
+    statistics = pl.read_ipc_stream(statistics_artifact)
+    assert {
+        "freq_reference",
+        "percent_reference",
+        "expected_reference",
+        "reference_total",
+        "freq_study",
+        "percent_study",
+        "expected_study",
+        "study_total",
+    }.issubset(statistics.columns)
+    assert {
+        "freq_corpus_0",
+        "percent_corpus_0",
+        "expected_0",
+        "corpus_0_total",
+        "freq_corpus_1",
+        "percent_corpus_1",
+        "expected_1",
+        "corpus_1_total",
+    }.isdisjoint(statistics.columns)
 
 
 def test_token_frequency_worker_uses_per_node_tokenizer_models(tmp_path, monkeypatch):
@@ -103,7 +131,8 @@ def test_token_frequency_worker_uses_per_node_tokenizer_models(tmp_path, monkeyp
             "node-ja": ["吾輩は猫である"],
         },
         node_display_names={"node-en": "English", "node-ja": "Japanese"},
-        artifact_dir=str(tmp_path),
+        artifact_dir=str(tmp_path / "output"),
+        scratch_dir=str(tmp_path / "scratch"),
         artifact_prefix="token_frequency_models",
         node_tokenizer_models={
             "node-en": "native:plain_words_en",
