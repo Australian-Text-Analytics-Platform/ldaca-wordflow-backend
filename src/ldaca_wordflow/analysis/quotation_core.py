@@ -22,7 +22,7 @@ import polars as pl
 from polars.exceptions import ColumnNotFoundError
 
 from ..domain.workspace import Node
-from ..shared.serialization import stringify_unsafe_integers
+from ..shared.serialization import serialize_json_rows
 from ..shared.errors import InvalidInputError
 from ..models.quotation import QuotationEngineType, ResolvedQuotationEngine
 from .generated_columns import (
@@ -537,7 +537,7 @@ async def compute_on_demand_page(
     metadata = _quotation_metadata(columns)
 
     return {
-        "data": stringify_unsafe_integers(page_rows),
+        "data": serialize_json_rows(page_rows),
         "columns": columns,
         "metadata": metadata,
         "pagination": {

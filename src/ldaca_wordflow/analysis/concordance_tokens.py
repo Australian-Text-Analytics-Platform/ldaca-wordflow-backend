@@ -31,7 +31,7 @@ from typing import Any, Optional, cast
 
 import polars as pl
 
-from ..shared.serialization import stringify_unsafe_integers
+from ..shared.serialization import serialize_json_rows
 from ..shared.errors import InvalidInputError
 from .generated_columns import (
     CONC_END_IDX_COLUMN,
@@ -250,7 +250,7 @@ def compute_tokens_concordance_page(
     }
 
     return {
-        "data": stringify_unsafe_integers(grouped_rows),
+        "data": serialize_json_rows(grouped_rows),
         "columns": columns,
         "metadata": metadata,
         "pagination": {

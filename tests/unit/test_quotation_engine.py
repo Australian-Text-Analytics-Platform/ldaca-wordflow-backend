@@ -1,4 +1,5 @@
 import uuid
+from datetime import UTC, datetime
 
 import polars as pl
 import pytest
@@ -6,6 +7,7 @@ from ldaca_wordflow.analysis.quotation_core import (
     compute_quote_dataframe,
     compute_on_demand_page,
     prepare_documents_payload,
+    remote_payload_to_grouped_dataframe,
 )
 from ldaca_wordflow.infrastructure.providers.quotation_client import (
     QuotationProviderClient,
@@ -19,6 +21,7 @@ from ldaca_wordflow.domain.workspace import (
     QuotationEngineType,
 )
 from ldaca_wordflow.models.quotation import ResolvedQuotationEngine
+from ldaca_wordflow.models.analysis_results import QuotationWorkerResult
 from ldaca_wordflow.infrastructure.providers.quotation_engines import (
     resolve_quotation_engine,
 )
@@ -133,6 +136,44 @@ async def test_quotation_page_rejects_an_unknown_sort_column() -> None:
             compute_quote_dataframe_fn=unused_compute,
             run_blocking=_run_inline,
         )
+
+
+@pytest.mark.asyncio
+async def test_quotation_page_serializes_temporal_metadata_for_worker_result() -> None:
+    created_at = datetime(2020, 10, 16, 22, 2, 13, tzinfo=UTC)
+    node = Node(
+        data=pl.DataFrame({"body": ["quoted text"], "created_at": [created_at]}).lazy(),
+        name="Documents",
+    )
+
+    async def fake_compute(_node, base_df, *_args, **_kwargs):
+        return remote_payload_to_grouped_dataframe(
+            base_df,
+            {
+                "results": [
+                    {
+                        "identifier": "0",
+                        "quotes": [{"quote": "quoted text"}],
+                    }
+                ]
+            },
+        )
+
+    payload = await compute_on_demand_page(
+        node,
+        "body",
+        ResolvedQuotationEngine(),
+        page=1,
+        page_size=10,
+        sort_by=None,
+        descending=False,
+        compute_quote_dataframe_fn=fake_compute,
+        run_blocking=_run_inline,
+    )
+
+    result = QuotationWorkerResult.model_validate(payload)
+
+    assert result.data[0][0]["created_at"] == "2020-10-16T22:02:13Z"
 
 
 @pytest.mark.asyncio

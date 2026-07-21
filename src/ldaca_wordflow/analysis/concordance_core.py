@@ -20,7 +20,7 @@ from typing import Any, Optional
 
 import polars as pl
 
-from ..shared.serialization import stringify_unsafe_integers
+from ..shared.serialization import serialize_json_rows
 from ..shared.errors import InvalidInputError
 from .concordance_tokens import (
     compute_tokens_concordance_page,
@@ -312,7 +312,7 @@ def compute_concordance_page(
     metadata = _column_metadata(columns, CORE_CONCORDANCE_COLUMNS)
 
     return {
-        "data": stringify_unsafe_integers(page_rows),
+        "data": serialize_json_rows(page_rows),
         "columns": columns,
         "metadata": metadata,
         "pagination": {
