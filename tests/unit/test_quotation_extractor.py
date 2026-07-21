@@ -8,11 +8,48 @@ from ldaca_wordflow._vendor.gender_gap_tracker.quote_extractor import QuoteExtra
 def test_vendored_extractor_exposes_only_the_in_process_algorithm(tmp_path: Path):
     verbs = tmp_path / "verbs.txt"
     verbs.write_text("said\nreported\n", encoding="utf-8")
+    nlp = object()
 
-    extractor = QuoteExtractor(verbs)
+    extractor = QuoteExtractor(verbs, nlp)
 
     assert extractor.quote_verbs == ["said", "reported"]
+    assert extractor.nlp is nlp
     assert not hasattr(extractor, "run")
+
+
+def test_extract_quotations_uses_the_model_bound_to_the_vendored_extractor(
+    monkeypatch,
+):
+    class FakeNlp:
+        def __call__(self, text: str):
+            return SimpleNamespace(text=text)
+
+    fake_nlp = FakeNlp()
+    monkeypatch.setattr(qe, "_nlp_model", None)
+    monkeypatch.setattr(qe, "_extractor", None)
+    monkeypatch.setattr(qe, "_load_spacy_model", lambda: fake_nlp)
+    monkeypatch.setattr(
+        QuoteExtractor,
+        "extract_quotes",
+        lambda self, doc: [
+            {
+                "speaker": "Alex",
+                "speaker_index": "(0,4)",
+                "quote": doc.text,
+                "quote_index": f"(0,{len(doc.text)})",
+                "verb": "said",
+                "verb_index": "(5,9)",
+                "quote_type": "CSV",
+                "quote_token_count": 2,
+                "is_floating_quote": False,
+            }
+        ],
+    )
+
+    result = qe.extract_quotations_for_texts(["Alex said hello"])
+
+    assert result[0][0]["quote"] == "Alex said hello"
+    assert result[0][0]["speaker"] == "Alex"
 
 
 def test_load_spacy_model_downloads_to_cache_when_package_missing(

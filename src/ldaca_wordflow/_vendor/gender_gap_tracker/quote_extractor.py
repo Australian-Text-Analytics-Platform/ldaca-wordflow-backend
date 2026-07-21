@@ -1,11 +1,13 @@
 from pathlib import Path
 from statistics import mean
+from typing import Any
 
 import spacy
 
 
 class QuoteExtractor:
-    def __init__(self, quote_verbs_path: str | Path) -> None:
+    def __init__(self, quote_verbs_path: str | Path, nlp: Any) -> None:
+        self.nlp = nlp
         self.quote_verbs = Path(quote_verbs_path).read_text(encoding="utf-8").split()
 
     def get_pretty_index(self, key):

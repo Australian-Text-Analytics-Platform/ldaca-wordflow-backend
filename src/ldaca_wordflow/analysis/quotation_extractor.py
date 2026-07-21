@@ -144,7 +144,7 @@ def _get_extractor():
     from .._vendor.gender_gap_tracker.quote_extractor import QuoteExtractor
 
     _nlp_model = _load_spacy_model()
-    _extractor = QuoteExtractor(_QUOTE_VERBS_PATH)
+    _extractor = QuoteExtractor(_QUOTE_VERBS_PATH, _nlp_model)
     return _extractor
 
 
