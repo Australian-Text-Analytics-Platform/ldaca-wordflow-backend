@@ -1,5 +1,6 @@
 """Framework-neutral domain models owned by the backend package."""
 
+from .annotation import AnnotationClass, AnnotationProvider
 from .user_file_import import (
     DataPortalUserFileImportRequest,
     DataPortalUserFileImportResult,
@@ -11,6 +12,8 @@ from .user_file_import import (
 )
 
 __all__ = [
+    "AnnotationClass",
+    "AnnotationProvider",
     "DataPortalUserFileImportRequest",
     "DataPortalUserFileImportResult",
     "SampleUserFileImportRequest",

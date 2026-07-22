@@ -13,17 +13,9 @@ from pydantic import (
     model_validator,
 )
 
+from ..domain.annotation import AnnotationClass, AnnotationProvider
+
 NonEmptyText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
-AnnotationProvider = Literal["openai", "openrouter", "anthropic", "google"]
-
-
-class AnnotationClass(BaseModel):
-    """One exact label and optional model-facing description."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    name: NonEmptyText = Field(max_length=200)
-    description: str = Field(default="", max_length=2_000)
 
 
 class AnnotationConfig(BaseModel):

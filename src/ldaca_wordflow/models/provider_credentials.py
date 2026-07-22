@@ -6,7 +6,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
-AnnotationProvider = Literal["openai", "openrouter", "anthropic", "google"]
+from ..domain.annotation import AnnotationProvider
+
 CredentialSource = Literal["none", "user", "deployment"]
 CredentialStorage = Literal["backend", "browser"]
 

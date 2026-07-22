@@ -117,6 +117,24 @@ def test_analysis_requests_results_and_queries_are_discriminated() -> None:
     )
 
 
+def test_annotation_requests_share_one_annotation_class_schema() -> None:
+    schemas = app.openapi()["components"]["schemas"]
+    annotation_class_schemas = [
+        name
+        for name, definition in schemas.items()
+        if definition.get("title") == "AnnotationClass"
+    ]
+
+    assert annotation_class_schemas == ["AnnotationClass"]
+    expected_ref = {"$ref": "#/components/schemas/AnnotationClass"}
+    for request_name in (
+        "AnnotationAnalysisRequest",
+        "AnnotationAnalysisSubmission",
+        "AnnotationPreviewRequest",
+    ):
+        assert schemas[request_name]["properties"]["classes"]["items"] == expected_ref
+
+
 def test_workspace_owned_analysis_representation_is_exact() -> None:
     schema = app.openapi()
     analysis = schema["components"]["schemas"]["Analysis"]

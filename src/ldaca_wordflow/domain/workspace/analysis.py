@@ -19,6 +19,7 @@ from pydantic import (
 )
 
 from ...shared.json_data import JsonData
+from ..annotation import AnnotationClass, AnnotationProvider
 from ..background import BackgroundState, Failure, Progress
 
 
@@ -192,14 +193,6 @@ class SequentialAnalysisRequest(_StrictModel):
         ):
             raise ValueError("Custom datetime frequency requires a value and unit")
         return self
-
-
-class AnnotationClass(_StrictModel):
-    name: NonEmptyText = Field(max_length=200)
-    description: str = Field(default="", max_length=2000)
-
-
-AnnotationProvider = Literal["openai", "openrouter", "anthropic", "google"]
 
 
 class _AnnotationFields(_StrictModel):
