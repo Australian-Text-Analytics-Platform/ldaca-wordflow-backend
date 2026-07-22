@@ -40,9 +40,12 @@ from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, Protocol, TypeVar, cast
 import polars as pl
 from ..domain.workspace import (
+    AnalysisRecord,
+    AnalysisState,
     Node,
     TokenizationMeta,
     Workspace,
+    analysis_input_ids,
     referenced_node_ids,
 )
 from ..infrastructure.storage.workspace_store import WorkspaceStore
@@ -72,6 +75,10 @@ from .safe_paths import SafePathResolver
 from .storage_admission import StorageAdmissionService, StorageReservation
 from .user_files import AsyncUploadSource
 from .response_snapshots import ResponseSnapshot, ResponseSnapshotService
+from ..workers.input_snapshots import (
+    create_worker_input_snapshot,
+    load_snapshot_node,
+)
 
 T = TypeVar("T")
 
@@ -203,7 +210,11 @@ class WorkspaceArchiveService:
                 suffix=".zip",
                 max_output_bytes=self._max_export_bytes,
                 reservation_bytes=self._max_export_bytes * 2,
-                producer=partial(_create_workspace_export, detached),
+                producer=partial(
+                    _create_workspace_export,
+                    detached,
+                    source_snapshot,
+                ),
             )
             filename = f"{_safe_export_name(workspace_name)}.zip"
             return snapshot, filename, revision
@@ -612,6 +623,22 @@ def _create_archive_temp(root: Path) -> tuple[int, Path]:
     return descriptor, Path(raw_path)
 
 
+def _archive_artifact_path(record: AnalysisRecord, relative_path: str) -> Path:
+    """Return the canonical portable archive path for one declared Artifact."""
+
+    try:
+        parts = portable_relative_path_parts(relative_path)
+    except ValueError as exc:
+        raise InvalidWorkspaceArchiveError(
+            "Workspace Analysis Artifact path is invalid"
+        ) from exc
+    if len(parts) < 2 or parts[0] != "artifacts":
+        raise InvalidWorkspaceArchiveError(
+            "Workspace Analysis Artifact path is invalid"
+        )
+    return Path("analyses") / str(record.id) / Path(*parts)
+
+
 def _compile_materialized_archive(
     staging: Path,
     manifest: WorkspaceArchiveManifest,
@@ -650,6 +677,14 @@ def _compile_materialized_archive(
         for parent_id in parent_ids:
             children[parent_id].append(node_id)
         allowed_files.add(expected_file)
+
+    for archived in manifest.analyses:
+        record = archived.record
+        for reference in record.artifact_references:
+            allowed_files.add(
+                _archive_artifact_path(record, reference.relative_path).as_posix()
+            )
+        allowed_files.update(item.data_file for item in archived.query_inputs)
 
     actual_files = {
         path.relative_to(staging).as_posix()
@@ -730,6 +765,66 @@ def _compile_materialized_archive(
             raise InvalidWorkspaceArchiveError(
                 "Workspace archive node graph contains a cycle"
             )
+        for archived in manifest.analyses:
+            if not archived.query_inputs:
+                continue
+            record = archived.record
+            if record.query_snapshot is None:
+                raise InvalidWorkspaceArchiveError(
+                    "Workspace Analysis query inputs are invalid"
+                )
+            query_workspace = Workspace(
+                name=f"Analysis {record.id} query inputs",
+                workspace_id=workspace.id,
+            )
+            query_data_root = staging / "analyses" / str(record.id) / "query-data"
+            for item in archived.query_inputs:
+                data_path = staging / item.data_file
+                lazyframe = pl.scan_parquet(data_path.resolve(strict=True))
+                schema_names = set(lazyframe.collect_schema().names())
+                if item.document is not None and item.document not in schema_names:
+                    raise InvalidWorkspaceArchiveError(
+                        "Workspace Analysis document column is absent from query data"
+                    )
+                for source_column, tokenization in item.tokenization.items():
+                    if (
+                        source_column not in schema_names
+                        or tokenization.column_name not in schema_names
+                    ):
+                        raise InvalidWorkspaceArchiveError(
+                            "Workspace Analysis tokenization columns are absent from query data"
+                        )
+                query_workspace.add_node(
+                    Node(
+                        id=str(item.id),
+                        data=lazyframe,
+                        name=item.name,
+                        document=item.document,
+                        color=item.color,
+                        tokenization={
+                            source_column: cast(
+                                TokenizationMeta,
+                                tokenization.model_dump(mode="python"),
+                            )
+                            for source_column, tokenization in item.tokenization.items()
+                        },
+                    )
+                )
+            create_worker_input_snapshot(
+                workspace_id=workspace.id,
+                node_ids=[str(item.id) for item in archived.query_inputs],
+                workspace=query_workspace,
+                workspace_data_dir=query_data_root,
+                snapshot_dir=staging / record.query_snapshot.relative_path,
+                max_snapshot_bytes=workspace_store.max_snapshot_bytes,
+            )
+            shutil.rmtree(query_data_root)
+        for archived in manifest.analyses:
+            if archived.record.parent_analysis_id is None:
+                workspace.add_analysis(archived.record.model_copy(deep=True))
+        for archived in manifest.analyses:
+            if archived.record.parent_analysis_id is not None:
+                workspace.add_analysis(archived.record.model_copy(deep=True))
         workspace_store.commit(staging, workspace, expected_revision=None)
     except InvalidWorkspaceArchiveError:
         raise
@@ -785,8 +880,79 @@ def _snapshot_workspace_tree(source: Path, max_bytes: int) -> Path:
         raise
 
 
+def _terminal_archive_analyses(workspace: Workspace) -> list[AnalysisRecord]:
+    """Return terminal Analyses reachable from current Tabs in parent-first order."""
+
+    terminal_states = {
+        AnalysisState.SUCCEEDED,
+        AnalysisState.FAILED,
+        AnalysisState.CANCELLED,
+    }
+    live_ids = workspace.live_analysis_ids()
+    roots = [
+        record
+        for analysis_id, record in workspace.analyses.items()
+        if analysis_id in live_ids
+        and record.parent_analysis_id is None
+        and record.state in terminal_states
+    ]
+    root_ids = {str(record.id) for record in roots}
+    children = [
+        record
+        for analysis_id, record in workspace.analyses.items()
+        if analysis_id in live_ids
+        and record.parent_analysis_id is not None
+        and str(record.parent_analysis_id) in root_ids
+        and record.state in terminal_states
+    ]
+    return [*roots, *children]
+
+
+def _write_export_parquet(
+    lazyframe: pl.LazyFrame,
+    destination: Path,
+    remaining_bytes: int,
+) -> int:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    frame = lazyframe.collect(engine="streaming")
+    with destination.open("xb") as output:
+        write_parquet_bounded(
+            frame,
+            output,
+            remaining_bytes,
+            label="Workspace export",
+        )
+        output.flush()
+        os.fsync(output.fileno())
+    return destination.stat().st_size
+
+
+def _copy_export_artifact(
+    source_root: Path,
+    staging: Path,
+    record: AnalysisRecord,
+    relative_path: str,
+    remaining_bytes: int,
+) -> int:
+    archive_path = _archive_artifact_path(record, relative_path)
+    source = (source_root / archive_path).resolve(strict=True)
+    source.relative_to(source_root.resolve(strict=True))
+    metadata = source.lstat()
+    if source.is_symlink() or not stat.S_ISREG(metadata.st_mode):
+        raise InvalidWorkspaceArchiveError("Workspace Analysis Artifact is unsafe")
+    if metadata.st_size > remaining_bytes:
+        raise UploadTooLargeError("Workspace export exceeds the configured limit")
+    destination = staging / archive_path
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, destination, follow_symlinks=False)
+    with destination.open("rb") as copied:
+        os.fsync(copied.fileno())
+    return metadata.st_size
+
+
 def _create_workspace_export(
     workspace: Workspace,
+    source_root: Path,
     target: Path,
     max_output_bytes: int,
 ) -> None:
@@ -803,23 +969,15 @@ def _create_workspace_export(
         for node in workspace.nodes.values():
             data_file = f"data/{node.id}.parquet"
             destination = staging / data_file
-            frame = node.data.collect(engine="streaming")
-            with destination.open("xb") as output:
-                write_parquet_bounded(
-                    frame,
-                    output,
-                    max_output_bytes - expanded_bytes,
-                    label="Workspace export",
-                )
-                output.flush()
-                os.fsync(output.fileno())
-            expanded_bytes += destination.stat().st_size
+            expanded_bytes += _write_export_parquet(
+                node.data,
+                destination,
+                max_output_bytes - expanded_bytes,
+            )
             if expanded_bytes > max_output_bytes:
                 raise UploadTooLargeError(
                     "Workspace export exceeds the configured limit"
                 )
-            with destination.open("rb") as source:
-                os.fsync(source.fileno())
             nodes.append(
                 {
                     "id": node.id,
@@ -832,10 +990,57 @@ def _create_workspace_export(
                 }
             )
         _fsync_directory(data_root)
+        analysis_records = _terminal_archive_analyses(workspace)
+        archived_analysis_ids = {str(record.id) for record in analysis_records}
+        analyses: list[dict[str, JsonData]] = []
+        for record in analysis_records:
+            for reference in record.artifact_references:
+                expanded_bytes += _copy_export_artifact(
+                    source_root,
+                    staging,
+                    record,
+                    reference.relative_path,
+                    max_output_bytes - expanded_bytes,
+                )
+            query_inputs: list[dict[str, JsonData]] = []
+            if record.query_snapshot is not None:
+                query_snapshot = source_root / record.query_snapshot.relative_path
+                for node_id in analysis_input_ids(record.request):
+                    snapshot_node = load_snapshot_node(query_snapshot, str(node_id))
+                    data_file = (
+                        Path("analyses")
+                        / str(record.id)
+                        / "query-data"
+                        / f"{node_id}.parquet"
+                    )
+                    expanded_bytes += _write_export_parquet(
+                        snapshot_node.data,
+                        staging / data_file,
+                        max_output_bytes - expanded_bytes,
+                    )
+                    query_inputs.append(
+                        {
+                            "id": snapshot_node.id,
+                            "name": snapshot_node.name,
+                            "document": snapshot_node.document,
+                            "color": snapshot_node.color,
+                            "tokenization": cast(JsonData, snapshot_node.tokenization),
+                            "data_file": data_file.as_posix(),
+                        }
+                    )
+            analyses.append(
+                {
+                    "record": cast(
+                        JsonData,
+                        record.model_dump(mode="json"),
+                    ),
+                    "query_inputs": cast(JsonData, query_inputs),
+                }
+            )
         manifest = WorkspaceArchiveManifest.model_validate(
             {
                 "format": "wordflow-materialized-workspace",
-                "version": 3,
+                "version": 4,
                 "workspace": {
                     "id": workspace.id,
                     "name": workspace.name,
@@ -845,8 +1050,18 @@ def _create_workspace_export(
                 },
                 "nodes": nodes,
                 "tabs": [
-                    tab.model_dump(mode="json") for tab in workspace.tabs.values()
+                    tab.model_copy(
+                        update={
+                            "analysis_id": (
+                                tab.analysis_id
+                                if str(tab.analysis_id) in archived_analysis_ids
+                                else None
+                            )
+                        }
+                    ).model_dump(mode="json")
+                    for tab in workspace.tabs.values()
                 ],
+                "analyses": analyses,
             }
         )
         _atomic_json_write(

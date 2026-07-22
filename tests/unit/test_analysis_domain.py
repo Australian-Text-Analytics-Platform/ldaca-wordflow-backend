@@ -9,6 +9,7 @@ import pytest
 from pydantic import TypeAdapter, ValidationError
 
 from ldaca_wordflow.domain.workspace import (
+    AnalysisQuerySnapshotRecord,
     AnalysisRecord,
     AnalysisRequest,
     AnalysisState,
@@ -318,6 +319,32 @@ def test_success_is_one_atomic_validated_transition() -> None:
     assert succeeded.output_node_ids == []
     with pytest.raises(ValueError, match="running"):
         record.succeed(created_at, result_payload={"kind": "concordance"})
+
+
+def test_success_records_query_snapshot_as_a_private_explicit_dependency() -> None:
+    created_at = datetime.now(UTC)
+    running = AnalysisRecord.create(
+        _concordance(), timestamp=created_at
+    ).start(created_at + timedelta(seconds=1))
+    query_snapshot = AnalysisQuerySnapshotRecord(
+        relative_path=f"analyses/{running.id}/query-input"
+    )
+
+    succeeded = running.succeed(
+        created_at + timedelta(seconds=2),
+        result_payload={"kind": "concordance"},
+        query_snapshot=query_snapshot,
+    )
+
+    assert succeeded.query_snapshot == query_snapshot
+    assert "query_snapshot" not in public_analysis(
+        succeeded, integrity=ValidAnalysisIntegrity()
+    ).model_dump()
+
+    invalid = running.model_dump()
+    invalid["query_snapshot"] = query_snapshot.model_dump()
+    with pytest.raises(ValidationError, match="successful"):
+        AnalysisRecord.model_validate(invalid)
 
 
 def test_analysis_output_node_ids_are_required_unique_and_strictly_plural() -> None:

@@ -17,6 +17,7 @@ from pydantic import ValidationError
 from ..domain.workspace import (
     Analysis,
     AnalysisArtifactRecord,
+    AnalysisQuerySnapshotRecord,
     AnalysisRecord,
     AnalysisState,
     AnalysisSubmission,
@@ -79,6 +80,7 @@ class PublishedAnalysisResult:
     payload: dict[str, JsonData]
     artifacts: list[AnalysisArtifactRecord]
     output_node_ids: list[uuid.UUID]
+    query_snapshot: AnalysisQuerySnapshotRecord | None = None
 
 
 class AnalysisResultPublisher(Protocol):
@@ -512,36 +514,78 @@ class AnalysisService:
             tab.analysis_id = None
             tab.modified_at = timestamp
             tab.revision += 1
-
-            if root_id in lease.workspace.corrupt_analysis_ids:
-                lease.workspace.remove_analysis(root_id)
-                return
-
-            root = lease.workspace.analyses.get(root_id)
-            if root is None:
-                return
-            tree = [root, *lease.workspace.analysis_children(root_id)]
-            has_active = False
-            for record in tree:
-                if record.state is AnalysisState.QUEUED:
-                    updated = record.cancel_queued(timestamp)
-                    lease.workspace.replace_analysis(updated)
-                    keys_to_cancel.append(
-                        self._key(user_id, workspace_id, str(record.id))
-                    )
-                elif record.state is AnalysisState.RUNNING:
-                    has_active = True
-                    if record.cancellation_requested_at is None:
-                        updated = record.request_running_cancellation(timestamp)
-                        lease.workspace.replace_analysis(updated)
-                    keys_to_cancel.append(
-                        self._key(user_id, workspace_id, str(record.id))
-                    )
-            if not has_active:
-                lease.workspace.remove_analysis(root_id)
+            keys_to_cancel = self._detach_analysis_tree(
+                lease,
+                user_id,
+                workspace_id,
+                root_id,
+                timestamp,
+            )
 
         for key in keys_to_cancel:
             await self._execution.cancel(key)
+
+    async def delete_tab(
+        self,
+        user_id: str,
+        workspace_id: str,
+        tab_id: str,
+    ) -> None:
+        """Delete one Tab and detach its Analysis tree through one mutation."""
+
+        keys_to_cancel: list[AnalysisExecutionKey] = []
+        async with self._workspaces.mutation_context(user_id, workspace_id) as lease:
+            tab = lease.workspace.remove_tab(tab_id)
+            if tab is None:
+                raise TabNotFoundError("Tab not found")
+            if tab.analysis_id is not None:
+                keys_to_cancel = self._detach_analysis_tree(
+                    lease,
+                    user_id,
+                    workspace_id,
+                    str(tab.analysis_id),
+                    self._clock(),
+                )
+
+        for key in keys_to_cancel:
+            await self._execution.cancel(key)
+
+    def _detach_analysis_tree(
+        self,
+        lease: WorkspaceLease,
+        user_id: str,
+        workspace_id: str,
+        root_id: str,
+        timestamp: datetime,
+    ) -> list[AnalysisExecutionKey]:
+        if root_id in lease.workspace.corrupt_analysis_ids:
+            lease.workspace.remove_analysis(root_id)
+            return []
+
+        root = lease.workspace.analyses.get(root_id)
+        if root is None:
+            return []
+        keys_to_cancel: list[AnalysisExecutionKey] = []
+        tree = [root, *lease.workspace.analysis_children(root_id)]
+        has_running = False
+        for record in tree:
+            if record.state is AnalysisState.QUEUED:
+                updated = record.cancel_queued(timestamp)
+                lease.workspace.replace_analysis(updated)
+                keys_to_cancel.append(
+                    self._key(user_id, workspace_id, str(record.id))
+                )
+            elif record.state is AnalysisState.RUNNING:
+                has_running = True
+                if record.cancellation_requested_at is None:
+                    updated = record.request_running_cancellation(timestamp)
+                    lease.workspace.replace_analysis(updated)
+                keys_to_cancel.append(
+                    self._key(user_id, workspace_id, str(record.id))
+                )
+        if not has_running:
+            lease.workspace.remove_analysis(root_id)
+        return keys_to_cancel
 
     async def admit_execution(
         self,
@@ -746,6 +790,7 @@ class AnalysisService:
                         result_payload=publication.payload,
                         artifact_references=publication.artifacts,
                         output_node_ids=publication.output_node_ids,
+                        query_snapshot=publication.query_snapshot,
                     )
                 except OSError, TypeError, ValidationError, ValueError:
                     logger.exception(

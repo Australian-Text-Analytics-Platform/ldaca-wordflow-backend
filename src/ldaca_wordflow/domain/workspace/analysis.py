@@ -361,6 +361,12 @@ class AnalysisArtifactRecord(_StrictModel):
     media_type: str | None = Field(default=None, max_length=200)
 
 
+class AnalysisQuerySnapshotRecord(_StrictModel):
+    """Private portable identity for a retained Result query input."""
+
+    relative_path: NonEmptyText = Field(max_length=1000)
+
+
 class _AnalysisLifecycle(_StrictModel):
     id: uuid.UUID
     parent_analysis_id: uuid.UUID | None
@@ -430,6 +436,8 @@ class AnalysisRecord(_AnalysisLifecycle):
 
     result_payload: dict[str, JsonData] | None = None
     artifact_references: list[AnalysisArtifactRecord] = Field(default_factory=list)
+    query_snapshot: AnalysisQuerySnapshotRecord | None = None
+
     @model_validator(mode="after")
     def validate_result(self) -> "AnalysisRecord":
         succeeded = self.state is AnalysisState.SUCCEEDED
@@ -437,6 +445,14 @@ class AnalysisRecord(_AnalysisLifecycle):
             raise ValueError("Only a successful Analysis has a Result")
         if not succeeded and self.artifact_references:
             raise ValueError("Only a successful Analysis owns published Artifacts")
+        if not succeeded and self.query_snapshot is not None:
+            raise ValueError("Only a successful Analysis owns a query snapshot")
+        if self.query_snapshot is not None:
+            expected = f"analyses/{self.id}/query-input"
+            if self.request.kind not in {"concordance", "quotation"}:
+                raise ValueError("Analysis kind does not support a query snapshot")
+            if self.query_snapshot.relative_path != expected:
+                raise ValueError("Analysis query snapshot path is invalid")
         names = [artifact.name for artifact in self.artifact_references]
         paths = [artifact.relative_path for artifact in self.artifact_references]
         if len(names) != len(set(names)) or len(paths) != len(set(paths)):
@@ -517,6 +533,7 @@ class AnalysisRecord(_AnalysisLifecycle):
         result_payload: dict[str, JsonData],
         artifact_references: list[AnalysisArtifactRecord] | None = None,
         output_node_ids: list[uuid.UUID] | None = None,
+        query_snapshot: AnalysisQuerySnapshotRecord | None = None,
     ) -> "AnalysisRecord":
         if self.state is not AnalysisState.RUNNING:
             raise ValueError("Only a running Analysis can succeed")
@@ -526,6 +543,7 @@ class AnalysisRecord(_AnalysisLifecycle):
             result_payload=result_payload,
             artifact_references=artifact_references or [],
             output_node_ids=output_node_ids or [],
+            query_snapshot=query_snapshot,
             finished_at=timestamp,
         )
 
@@ -552,6 +570,7 @@ class AnalysisRecord(_AnalysisLifecycle):
             revision=1,
             result_payload=None,
             artifact_references=[],
+            query_snapshot=None,
             output_node_ids=[],
         )
 
@@ -581,6 +600,7 @@ def public_analysis(
         exclude={
             "result_payload",
             "artifact_references",
+            "query_snapshot",
         }
     )
     payload["progress"] = progress or record.progress
@@ -591,6 +611,7 @@ def public_analysis(
 __all__ = [
     "Analysis",
     "AnalysisArtifactRecord",
+    "AnalysisQuerySnapshotRecord",
     "AnalysisIntegrity",
     "AnalysisRecord",
     "AnalysisRequest",

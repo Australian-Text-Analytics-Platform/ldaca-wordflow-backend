@@ -96,6 +96,7 @@ class _Artifacts:
             payload=cast(dict[str, JsonData], raw_result),
             artifacts=[],
             output_node_ids=[],
+            query_snapshot=None,
         )
 
 
@@ -504,6 +505,37 @@ async def test_clear_hides_analysis_and_allows_immediate_resubmission(
     assert page.items == []
     second = await service.submit_root("user", workspace_id, tab_id, _request(node_id))
     assert second.id != first.id
+
+
+@pytest.mark.anyio
+async def test_delete_tab_uses_analysis_cancellation_and_detachment_lifecycle(
+    tmp_path: Path,
+) -> None:
+    workspaces, workspace_id, node_id, tab_id = await _opened_workspace_with_tab(
+        tmp_path
+    )
+    execution = _ExecutionControl()
+    service = _analysis_service(tmp_path, workspaces, execution)
+    created = await service.submit_root("user", workspace_id, tab_id, _request(node_id))
+    key = AnalysisExecutionKey("user", workspace_id, str(created.id))
+    async with workspaces.mutation_context(
+        "user", workspace_id, internal=True
+    ) as lease:
+        record = lease.workspace.analyses[str(created.id)]
+        lease.workspace.replace_analysis(record.start(datetime.now(UTC)))
+
+    await service.delete_tab("user", workspace_id, tab_id)
+
+    async with workspaces.read_context("user", workspace_id) as lease:
+        assert tab_id not in lease.workspace.tabs
+        detached = lease.workspace.analyses[str(created.id)]
+        assert detached.cancellation_requested_at is not None
+        assert lease.workspace.live_analysis_ids() == set()
+    assert execution.cancelled == [key]
+
+    await service.complete_execution(key, {"kind": "concordance"})
+    async with workspaces.read_context("user", workspace_id) as lease:
+        assert str(created.id) not in lease.workspace.analyses
 
 
 @pytest.mark.anyio

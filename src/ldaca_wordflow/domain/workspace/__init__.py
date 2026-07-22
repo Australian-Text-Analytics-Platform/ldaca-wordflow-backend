@@ -28,6 +28,7 @@ from .tab import AnalysisKind, Tab, TabName
 from .analysis import (
     Analysis,
     AnalysisArtifactRecord,
+    AnalysisQuerySnapshotRecord,
     AnalysisIntegrity,
     AnalysisRecord,
     AnalysisRequest,
@@ -63,6 +64,7 @@ __all__ = [
     "AnalysisKind",
     "Analysis",
     "AnalysisArtifactRecord",
+    "AnalysisQuerySnapshotRecord",
     "AnalysisIntegrity",
     "AnalysisRecord",
     "AnalysisRequest",

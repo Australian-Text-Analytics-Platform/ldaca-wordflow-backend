@@ -17,7 +17,17 @@ from typing import Any, cast
 import anyio
 import polars as pl
 import pytest
-from ldaca_wordflow.domain.workspace import Node, Workspace
+from ldaca_wordflow.domain.workspace import (
+    AnalysisArtifactRecord,
+    AnalysisKind,
+    AnalysisQuerySnapshotRecord,
+    AnalysisRecord,
+    ConcordanceAnalysisRequest,
+    Node,
+    Tab,
+    TokenFrequencyAnalysisRequest,
+    Workspace,
+)
 from ldaca_wordflow.infrastructure.storage.workspace_access import (
     read_workspace_owner,
     write_workspace_owner,
@@ -34,6 +44,11 @@ from ldaca_wordflow.services.workspace_archives import (
     WorkspaceArchiveService,
     WorkspaceArchiveStorage,
     _create_workspace_export,
+)
+from ldaca_wordflow.workers.input_snapshots import (
+    create_worker_input_snapshot,
+    load_snapshot_node,
+    rebase_worker_input_snapshot_sources,
 )
 
 from ._storage import unlimited_storage_admission
@@ -83,7 +98,7 @@ def test_export_rejects_single_node_before_crossing_hard_byte_limit(
     target = tmp_path / "response.zip"
 
     with pytest.raises(ResourceTooLargeError, match="Workspace export"):
-        _create_workspace_export(workspace, target, 64)
+        _create_workspace_export(workspace, tmp_path, target, 64)
 
     assert not target.exists()
     assert not list(tmp_path.glob(".workspace-export-stage-*"))
@@ -125,6 +140,18 @@ class FakeWorkspaceStorage:
         write_workspace_owner(staging, user_id)
         await reservation.recheck_path(staging)
         os.replace(staging, destination)
+        store = WorkspaceStore(
+            max_nodes=10_000,
+            max_snapshot_bytes=1024 * 1024 * 1024,
+        )
+        store.rebase_snapshot_sources(destination)
+        loaded = store.load(destination).workspace
+        for record in loaded.analyses.values():
+            if record.query_snapshot is not None:
+                rebase_worker_input_snapshot_sources(
+                    destination / record.query_snapshot.relative_path,
+                    workspace_id=workspace_id,
+                )
         return {
             "id": workspace_id,
             "name": workspace_name,
@@ -155,11 +182,13 @@ def _valid_archive(
     workspace_id: str | None = None,
     name: str = "Imported",
     tabs: list[dict[str, Any]] | None = None,
+    analyses: list[dict[str, Any]] | None = None,
+    version: int = 4,
 ) -> bytes:
     node_id = str(uuid.uuid4())
     manifest = {
         "format": "wordflow-materialized-workspace",
-        "version": 3,
+        "version": version,
         "workspace": {
             "id": workspace_id or str(uuid.uuid4()),
             "name": name,
@@ -179,6 +208,7 @@ def _valid_archive(
             }
         ],
         "tabs": tabs or [],
+        "analyses": analyses or [],
     }
     parquet = io.BytesIO()
     pl.DataFrame({"value": ["hello"]}).write_parquet(parquet)
@@ -262,6 +292,161 @@ async def test_valid_archive_is_staged_then_atomically_installed(
     assert list((tmp_path / ".staging").iterdir()) == []
 
 
+async def test_archive_round_trip_preserves_terminal_analysis_result_and_tab(
+    tmp_path: Path,
+) -> None:
+    source = Workspace(name="Analysis archive", workspace_id=str(uuid.uuid4()))
+    node = source.add_node(
+        Node(
+            id=str(uuid.uuid4()),
+            name="Corpus",
+            data=pl.DataFrame({"text": ["hello"]}).lazy(),
+        )
+    )
+    timestamp = datetime.now(UTC)
+    analysis = AnalysisRecord.create(
+        TokenFrequencyAnalysisRequest(
+            node_ids=[uuid.UUID(node.id)],
+            node_columns={uuid.UUID(node.id): "text"},
+        ),
+        timestamp=timestamp,
+    ).start(timestamp)
+    analysis = analysis.succeed(
+        timestamp,
+        result_payload={"node_results": [{"node_id": node.id, "tokens": []}]},
+    )
+    source.add_analysis(analysis)
+    tab = Tab.create(
+        kind=AnalysisKind.TOKEN_FREQUENCY,
+        name="Frequency",
+        timestamp=timestamp,
+    )
+    tab.analysis_id = analysis.id
+    source.add_tab(tab)
+    exported = tmp_path / "analysis.zip"
+    _create_workspace_export(source, tmp_path, exported, 1024 * 1024)
+    with zipfile.ZipFile(exported) as archive:
+        manifest = json.loads(archive.read("workspace/workspace.json"))
+    assert manifest["version"] == 4
+    assert len(manifest["analyses"]) == 1
+
+    storage = FakeWorkspaceStorage(tmp_path / "installed")
+    summary = await _service(storage).import_upload(
+        "alice",
+        "analysis.zip",
+        ByteSource(exported.read_bytes()),
+    )
+    installed = storage.root / cast(str, summary["id"])
+    loaded = WorkspaceStore(
+        max_nodes=10_000,
+        max_snapshot_bytes=1024 * 1024 * 1024,
+    ).load(installed).workspace
+
+    assert loaded.tabs[str(tab.id)].analysis_id == analysis.id
+    restored = loaded.analyses[str(analysis.id)]
+    assert restored.request == analysis.request
+    assert restored.result_payload == analysis.result_payload
+    assert restored.state == analysis.state
+
+
+async def test_archive_round_trip_preserves_artifact_and_query_snapshot(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "source"
+    (source_root / "data").mkdir(parents=True)
+    source = Workspace(name="Query archive", workspace_id=str(uuid.uuid4()))
+    node = source.add_node(
+        Node(
+            id=str(uuid.uuid4()),
+            name="Corpus",
+            data=pl.DataFrame({"text": ["one", "two"]}).lazy(),
+        )
+    )
+    timestamp = datetime.now(UTC)
+    analysis = AnalysisRecord.create(
+        ConcordanceAnalysisRequest(
+            node_ids=[uuid.UUID(node.id)],
+            node_columns={uuid.UUID(node.id): "text"},
+            search_word="one",
+        ),
+        timestamp=timestamp,
+    ).start(timestamp)
+    query_relative = f"analyses/{analysis.id}/query-input"
+    create_worker_input_snapshot(
+        workspace_id=source.id,
+        node_ids=[node.id],
+        workspace=source,
+        workspace_data_dir=source_root / "data",
+        snapshot_dir=source_root / query_relative,
+        max_snapshot_bytes=1024 * 1024,
+    )
+    artifact_relative = "artifacts/result.json"
+    artifact = source_root / "analyses" / str(analysis.id) / artifact_relative
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text('{"result":true}\n', encoding="utf-8")
+    analysis = analysis.succeed(
+        timestamp,
+        result_payload={"nodes": []},
+        artifact_references=[
+            AnalysisArtifactRecord(
+                name="result",
+                relative_path=artifact_relative,
+                media_type="application/json",
+            )
+        ],
+        query_snapshot=AnalysisQuerySnapshotRecord(relative_path=query_relative),
+    )
+    source.add_analysis(analysis)
+    tab = Tab.create(
+        kind=AnalysisKind.CONCORDANCE,
+        name="Concordance",
+        timestamp=timestamp,
+    )
+    tab.analysis_id = analysis.id
+    source.add_tab(tab)
+    exported = tmp_path / "query-analysis.zip"
+    _create_workspace_export(source, source_root, exported, 1024 * 1024)
+
+    storage = FakeWorkspaceStorage(tmp_path / "installed-query")
+    summary = await _service(storage).import_upload(
+        "alice",
+        "query-analysis.zip",
+        ByteSource(exported.read_bytes()),
+    )
+    installed = storage.root / cast(str, summary["id"])
+    loaded = WorkspaceStore(
+        max_nodes=10_000,
+        max_snapshot_bytes=1024 * 1024 * 1024,
+    ).load(installed).workspace
+    restored_record = loaded.analyses[str(analysis.id)]
+    assert restored_record.artifact_references == analysis.artifact_references
+    assert (installed / "analyses" / str(analysis.id) / artifact_relative).read_text(
+        encoding="utf-8"
+    ) == '{"result":true}\n'
+    restored_snapshot = installed / query_relative
+    restored_node = load_snapshot_node(restored_snapshot, node.id)
+    assert restored_node.data.collect().to_dicts() == [
+        {"text": "one"},
+        {"text": "two"},
+    ]
+    assert json.loads((restored_snapshot / "snapshot.json").read_text())[
+        "workspace_id"
+    ] == cast(str, summary["id"])
+
+
+async def test_archive_rejects_previous_manifest_version(tmp_path: Path) -> None:
+    storage = FakeWorkspaceStorage(tmp_path)
+
+    with pytest.raises(InvalidWorkspaceArchiveError):
+        await _service(storage).import_upload(
+            "alice",
+            "workspace.zip",
+            ByteSource(_valid_archive(version=3)),
+        )
+
+    assert list((tmp_path / ".staging").iterdir()) == []
+
+
 async def test_archive_rejects_duplicate_root_analysis_tab_references(
     tmp_path: Path,
 ) -> None:
@@ -280,12 +465,46 @@ async def test_archive_rejects_duplicate_root_analysis_tab_references(
         }
         for name in ("First", "Second")
     ]
+    request_node_id = str(uuid.uuid4())
+    analyses = [
+        {
+            "record": {
+                "id": analysis_id,
+                "parent_analysis_id": None,
+                "request": {
+                    "kind": "concordance",
+                    "node_ids": [request_node_id],
+                    "node_columns": {request_node_id: "text"},
+                    "search_word": "word",
+                    "num_left_tokens": 10,
+                    "num_right_tokens": 10,
+                    "regex": False,
+                    "whole_word": False,
+                    "case_sensitive": False,
+                    "search_mode": "regex",
+                },
+                "state": "failed",
+                "progress": {"fraction": 0.5, "message": "Failed"},
+                "cancellation_requested_at": None,
+                "error": {"code": "failed", "message": "Failed"},
+                "created_at": timestamp,
+                "started_at": timestamp,
+                "finished_at": timestamp,
+                "revision": 3,
+                "output_node_ids": [],
+                "result_payload": None,
+                "artifact_references": [],
+                "query_snapshot": None,
+            },
+            "query_inputs": [],
+        }
+    ]
 
     with pytest.raises(InvalidWorkspaceArchiveError):
         await _service(storage).import_upload(
             "alice",
             "workspace.zip",
-            ByteSource(_valid_archive(tabs=tabs)),
+            ByteSource(_valid_archive(tabs=tabs, analyses=analyses)),
         )
 
     assert list((tmp_path / ".staging").iterdir()) == []

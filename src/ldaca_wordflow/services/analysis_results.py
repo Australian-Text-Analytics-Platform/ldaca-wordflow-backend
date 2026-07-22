@@ -26,7 +26,6 @@ from ..domain.workspace import (
     AnalysisRecord,
     ConcordanceAnalysisRequest,
     QuotationAnalysisRequest,
-    analysis_input_ids,
 )
 from ..infrastructure.providers.quotation_client import QuotationProviderClient
 from ..models.analysis_results import (
@@ -48,6 +47,7 @@ from ..settings import Settings
 from ..shared.errors import (
     AnalysisCorruptError,
     AnalysisKindMismatchError,
+    AnalysisResultUnavailableError,
     ArtifactGoneError,
     InvalidInputError,
     NodeNotFoundError,
@@ -61,7 +61,7 @@ from ..shared.table_transport import (
 )
 from ..shared.topic_types import topic_count_from_storage_dtype
 from ..workers.input_snapshots import (
-    create_worker_input_snapshot,
+    clone_worker_input_snapshot,
     load_snapshot_node,
 )
 from .analyses import AnalysisService
@@ -312,6 +312,15 @@ class AnalysisResultService:
                     )
                     payload["kind"] = kind
                     return ResultMaterialization(payload=payload, stored=stored)
+                if query is None and isinstance(
+                    stored,
+                    ConcordanceStoredResult | QuotationStoredResult,
+                ):
+                    await self._artifacts.ensure_available(lease, record)
+                    return ResultMaterialization(
+                        payload=_stored_initial_page(stored),
+                        stored=stored,
+                    )
                 effective_query = query or _default_query(kind)
                 if effective_query.kind != kind:
                     raise AnalysisKindMismatchError(
@@ -403,6 +412,10 @@ class AnalysisResultService:
         lease: WorkspaceLease,
         record: AnalysisRecord,
     ) -> _QueryInputSnapshot:
+        if record.query_snapshot is None:
+            raise AnalysisResultUnavailableError(
+                "Analysis Result query input is unavailable"
+            )
         reservation = await self._storage_admission.acquire_transient(
             self._settings.max_analysis_storage_bytes
         )
@@ -411,16 +424,20 @@ class AnalysisResultService:
         try:
             await self._run_sync(
                 partial(
-                    create_worker_input_snapshot,
-                    workspace_id=lease.workspace.id,
-                    node_ids=[str(item) for item in _request_node_ids(record)],
-                    workspace=lease.workspace,
-                    workspace_data_dir=lease.path / "data",
-                    snapshot_dir=snapshot,
+                    clone_worker_input_snapshot,
+                    lease.path / record.query_snapshot.relative_path,
+                    snapshot,
                     max_snapshot_bytes=self._settings.max_analysis_storage_bytes,
                 )
             )
             return _QueryInputSnapshot(snapshot, root, reservation)
+        except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
+            with anyio.CancelScope(shield=True):
+                await self._run_sync(_remove_query_root, root)
+                await reservation.release()
+            raise AnalysisResultUnavailableError(
+                "Analysis Result query input is unavailable"
+            ) from exc
         except BaseException:
             with anyio.CancelScope(shield=True):
                 await self._run_sync(_remove_query_root, root)
@@ -455,8 +472,30 @@ def _default_query(kind: str) -> AnalysisResultQuery:
     raise AnalysisCorruptError("Analysis data is corrupt")
 
 
-def _request_node_ids(record: AnalysisRecord) -> tuple[uuid.UUID, ...]:
-    return analysis_input_ids(record.request)
+def _stored_initial_page(
+    stored: ConcordanceStoredResult | QuotationStoredResult,
+) -> dict[str, JsonData]:
+    payload = cast(dict[str, JsonData], stored.model_dump(mode="json"))
+    if isinstance(stored, ConcordanceStoredResult):
+        page = stored.sources[0].result
+        kind = "concordance"
+        query: AnalysisResultQuery = ConcordanceResultQuery(
+            page=page.pagination.page,
+            page_size=page.pagination.page_size,
+            sort_by=page.sorting.sort_by,
+            descending=page.sorting.descending,
+        )
+    else:
+        kind = "quotation"
+        query = QuotationResultQuery(
+            page=stored.pagination.page,
+            page_size=stored.pagination.page_size,
+            sort_by=stored.sorting.sort_by,
+            descending=stored.sorting.descending,
+        )
+    payload["kind"] = kind
+    payload["query"] = cast(JsonData, query.model_dump(mode="json"))
+    return payload
 
 
 def _paged_table_artifact(
@@ -621,32 +660,40 @@ def _query_concordance_snapshot(
     if any(node_id not in request.node_ids for node_id in node_ids):
         raise NodeNotFoundError("Analysis Result Data Block not found")
     request_payload = request.model_dump(mode="json", exclude={"kind"})
-    data: dict[str, JsonData] = {}
+    sources: list[JsonData] = []
     for node_id in node_ids:
         snapshot = load_snapshot_node(snapshot_dir, str(node_id))
         node = snapshot.to_node()
         column = request.node_columns[node_id]
-        data[str(node_id)] = cast(
-            JsonData,
-            compute_node_concordance_page(
+        sources.append(
+            cast(
+                JsonData,
                 {
-                    "lf": snapshot.data,
-                    "column": column,
-                    "label": snapshot.name,
-                    "tokenization_column": node.find_tokenization_column(column),
-                    "node": node,
-                    "token_cache_path": token_cache,
+                    "node_id": str(node_id),
+                    "node_name": snapshot.name,
+                    "result": compute_node_concordance_page(
+                        {
+                            "lf": snapshot.data,
+                            "column": column,
+                            "label": snapshot.name,
+                            "tokenization_column": node.find_tokenization_column(
+                                column
+                            ),
+                            "node": node,
+                            "token_cache_path": token_cache,
+                        },
+                        request_payload,
+                        page=query.page,
+                        page_size=query.page_size,
+                        sort_by=query.sort_by,
+                        descending=query.descending,
+                    ),
                 },
-                request_payload,
-                page=query.page,
-                page_size=query.page_size,
-                sort_by=query.sort_by,
-                descending=query.descending,
-            ),
+            )
         )
     payload = cast(dict[str, JsonData], stored.model_dump(mode="json"))
     payload["kind"] = "concordance"
-    payload["data"] = data
+    payload["sources"] = sources
     payload["query"] = cast(JsonData, query.model_dump(mode="json"))
     return payload
 

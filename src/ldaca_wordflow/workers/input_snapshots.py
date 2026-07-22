@@ -23,6 +23,7 @@ from pydantic import BaseModel, ConfigDict
 
 from ..domain.workspace import Node, TokenizationMeta, Workspace
 from ..infrastructure.storage.durable_fs import (
+    atomic_output_path,
     fsync_directory as _fsync_directory,
     mkdir_durable as _mkdir_durable,
 )
@@ -195,6 +196,128 @@ def create_worker_input_snapshot(
         raise
 
 
+def clone_worker_input_snapshot(
+    source_dir: str | Path,
+    destination_dir: str | Path,
+    *,
+    max_snapshot_bytes: int,
+) -> Path:
+    """Publish a self-contained copy of an existing immutable input snapshot."""
+
+    source = Path(source_dir).resolve(strict=True)
+    manifest = _SnapshotManifest.model_validate_json(
+        (source / _SNAPSHOT_FILENAME).read_bytes()
+    )
+    destination = Path(destination_dir)
+    if max_snapshot_bytes < 1:
+        raise ValueError("Execution snapshot byte limit must be positive")
+    if destination.exists():
+        raise FileExistsError("Execution input snapshot already exists")
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(
+        tempfile.mkdtemp(
+            prefix=f".{destination.name}.",
+            suffix=".tmp",
+            dir=destination.parent,
+        )
+    )
+    try:
+        data_dir = staging / _SNAPSHOT_DATA_DIR
+        data_dir.mkdir()
+        sources_dir = staging / "sources"
+        sources_dir.mkdir()
+        published_sources = destination / "sources"
+        source_sources = source / "sources"
+
+        for node in manifest.nodes.values():
+            source_plan = _snapshot_member(
+                source,
+                node.data_path,
+                required_parent=_SNAPSHOT_DATA_DIR,
+            )
+            destination_plan = staging / node.data_path
+            destination_plan.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source_plan, destination_plan)
+            _snapshot_plan_sources(
+                destination_plan,
+                source_root=source_sources,
+                staging_sources=sources_dir,
+                published_sources=published_sources,
+            )
+            _fsync_file(destination_plan)
+            if _tree_size(staging) > max_snapshot_bytes:
+                raise ResourceTooLargeError(
+                    "Execution input snapshot exceeds its storage budget"
+                )
+
+        metadata_path = staging / _SNAPSHOT_FILENAME
+        with metadata_path.open("w", encoding="utf-8") as handle:
+            handle.write(manifest.model_dump_json(indent=2))
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        _fsync_directory(data_dir)
+        _fsync_directory(sources_dir)
+        _fsync_directory(staging)
+        os.replace(staging, destination)
+        _fsync_directory(destination.parent)
+        return destination
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+
+def rebase_worker_input_snapshot_sources(
+    snapshot_dir: str | Path,
+    *,
+    workspace_id: str | None = None,
+) -> None:
+    """Retarget a retained snapshot after the owning Workspace is relocated."""
+
+    root = Path(snapshot_dir).resolve(strict=True)
+    metadata_path = root / _SNAPSHOT_FILENAME
+    manifest = _SnapshotManifest.model_validate_json(metadata_path.read_bytes())
+    if workspace_id is not None and manifest.workspace_id != workspace_id:
+        manifest = manifest.model_copy(update={"workspace_id": workspace_id})
+        with atomic_output_path(metadata_path) as temporary:
+            temporary.write_text(
+                f"{manifest.model_dump_json(indent=2)}\n",
+                encoding="utf-8",
+            )
+    for node in manifest.nodes.values():
+        plan_path = _snapshot_member(
+            root,
+            node.data_path,
+            required_parent=_SNAPSHOT_DATA_DIR,
+        )
+        mapping: dict[str, str] = {}
+        for raw_source in list_source_paths(plan_path):
+            source_path = Path(raw_source)
+            if not source_path.is_absolute() or source_path.parent.name != "sources":
+                raise ValueError("Execution snapshot plan source has an invalid owner")
+            relocated = _snapshot_member(
+                root,
+                str(Path("sources") / source_path.name),
+                required_parent="sources",
+            )
+            if raw_source != str(relocated):
+                mapping[raw_source] = str(relocated)
+        if not mapping:
+            continue
+        with atomic_output_path(plan_path) as temporary:
+            shutil.copyfile(plan_path, temporary)
+            rewritten = replace_source_paths(temporary, mapping)
+            if rewritten != len(mapping):
+                raise RuntimeError(
+                    "Execution snapshot plan source rewrite was incomplete"
+                )
+        _fsync_file(plan_path)
+    _fsync_directory(root / _SNAPSHOT_DATA_DIR)
+    for node_id in manifest.nodes:
+        load_snapshot_node(root, node_id)
+
+
 def _fsync_file(path: Path) -> None:
     with path.open("rb") as handle:
         os.fsync(handle.fileno())
@@ -322,6 +445,8 @@ def _snapshot_member(root: Path, raw_path: str, *, required_parent: str) -> Path
 
 __all__ = [
     "SnapshotNode",
+    "clone_worker_input_snapshot",
     "create_worker_input_snapshot",
     "load_snapshot_node",
+    "rebase_worker_input_snapshot_sources",
 ]

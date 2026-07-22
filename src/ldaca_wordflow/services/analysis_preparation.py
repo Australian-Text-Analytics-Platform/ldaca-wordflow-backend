@@ -244,7 +244,6 @@ class AnalysisExecutionPreparer:
                 request,
                 self._settings,
             ).model_dump(mode="json")
-            payload["context_length"] = 20
             return owned(
                 quotation_process,
                 {

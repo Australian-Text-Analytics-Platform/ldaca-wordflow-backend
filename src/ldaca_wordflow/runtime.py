@@ -517,6 +517,7 @@ async def runtime_context(settings: Settings) -> AsyncIterator[Runtime]:
             limiter=io_limiter,
             response_snapshots=response_snapshot_service,
             max_node_bytes=settings.max_node_storage_bytes,
+            max_snapshot_bytes=settings.max_analysis_storage_bytes,
         )
         analysis_service = AnalysisService(
             workspace_service,

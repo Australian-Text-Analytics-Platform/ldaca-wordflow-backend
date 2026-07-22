@@ -340,6 +340,13 @@ class AnalysisInputGoneError(AppError):
     code = "analysis_input_missing"
 
 
+class AnalysisResultUnavailableError(AppError):
+    """A retained input needed to query a completed Result is unavailable."""
+
+    status_code = 410
+    code = "analysis_result_unavailable"
+
+
 # ── 500 Internal Server Error ────────────────────────────────────────────────
 
 

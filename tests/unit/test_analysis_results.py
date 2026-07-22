@@ -4,8 +4,10 @@ from io import BytesIO
 
 import polars as pl
 import pytest
+from pydantic import ValidationError
 
 from ldaca_wordflow.analysis.generated_columns import TOPIC_DISTRIBUTION_COLUMN
+from ldaca_wordflow.models.analysis_results import QuotationResultQuery
 from ldaca_wordflow.shared.topic_types import (
     topic_distribution_dtype,
     topic_distribution_storage_dtype,
@@ -17,6 +19,13 @@ from ldaca_wordflow.services.analysis_results import (
 )
 from ldaca_wordflow.shared.errors import AnalysisCorruptError, InvalidInputError
 from ldaca_wordflow.shared.json_data import JsonData
+
+
+def test_quotation_result_query_contains_only_page_and_sort_controls() -> None:
+    with pytest.raises(ValidationError):
+        QuotationResultQuery.model_validate(
+            {"kind": "quotation", "context_length": 12}
+        )
 
 
 @pytest.mark.parametrize(

@@ -124,7 +124,7 @@ async def delete_tab(
 ) -> Response:
     """Delete one existing Tab; repeated deletion is ordinary absence."""
 
-    await runtime.workspace_service.delete_tab(
+    await runtime.analysis_service.delete_tab(
         principal.user.id,
         str(workspace_id),
         str(tab_id),

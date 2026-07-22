@@ -80,6 +80,7 @@ from ..infrastructure.storage.durable_fs import (
     fsync_directory as _fsync_directory,
     mkdir_durable as _mkdir_durable,
 )
+from ..workers.input_snapshots import rebase_worker_input_snapshot_sources
 from .storage_admission import StorageAdmissionService, StorageReservation
 from .events import EventHub
 
@@ -195,7 +196,7 @@ def _remove_rollback_analysis_directories(
     paths: list[Path],
     workspace_root: Path,
 ) -> None:
-    """Remove newly published Analysis Artifact directories after commit failure."""
+    """Remove newly published private Analysis directories after commit failure."""
 
     resolved_root = workspace_root.resolve(strict=True)
     parents: set[Path] = set()
@@ -208,7 +209,8 @@ def _remove_rollback_analysis_directories(
             continue
         if (
             len(relative.parts) != 3
-            or relative.parts != ("analyses", analysis_id, "artifacts")
+            or relative.parts[:2] != ("analyses", analysis_id)
+            or relative.parts[2] not in {"artifacts", "query-input"}
             or not stat.S_ISDIR(metadata.st_mode)
             or path.is_symlink()
         ):
@@ -1089,18 +1091,6 @@ class WorkspaceService:
             resource = tab.model_copy(deep=True)
         return resource
 
-    async def delete_tab(
-        self,
-        user_id: str,
-        workspace_id: str,
-        tab_id: str,
-    ) -> None:
-        """Delete one addressable Tab through the Workspace commit boundary."""
-
-        async with self.mutation_context(user_id, workspace_id) as lease:
-            if lease.workspace.remove_tab(tab_id) is None:
-                raise TabNotFoundError("Tab not found")
-
     async def create_workspace(
         self, user_id: str, name: str, description: str = ""
     ) -> WorkspaceRecord:
@@ -1669,6 +1659,13 @@ class WorkspaceService:
         _fsync_directory(root)
         try:
             self._store.rebase_snapshot_sources(destination)
+            loaded = self._store.load(destination)
+            for record in loaded.workspace.analyses.values():
+                if record.query_snapshot is not None:
+                    rebase_worker_input_snapshot_sources(
+                        destination / record.query_snapshot.relative_path,
+                        workspace_id=loaded.workspace.id,
+                    )
             workspace, revision, _serialized_bytes = self._load_sync(destination)
             _fsync_directory(destination)
         except BaseException:

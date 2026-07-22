@@ -17,6 +17,7 @@ from anyio.to_thread import run_sync as run_sync_in_worker_thread
 
 from ..domain.workspace import (
     AnalysisArtifactRecord,
+    AnalysisQuerySnapshotRecord,
     AnalysisRecord,
     AnnotationAnalysisRequest,
     AnnotationDerivation,
@@ -58,6 +59,10 @@ from .artifact_contracts import ANALYSIS_ARTIFACT_PROJECTORS, ArtifactProjection
 from .node_projection import canonical_node_info
 from .response_snapshots import ResponseSnapshot, ResponseSnapshotService
 from .workspace import WorkspaceLease
+from ..workers.input_snapshots import clone_worker_input_snapshot
+
+
+_QUERY_SNAPSHOT_KINDS = frozenset({"concordance", "quotation"})
 
 
 class AnalysisArtifactService:
@@ -69,10 +74,12 @@ class AnalysisArtifactService:
         limiter: anyio.CapacityLimiter,
         response_snapshots: ResponseSnapshotService,
         max_node_bytes: int,
+        max_snapshot_bytes: int,
     ) -> None:
         self._limiter = limiter
         self._response_snapshots = response_snapshots
         self._max_node_bytes = max_node_bytes
+        self._max_snapshot_bytes = max_snapshot_bytes
 
     async def publish_result(
         self,
@@ -156,10 +163,30 @@ class AnalysisArtifactService:
             lease.rollback_analysis_directories.append(
                 lease.path / "analyses" / str(record.id) / "artifacts"
             )
+        query_snapshot_record = None
+        if kind in _QUERY_SNAPSHOT_KINDS:
+            query_snapshot = lease.path / "analyses" / str(record.id) / "query-input"
+            await run_sync_in_worker_thread(
+                partial(
+                    clone_worker_input_snapshot,
+                    lease.path / "analyses" / str(record.id) / ".execution" / "input",
+                    query_snapshot,
+                    max_snapshot_bytes=self._max_snapshot_bytes,
+                ),
+                abandon_on_cancel=False,
+                limiter=self._limiter,
+            )
+            lease.rollback_analysis_directories.append(query_snapshot)
+            query_snapshot_record = AnalysisQuerySnapshotRecord(
+                relative_path=(
+                    Path("analyses") / str(record.id) / "query-input"
+                ).as_posix()
+            )
         return PublishedAnalysisResult(
             payload=cast(dict[str, JsonData], stored.model_dump(mode="json")),
             artifacts=publication.artifacts,
             output_node_ids=[],
+            query_snapshot=query_snapshot_record,
         )
 
     async def response_snapshot(

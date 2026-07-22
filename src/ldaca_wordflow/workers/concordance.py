@@ -195,13 +195,11 @@ def _build_concordance_response_from_snapshot(
     }
 
     node_sources: dict[str, dict[str, Any]] = {}
-    label_to_node_map: dict[str, str] = {}
     for node_id in node_ids:
         column = node_columns[node_id]
         snapshot_node = load_snapshot_node(input_snapshot_dir, node_id)
         node = snapshot_node.to_node()
         node_label = snapshot_node.name or node_id
-        label_to_node_map[node_label] = node_id
         tokenization_column = node.find_tokenization_column(column)
         node_sources[node_id] = {
             "lf": snapshot_node.data,
@@ -224,30 +222,28 @@ def _build_concordance_response_from_snapshot(
     ]
     page_size = max(estimates)
 
-    data: dict[str, Any] = {}
+    sources: list[dict[str, Any]] = []
     for node_id in node_ids:
         src = node_sources[node_id]
-        data[node_id] = compute_node_concordance_page(
-            src,
-            canonical_payload,
-            page=1,
-            page_size=page_size,
-            sort_by=None,
-            descending=False,
+        sources.append(
+            {
+                "node_id": node_id,
+                "node_name": src["label"],
+                "result": compute_node_concordance_page(
+                    src,
+                    canonical_payload,
+                    page=1,
+                    page_size=page_size,
+                    sort_by=None,
+                    descending=False,
+                ),
+            }
         )
-
-    analysis_params = {
-        **canonical_payload,
-        "page": 1,
-        "label_to_node_map": label_to_node_map,
-    }
 
     return {
         "state": "successful",
         "message": "Concordance analysis complete",
-        "data": data,
-        "analysis_params": analysis_params,
-        "combinable": len(node_ids) > 1,
+        "sources": sources,
     }
 
 

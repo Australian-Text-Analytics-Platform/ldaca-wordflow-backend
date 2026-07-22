@@ -141,8 +141,8 @@ def test_token_frequency_worker_uses_per_node_tokenizer_models(tmp_path, monkeyp
     )
 
     assert requested_models == ["native:plain_words_en", "lindera:ja-ipadic"]
-    assert result["analysis_params"]["node_tokenizer_models"] == {
-        "node-en": "native:plain_words_en",
-        "node-ja": "lindera:ja-ipadic",
-    }
-    assert "tokenizer_model" not in result["analysis_params"]
+    assert "analysis_params" not in result
+    assert [item["node_name"] for item in result["tables"]["nodes"]] == [
+        "English",
+        "Japanese",
+    ]

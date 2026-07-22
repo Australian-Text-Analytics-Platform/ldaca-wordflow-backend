@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import time
 from io import BytesIO
 from pathlib import Path
@@ -221,6 +222,9 @@ def test_analysis_artifacts_publish_under_the_analysis_directory(
         assert result.status_code == 200, result.text
         payload = result.json()
         assert payload["kind"] == "token_frequency"
+        assert "analysis_params" not in payload
+        assert "stop_words" not in payload
+        assert "token_limit" not in payload
         table_url = payload["tables"]["nodes"][0]["table"]["url"]
         assert table_url.startswith(
             f"/api/workspaces/{workspace_id}/analyses/{analysis_id}/result/tables/"
@@ -256,6 +260,130 @@ def test_analysis_artifacts_publish_under_the_analysis_directory(
         )
         assert unusable.status_code == 410
         assert unusable.json()["code"] == "analysis_input_missing"
+
+
+def test_concordance_result_uses_the_completed_analysis_snapshot(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(
+        data_root=tmp_path,
+        multi_user=False,
+        session_cookie_secure=False,
+        cors_allowed_origins=("http://testserver",),
+        trusted_hosts=("testserver",),
+    )
+    with TestClient(
+        create_app(settings, serve_frontend=False),
+        base_url="http://testserver",
+    ) as client:
+        csrf = client.get("/api/session").json()["csrf_token"]
+        unsafe = {"Origin": "http://testserver", "X-CSRF-Token": csrf}
+        assert (
+            client.post(
+                "/api/user-files/uploads",
+                params={"path": "documents.csv"},
+                content=b"text\nhello first\nhello second\n",
+                headers={**unsafe, "Content-Type": "application/octet-stream"},
+            ).status_code
+            == 201
+        )
+        workspace_id = client.post(
+            "/api/workspaces",
+            json={"name": "Stable concordance"},
+            headers=unsafe,
+        ).json()["id"]
+        assert (
+            client.put(
+                f"/api/workspaces/{workspace_id}/open", headers=unsafe
+            ).status_code
+            == 200
+        )
+        node_id = client.post(
+            f"/api/workspaces/{workspace_id}/nodes",
+            json={"kind": "file", "file_path": "documents.csv"},
+            headers=unsafe,
+        ).json()["id"]
+        tab_id = client.post(
+            f"/api/workspaces/{workspace_id}/tabs",
+            json={"kind": "concordance", "name": "Search"},
+            headers=unsafe,
+        ).json()["id"]
+        created = client.post(
+            f"/api/workspaces/{workspace_id}/tabs/{tab_id}/analysis",
+            json={
+                "kind": "concordance",
+                "node_ids": [node_id],
+                "node_columns": {node_id: "text"},
+                "search_word": "hello",
+            },
+            headers=unsafe,
+        )
+        assert created.status_code == 201, created.text
+        analysis_id = created.json()["id"]
+        assert _wait_analysis(client, workspace_id, analysis_id)["state"] == "succeeded"
+
+        before = client.get(
+            f"/api/workspaces/{workspace_id}/analyses/{analysis_id}/result"
+        )
+        assert before.status_code == 200, before.text
+        before_payload = before.json()
+        assert "analysis_params" not in before_payload
+        assert "combinable" not in before_payload
+        assert before_payload["sources"][0]["node_id"] == node_id
+        assert before_payload["sources"][0]["result"]["pagination"]["result_count"] == 2
+
+        edited = client.post(
+            f"/api/workspaces/{workspace_id}/nodes/{node_id}/edits",
+            json={
+                "kind": "replace",
+                "source_column": "text",
+                "pattern": "hello",
+                "replacement": "goodbye",
+                "output_column": "text",
+            },
+            headers=unsafe,
+        )
+        assert edited.status_code == 200, edited.text
+        assert (
+            client.delete(
+                f"/api/workspaces/{workspace_id}/open", headers=unsafe
+            ).status_code
+            == 204
+        )
+        assert (
+            client.put(
+                f"/api/workspaces/{workspace_id}/open", headers=unsafe
+            ).status_code
+            == 200
+        )
+
+        after = client.get(
+            f"/api/workspaces/{workspace_id}/analyses/{analysis_id}/result"
+        )
+        assert after.status_code == 200, after.text
+        assert after.json() == before_payload
+
+        shutil.rmtree(
+            tmp_path
+            / "workspaces"
+            / workspace_id
+            / "analyses"
+            / analysis_id
+            / "query-input"
+        )
+        stored = client.get(
+            f"/api/workspaces/{workspace_id}/analyses/{analysis_id}/result"
+        )
+        assert stored.status_code == 200, stored.text
+        assert stored.json() == before_payload
+
+        unavailable = client.post(
+            f"/api/workspaces/{workspace_id}/analyses/{analysis_id}/result/query",
+            json={"kind": "concordance", "page": 1, "page_size": 1},
+            headers=unsafe,
+        )
+        assert unavailable.status_code == 410, unavailable.text
+        assert unavailable.json()["code"] == "analysis_result_unavailable"
 
 
 def test_child_analysis_publishes_an_independent_data_block(tmp_path: Path) -> None:

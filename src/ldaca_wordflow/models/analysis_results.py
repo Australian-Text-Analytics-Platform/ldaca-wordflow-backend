@@ -37,7 +37,6 @@ class ConcordanceResultQuery(_PagedQuery):
 
 class QuotationResultQuery(_PagedQuery):
     kind: Literal["quotation"] = "quotation"
-    context_length: int = Field(default=20, ge=0, le=1000)
 
 
 AnalysisResultQuery = Annotated[
@@ -112,28 +111,13 @@ class _TokenTables(_StrictModel, Generic[ArtifactValueT]):
     statistics: CompleteTableIdentity[ArtifactValueT] | None = None
 
 
-class TokenAnalysisParameters(_StrictModel):
-    node_ids: list[uuid.UUID]
-    node_columns: dict[uuid.UUID, str]
-    token_limit: int = Field(ge=1)
-    server_limit: int = Field(ge=1)
-    stop_words: list[str]
-    node_tokenizer_models: dict[uuid.UUID, str]
-
-
 class TokenResultMetadata(_StrictModel):
-    token_limit: int = Field(ge=1)
-    server_limit: int = Field(ge=1)
-    stop_words: list[str]
-    node_tokenizer_models: dict[uuid.UUID, str]
-    node_display_names: dict[uuid.UUID, str]
+    effective_token_limit: int = Field(ge=1)
+    server_token_limit: int = Field(ge=1)
 
 
 class _TokenFrequencyBody(_StrictModel):
-    token_limit: int = Field(ge=1)
-    analysis_params: TokenAnalysisParameters
     metadata: TokenResultMetadata
-    stop_words: list[str]
 
 
 class TokenFrequencyWorkerResult(_TokenFrequencyBody):
@@ -254,32 +238,20 @@ class ConcordancePage(_StrictModel):
     sorting: ResultSorting
 
 
-class ConcordanceAnalysisParameters(_StrictModel):
-    node_ids: list[uuid.UUID]
-    node_columns: dict[uuid.UUID, str]
-    search_word: str = Field(min_length=1)
-    num_left_tokens: int = Field(default=10, ge=0, le=1000)
-    num_right_tokens: int = Field(default=10, ge=0, le=1000)
-    regex: bool = False
-    whole_word: bool = False
-    case_sensitive: bool = False
-    search_mode: Literal["regex", "tokens"] = "regex"
-    page: int = Field(default=1, ge=1)
-    label_to_node_map: dict[str, uuid.UUID] = Field(default_factory=dict)
+class ConcordanceSourceResult(_StrictModel):
+    node_id: uuid.UUID
+    node_name: NodeName
+    result: ConcordancePage
 
 
 class ConcordanceWorkerResult(_StrictModel):
     state: Literal["successful"]
     message: str
-    data: dict[uuid.UUID, ConcordancePage]
-    analysis_params: ConcordanceAnalysisParameters
-    combinable: bool
+    sources: list[ConcordanceSourceResult] = Field(min_length=1, max_length=2)
 
 
 class ConcordanceStoredResult(_StrictModel):
-    data: dict[uuid.UUID, ConcordancePage]
-    analysis_params: ConcordanceAnalysisParameters
-    combinable: bool
+    sources: list[ConcordanceSourceResult] = Field(min_length=1, max_length=2)
 
 
 class ConcordanceResult(ConcordanceStoredResult):

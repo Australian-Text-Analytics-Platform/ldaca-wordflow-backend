@@ -14,7 +14,6 @@ import logging
 from pathlib import Path
 from typing import Any, Callable
 
-from ..analysis.request_normalization import sanitize_stop_words
 from .utils import process_entrypoint
 
 logger = logging.getLogger(__name__)
@@ -81,7 +80,6 @@ def _compute_token_frequencies(
         if progress_callback:
             progress_callback(0.2, "Preparing text data...")
 
-        requested_stop_words = sanitize_stop_words(stop_words)
         if token_limit < 1:
             raise ValueError("token_limit must be positive")
         effective_limit = token_limit
@@ -223,11 +221,6 @@ def _compute_token_frequencies(
             progress_callback(0.6, "Computing token frequencies...")
 
         frequency_results: dict[str, dict[str, int]] = {}
-        node_models_used = {
-            node_id: requested_node_tokenizer_models[node_id]
-            for node_id in prepared_node_ids
-            if node_id in requested_node_tokenizer_models
-        }
         stats_df = None
         for node_id in prepared_node_ids:
             if node_id in token_streams:
@@ -322,15 +315,6 @@ def _compute_token_frequencies(
                 "artifact": str(stats_path),
             }
 
-        analysis_params_dict = {
-            "node_ids": list(prepared_node_ids),
-            "node_columns": dict(node_columns or {}),
-            "token_limit": effective_limit,
-            "server_limit": server_limit,
-            "stop_words": requested_stop_words,
-            "node_tokenizer_models": node_models_used,
-        }
-
         result_payload: dict[str, Any] = {
             "state": "successful",
             "message": f"Successfully calculated token frequencies for {len(prepared_node_ids)} node(s)",
@@ -339,16 +323,10 @@ def _compute_token_frequencies(
                 "nodes": node_artifacts,
                 "statistics": statistics_table,
             },
-            "token_limit": effective_limit,
-            "analysis_params": analysis_params_dict,
             "metadata": {
-                "token_limit": effective_limit,
-                "server_limit": server_limit,
-                "stop_words": requested_stop_words,
-                "node_tokenizer_models": node_models_used,
-                "node_display_names": {**display_names},
+                "effective_token_limit": effective_limit,
+                "server_token_limit": server_limit,
             },
-            "stop_words": requested_stop_words,
         }
 
         logger.info("Token frequencies completed successfully")

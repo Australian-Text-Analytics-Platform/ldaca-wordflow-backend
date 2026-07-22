@@ -393,7 +393,7 @@ def _analysis_private_owner_ids(
     references: list[tuple[str, Path]],
     *,
     max_bytes: int,
-) -> tuple[set[str], set[str]]:
+) -> tuple[set[str], set[str], set[str]]:
     """Derive which strict records may retain execution and Artifact storage."""
 
     records, corrupt, _total_bytes = _read_analysis_records(
@@ -412,7 +412,13 @@ def _analysis_private_owner_ids(
         for record, _content in records
         if record.state is AnalysisState.SUCCEEDED
     } | corrupt_ids
-    return execution_owner_ids, artifact_owner_ids
+    query_snapshot_owner_ids = {
+        str(record.id)
+        for record, _content in records
+        if record.state is AnalysisState.SUCCEEDED
+        and record.query_snapshot is not None
+    } | corrupt_ids
+    return execution_owner_ids, artifact_owner_ids, query_snapshot_owner_ids
 
 
 def _add_workspace_analyses(
@@ -468,6 +474,7 @@ def _garbage_collect_workspace_analyses(
     *,
     execution_owner_ids: set[str],
     artifact_owner_ids: set[str],
+    query_snapshot_owner_ids: set[str],
 ) -> None:
     """Remove unreferenced Analysis generations after metadata publication."""
 
@@ -504,6 +511,18 @@ def _garbage_collect_workspace_analyses(
             if candidate.name == "artifacts":
                 if (
                     analysis_directory.name in artifact_owner_ids
+                    and candidate.is_dir()
+                    and not candidate.is_symlink()
+                ):
+                    continue
+                if candidate.is_dir() and not candidate.is_symlink():
+                    shutil.rmtree(candidate, ignore_errors=True)
+                else:
+                    candidate.unlink(missing_ok=True)
+                continue
+            if candidate.name == "query-input":
+                if (
+                    analysis_directory.name in query_snapshot_owner_ids
                     and candidate.is_dir()
                     and not candidate.is_symlink()
                 ):
@@ -697,6 +716,13 @@ def _write_workspace(
                 analysis_id
                 for analysis_id, analysis in workspace.analyses.items()
                 if analysis.state is AnalysisState.SUCCEEDED
+            }
+            | workspace.corrupt_analysis_ids,
+            query_snapshot_owner_ids={
+                analysis_id
+                for analysis_id, analysis in workspace.analyses.items()
+                if analysis.state is AnalysisState.SUCCEEDED
+                and analysis.query_snapshot is not None
             }
             | workspace.corrupt_analysis_ids,
         )
@@ -1232,7 +1258,11 @@ class WorkspaceStore:
                 _tab_references(payload),
             )
             analysis_references = _analysis_references(payload)
-            execution_owner_ids, artifact_owner_ids = _analysis_private_owner_ids(
+            (
+                execution_owner_ids,
+                artifact_owner_ids,
+                query_snapshot_owner_ids,
+            ) = _analysis_private_owner_ids(
                 target.parent,
                 analysis_references,
                 max_bytes=self.max_snapshot_bytes,
@@ -1242,6 +1272,7 @@ class WorkspaceStore:
                 analysis_references,
                 execution_owner_ids=execution_owner_ids,
                 artifact_owner_ids=artifact_owner_ids,
+                query_snapshot_owner_ids=query_snapshot_owner_ids,
             )
         except (OSError, TypeError, ValueError) as exc:
             raise WorkspaceSnapshotInvalidError(
@@ -1351,7 +1382,11 @@ class WorkspaceStore:
 
         payload = _read_workspace_metadata(staged_metadata)
         analysis_references = _analysis_references(payload)
-        execution_owner_ids, artifact_owner_ids = _analysis_private_owner_ids(
+        (
+            execution_owner_ids,
+            artifact_owner_ids,
+            query_snapshot_owner_ids,
+        ) = _analysis_private_owner_ids(
             staged_metadata.parent,
             analysis_references,
             max_bytes=self.max_snapshot_bytes,
@@ -1399,6 +1434,7 @@ class WorkspaceStore:
                 analysis_references,
                 execution_owner_ids=execution_owner_ids,
                 artifact_owner_ids=artifact_owner_ids,
+                query_snapshot_owner_ids=query_snapshot_owner_ids,
             )
         except Exception:
             logger.warning(
