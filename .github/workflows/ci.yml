@@ -78,15 +78,24 @@ jobs:
           fi
 
       - name: Install dependencies
+        id: install
         shell: bash
         run: uv sync --frozen --group dev
 
-      - name: Run tests
+      - name: Run Ruff
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         shell: bash
-        run: |
-          uv run ruff check .
-          uv run ty check
-          uv run pytest -q
+        run: uv run ruff check .
+
+      - name: Run Ty
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        shell: bash
+        run: uv run ty check
+
+      - name: Run pytest
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        shell: bash
+        run: uv run pytest -q
 
       - name: Export OpenAPI without runtime startup
         shell: bash

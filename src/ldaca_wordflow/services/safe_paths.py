@@ -32,6 +32,8 @@ from ..shared.portable_names import (
     portable_relative_path_parts,
 )
 
+_O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+
 
 class SafePathResolver:
     """Resolve untrusted relative paths beneath one canonical storage root.
@@ -91,7 +93,7 @@ class SafePathResolver:
         checked = self.recheck_for_write(destination)
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         flags |= getattr(os, "O_NOFOLLOW", 0)
-        if os.open in os.supports_dir_fd and hasattr(os, "O_DIRECTORY"):
+        if os.open in os.supports_dir_fd and _O_DIRECTORY:
             return self._open_new_file_dirfd(checked, flags, mode)
         return os.open(checked, flags, mode)
 
@@ -99,7 +101,7 @@ class SafePathResolver:
         """Traverse parents by descriptor so symlink swaps cannot retarget open."""
 
         relative = destination.relative_to(self.root)
-        root_flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+        root_flags = os.O_RDONLY | _O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
         descriptors: list[int] = []
         try:
             current = os.open(self.root, root_flags)
@@ -242,7 +244,7 @@ class SafePathResolver:
                 if stat.S_ISDIR(metadata.st_mode):
                     directory = os.open(
                         name,
-                        os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+                        os.O_RDONLY | _O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
                         dir_fd=parent,
                     )
                     try:
@@ -270,7 +272,7 @@ class SafePathResolver:
             if stat.S_ISDIR(metadata.st_mode):
                 child = os.open(
                     name,
-                    os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+                    os.O_RDONLY | _O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
                     dir_fd=descriptor,
                 )
                 try:
@@ -288,7 +290,7 @@ class SafePathResolver:
         """Yield the verified parent descriptor and final component."""
 
         relative = destination.relative_to(self.root)
-        flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+        flags = os.O_RDONLY | _O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
         descriptors: list[int] = []
         try:
             try:
@@ -306,7 +308,7 @@ class SafePathResolver:
 
     @staticmethod
     def _fsync_path(directory: Path) -> None:
-        descriptor = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        descriptor = os.open(directory, os.O_RDONLY | _O_DIRECTORY)
         try:
             os.fsync(descriptor)
         finally:

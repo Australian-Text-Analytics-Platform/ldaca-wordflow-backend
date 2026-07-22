@@ -384,9 +384,12 @@ def _reservation_bytes(requested_bytes: int, entries: int, unit: int) -> int:
 
 
 def _probe_allocation_unit(data_root: Path) -> int:
+    statvfs = getattr(os, "statvfs", None)
+    if statvfs is None:
+        raise RuntimeError("Data Root does not expose filesystem allocation metrics")
     try:
-        unit = int(os.statvfs(data_root).f_frsize)
-    except (AttributeError, OSError) as exc:
+        unit = int(statvfs(data_root).f_frsize)
+    except OSError as exc:
         raise RuntimeError(
             "Data Root does not expose filesystem allocation metrics"
         ) from exc

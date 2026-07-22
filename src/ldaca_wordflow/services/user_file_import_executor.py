@@ -9,11 +9,10 @@ import time
 import traceback
 from collections.abc import Awaitable, Callable, Mapping
 from functools import partial
-from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
 from multiprocessing.queues import Queue
 from pathlib import Path
-from typing import Any, TypeVar, cast
+from typing import Any, Protocol, TypeVar, cast
 
 import anyio
 from anyio.to_thread import run_sync as run_sync_in_worker_thread
@@ -24,6 +23,16 @@ T = TypeVar("T")
 ProgressReporter = Callable[[object], Awaitable[None]]
 
 
+class _PipeConnection(Protocol):
+    def send(self, obj: object) -> None: ...
+
+    def recv(self) -> Any: ...
+
+    def poll(self, timeout: float = 0.0) -> bool: ...
+
+    def close(self) -> None: ...
+
+
 class UserFileImportProcessError(RuntimeError):
     """A Data Portal child failed or exited without a valid result."""
 
@@ -32,7 +41,7 @@ def _run_import_process(
     function: Callable[..., T],
     kwargs: Mapping[str, object],
     progress_queue: Queue[Any],
-    result_connection: Connection,
+    result_connection: _PipeConnection,
     max_storage_bytes: int,
 ) -> None:
     try:
@@ -140,7 +149,7 @@ class UserFileImportProcessExecutor:
         self,
         process: BaseProcess,
         progress_queue: Queue[Any],
-        result_parent: Connection,
+        result_parent: _PipeConnection,
         report_progress: ProgressReporter,
         storage_roots: tuple[str, ...],
         max_storage_bytes: int,

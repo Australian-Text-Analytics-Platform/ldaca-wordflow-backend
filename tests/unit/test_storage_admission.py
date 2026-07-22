@@ -280,13 +280,12 @@ async def test_required_allocation_probe_has_no_logical_size_fallback(
         workspaces_root=root / "workspaces",
         limiter=anyio.CapacityLimiter(1),
     )
-    monkeypatch.setattr(
-        quota_module,
-        "_probe_allocation_unit",
-        lambda _root: (_ for _ in ()).throw(RuntimeError("unsupported")),
-    )
+    monkeypatch.delattr(quota_module.os, "statvfs", raising=False)
 
-    with pytest.raises(RuntimeError, match="unsupported"):
+    with pytest.raises(
+        RuntimeError,
+        match="Data Root does not expose filesystem allocation metrics",
+    ):
         await service.initialize(require_finite_capability=True)
 
 

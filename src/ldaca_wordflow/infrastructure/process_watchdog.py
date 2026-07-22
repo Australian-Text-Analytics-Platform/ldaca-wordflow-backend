@@ -41,10 +41,13 @@ def _make_windows_probe():
     return type can truncate it. Setting `restype = c_void_p` avoids that
     so we never mistake a valid handle for NULL.
     """
+    if sys.platform != "win32":
+        raise RuntimeError("The Windows parent probe requires Windows")
+
     import ctypes
     from ctypes import wintypes
 
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
     open_process = kernel32.OpenProcess
     open_process.restype = wintypes.HANDLE
@@ -69,7 +72,7 @@ def _make_windows_probe():
         """
         handle = open_process(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
         if not handle:
-            err = ctypes.get_last_error()  # type: ignore
+            err = ctypes.get_last_error()
             # ERROR_INVALID_PARAMETER (87) is what we get when the pid simply
             # doesn't exist — that's the only signal we trust as "dead".
             # Anything else (ACCESS_DENIED 5, etc.) is "couldn't tell" and we

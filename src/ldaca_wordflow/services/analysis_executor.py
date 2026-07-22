@@ -10,11 +10,10 @@ import traceback
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from functools import partial
-from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
 from multiprocessing.queues import Queue
 from pathlib import Path
-from typing import Any, TypeVar, cast
+from typing import Any, Protocol, TypeVar, cast
 
 import anyio
 from anyio.to_thread import run_sync as run_sync_in_worker_thread
@@ -23,6 +22,16 @@ from .analysis_execution_types import AnalysisExecutionKey, AnalysisInvocation
 
 T = TypeVar("T")
 ProgressReporter = Callable[[object], Awaitable[None]]
+
+
+class _PipeConnection(Protocol):
+    def send(self, obj: object) -> None: ...
+
+    def recv(self) -> Any: ...
+
+    def poll(self, timeout: float = 0.0) -> bool: ...
+
+    def close(self) -> None: ...
 
 
 class AnalysisProcessError(RuntimeError):
@@ -47,7 +56,7 @@ def _run_analysis_process(
     function: Callable[..., T],
     kwargs: Mapping[str, object],
     progress_queue: Queue[Any],
-    result_connection: Connection,
+    result_connection: _PipeConnection,
     max_storage_bytes: int,
 ) -> None:
     """Run one picklable worker and return one validated outer envelope."""
@@ -195,7 +204,7 @@ class AnalysisProcessExecutor:
         key: AnalysisExecutionKey,
         process: BaseProcess,
         progress_queue: Queue[Any],
-        result_parent: Connection,
+        result_parent: _PipeConnection,
         report_progress: ProgressReporter,
         invocation: AnalysisInvocation,
     ) -> object:
