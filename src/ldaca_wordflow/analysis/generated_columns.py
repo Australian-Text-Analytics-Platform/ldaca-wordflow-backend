@@ -2,12 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 import polars as pl
-
-if TYPE_CHECKING:  # pragma: no cover
-    from ..domain.workspace import Node
 
 CONC_LEFT_CONTEXT_COLUMN = "CONC_left_context"
 CONC_MATCHED_TEXT_COLUMN = "CONC_matched_text"
@@ -175,10 +170,9 @@ QUOTE_COLUMN_NAMES = (
 # ----------------------------------------------------------------------------
 # Dynamic tokenization columns
 # ----------------------------------------------------------------------------
-# Token outputs are addressed only when an analysis hydrates them into a
-# temporary LazyFrame. Nodes persist per-source tokenisation specs in
-# ``Node.tokenization``; the physical token column is never stored on
-# ``Node.data``.
+# Token outputs are addressed only when an Analysis request hydrates them into
+# a temporary LazyFrame. The physical token column is never stored on a Data
+# Block.
 
 TOKENIZATION_SEPARATOR = "."
 
@@ -199,38 +193,6 @@ def tokenization_column_name(source_column: str, model: str) -> str:
     return TOKENIZATION_SEPARATOR.join((TOKENS_COLUMN_MARKER, source_column, model))
 
 
-def parse_tokenization_column(name: str) -> tuple[str, str] | None:
-    """Inverse of :func:`tokenization_column_name`.
-
-    Returns ``(source, model)`` or ``None`` if ``name`` doesn't follow the
-    tokenization column pattern.
-
-    Limitation: source-column names or model IDs containing a ``.`` remain
-    ambiguous from the name alone. Callers that need authoritative parts should
-    consult ``Node.tokenization`` rather than parsing the column name.
-
-    """
-    parts = name.split(TOKENIZATION_SEPARATOR)
-    if len(parts) != 3:
-        return None
-    marker, source_column, model = parts
-    if not (source_column and marker and model):
-        return None
-    if marker != TOKENS_COLUMN_MARKER:
-        return None
-    return source_column, model
-
-
-def is_tokenization_column_name(name: str) -> bool:
-    """Return whether ``name`` follows the tokenization column pattern.
-
-    Physical node schemas are no longer filtered with this helper; analyses use
-    explicit generated-column sets or ``Node.tokenization`` metadata instead.
-
-    """
-    return parse_tokenization_column(name) is not None
-
-
 def tokens_struct_dtype() -> pl.DataType:
     """The canonical Polars dtype for a tokens-with-offsets column.
 
@@ -249,19 +211,6 @@ def tokens_struct_dtype() -> pl.DataType:
             ]
         )
     )
-
-
-def is_tokenization_column(node: "Node", col_name: str) -> bool:
-    """Metadata-driven detector for a hydrated tokenization column.
-
-    Reads ``Node.tokenization`` — True when the column is registered on this
-    node as one source column's tokenization output. The
-    LazyFrame dtype check is implicit: tokens-form entries are only ever
-    registered by the tokenise operation, which guarantees the canonical
-    dtype.
-
-    """
-    return any(meta["column_name"] == col_name for meta in node.tokenization.values())
 
 
 def tokens_struct_projection(struct_column: str) -> tuple[pl.Expr, ...]:

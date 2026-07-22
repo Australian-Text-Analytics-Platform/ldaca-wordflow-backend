@@ -342,10 +342,8 @@ def compute_node_concordance_page(
 ) -> dict[str, Any]:
     """Route a node to either regex-mode or tokens-mode page computation.
 
-    Tokens-mode only activates when ``request['search_mode'] == 'tokens'``
-    AND the node carries tokenization metadata for the source column.
-    Otherwise we fall back to the existing regex/text path so EN goldens
-    stay byte-identical.
+    Tokens mode requires callers to supply the temporary token column produced
+    from the immutable Analysis request. Text mode ignores tokenizer mappings.
     """
     base_lf = src["lf"]
     column = src["column"]
@@ -355,17 +353,9 @@ def compute_node_concordance_page(
 
     node_request: dict[str, Any] = dict(request)
 
-    if search_mode == "tokens" and tokenization_column:
-        token_node = src.get("node")
-        token_cache_path = src.get("token_cache_path")
-        if token_node is not None and token_cache_path:
-            from .token_cache import hydrate_tokenization_lazyframe
-
-            base_lf = hydrate_tokenization_lazyframe(
-                node=token_node,
-                source_column=column,
-                cache_path=token_cache_path,
-            )
+    if search_mode == "tokens":
+        if not tokenization_column:
+            raise ValueError("Tokens-mode concordance requires tokenized input")
         effective_page_size = (
             int(page_size)
             if page_size is not None and int(page_size) > 0
@@ -455,9 +445,8 @@ def _resolve_page_size(
 ) -> int:
     """Return an effective page size, estimating when the client omitted one.
 
-    For tokens-mode requests with tokenization metadata on the node, the
-    probe walks the tokens column directly so CJK searches estimate against
-    actual hit density instead of the regex engine's near-zero count.
+    For tokens-mode requests, the probe walks the request-produced tokens
+    column directly so CJK searches estimate against actual hit density.
     """
     if requested is not None and int(requested) > 0:
         return int(requested)

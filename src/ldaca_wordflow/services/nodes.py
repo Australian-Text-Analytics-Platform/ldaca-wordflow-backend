@@ -7,12 +7,12 @@ import tempfile
 import uuid
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, TypeVar, cast
+from typing import Any, TypeVar
 
 import anyio
 import polars as pl
 from anyio.to_thread import run_sync as run_sync_in_worker_thread
-from ..domain.workspace import Node, TokenizationMeta, Workspace
+from ..domain.workspace import Node, Workspace
 
 from ..infrastructure.storage.data_loading import (
     DataFileLoadError,
@@ -288,6 +288,10 @@ class NodeService:
                 if node.color != normalized_color:
                     node.color = normalized_color
                     changed = True
+            if "tokenizer_model" in request.model_fields_set:
+                if node.tokenizer_model != request.tokenizer_model:
+                    node.tokenizer_model = request.tokenizer_model
+                    changed = True
             lease.commit_requested = changed
             info = await self._run_io(canonical_node_info, node)
         return WorkspaceNodeInfo.model_validate(info), lease.revision
@@ -539,25 +543,12 @@ def _validate_edit_schema(lazyframe: pl.LazyFrame) -> None:
 def _retarget_column_metadata(node: Node, old_name: str, new_name: str) -> None:
     if node.document == old_name:
         node.document = new_name
-    retargeted: dict[str, TokenizationMeta] = {}
-    for source_column, metadata in node.tokenization.items():
-        updated = dict(metadata)
-        if updated.get("column_name") == old_name:
-            updated["column_name"] = new_name
-        target_source = new_name if source_column == old_name else source_column
-        retargeted[target_source] = cast(TokenizationMeta, updated)
-    node.tokenization = retargeted
 
 
 def _reconcile_node_metadata(node: Node) -> None:
     columns = set(node.data.collect_schema().names())
     if node.document not in columns:
         node.document = None
-    node.tokenization = {
-        source_column: cast(TokenizationMeta, dict(metadata))
-        for source_column, metadata in node.tokenization.items()
-        if source_column in columns and metadata.get("column_name") in columns
-    }
 
 
 def _unlink(path: Path) -> None:

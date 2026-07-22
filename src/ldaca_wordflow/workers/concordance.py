@@ -82,6 +82,7 @@ def _collect_source_input_from_snapshot(
     extra_column_names: list[str] | None,
     include_all_metadata: bool = False,
     search_mode: str = "regex",
+    tokenizer_model: str | None = None,
 ) -> tuple[list[str], dict[str, list] | None, dict[str, Any] | None, list[Any] | None]:
     """Collect concordance source inputs inside the worker process.
 
@@ -91,7 +92,7 @@ def _collect_source_input_from_snapshot(
 
     Flow:
     1. Load the snapshotted LazyFrame plan for ``node_id``.
-    2. Optionally hydrate registered tokenization for tokens-mode searches.
+    2. Tokenize from the immutable request for tokens-mode searches.
     3. Select/filter the document and requested metadata columns.
     4. Materialize the aligned Python lists only inside the fresh child process.
     """
@@ -101,24 +102,17 @@ def _collect_source_input_from_snapshot(
     from .input_snapshots import load_snapshot_node
 
     snapshot_node = load_snapshot_node(input_snapshot_dir, node_id)
-    node = snapshot_node.to_node()
     node_data = snapshot_node.data
     tokenization_column: str | None = None
     if search_mode == "tokens":
-        if token_cache_path is None:
-            raise ValueError(
-                "tokens-mode concordance requires an explicit token cache path"
-            )
-        tokenization_column = node.find_tokenization_column(document_column)
-        if tokenization_column is None:
-            raise ValueError(
-                f"No tokens column registered on node {node_id!r} for source column {document_column!r}"
-            )
-        from ..analysis.token_cache import hydrate_tokenization_lazyframe
+        if tokenizer_model is None:
+            raise ValueError("Tokens-mode concordance requires a tokenizer model")
+        from ..analysis.token_cache import tokenize_lazyframe
 
-        node_data = hydrate_tokenization_lazyframe(
-            node=node,
+        node_data, tokenization_column = tokenize_lazyframe(
+            data=node_data,
             source_column=document_column,
+            model=tokenizer_model,
             cache_path=token_cache_path,
         )
 
@@ -193,21 +187,32 @@ def _build_concordance_response_from_snapshot(
     node_columns = {
         str(node_id): column for node_id, column in request.node_columns.items()
     }
+    tokenizer_models = {
+        str(node_id): model
+        for node_id, model in request.node_tokenizer_models.items()
+    }
 
     node_sources: dict[str, dict[str, Any]] = {}
     for node_id in node_ids:
         column = node_columns[node_id]
         snapshot_node = load_snapshot_node(input_snapshot_dir, node_id)
-        node = snapshot_node.to_node()
         node_label = snapshot_node.name or node_id
-        tokenization_column = node.find_tokenization_column(column)
+        node_data = snapshot_node.data
+        tokenization_column: str | None = None
+        if request.search_mode == "tokens":
+            from ..analysis.token_cache import tokenize_lazyframe
+
+            node_data, tokenization_column = tokenize_lazyframe(
+                data=node_data,
+                source_column=column,
+                model=tokenizer_models[node_id],
+                cache_path=token_cache_path,
+            )
         node_sources[node_id] = {
-            "lf": snapshot_node.data,
+            "lf": node_data,
             "column": column,
             "label": node_label,
             "tokenization_column": tokenization_column,
-            "node": node,
-            "token_cache_path": token_cache_path,
         }
 
     estimates = [
@@ -516,6 +521,7 @@ def run_concordance_detachment(
     selected_generated_columns: list[str] | None = None,
     extra_column_names: list[str] | None = None,
     search_mode: str = "regex",
+    tokenizer_model: str | None = None,
     token_cache_path: str | None = None,
     progress_callback: Callable[[float, str], None] | None = None,
 ) -> dict[str, Any]:
@@ -545,6 +551,7 @@ def run_concordance_detachment(
             token_cache_path=token_cache_path,
             extra_column_names=extra_column_names,
             search_mode=search_mode,
+            tokenizer_model=tokenizer_model,
         )
 
         if progress_callback:
@@ -850,6 +857,7 @@ def run_concordance_dispersion_detachment(
     match_case_insensitive: bool = False,
     extra_column_names: list[str] | None = None,
     search_mode: str = "regex",
+    tokenizer_model: str | None = None,
     token_cache_path: str | None = None,
     progress_callback: Callable[[float, str], None] | None = None,
 ) -> dict[str, Any]:
@@ -882,6 +890,7 @@ def run_concordance_dispersion_detachment(
             token_cache_path=token_cache_path,
             extra_column_names=extra_column_names,
             search_mode=search_mode,
+            tokenizer_model=tokenizer_model,
         )
         if search_mode == "tokens":
             if node_tokens is None:

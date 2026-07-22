@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from typing import Any, cast
 
 import polars as pl
-from ..domain.workspace import Node, TokenizationMeta, Workspace
+from ..domain.workspace import Node, Workspace
 from ..domain.workspace.provenance import (
     BinaryExpression,
     CastExpression,
@@ -107,7 +107,6 @@ def build_derived_node(
             inputs=_provenance_inputs(request, parents),
         ),
         document=_propagated_document(parents, lazyframe),
-        tokenization=_propagated_tokenization(parents, lazyframe),
     )
     workspace.add_node(node)
     workspace.place_node_after_parent(node)
@@ -862,26 +861,6 @@ def _temporal_literal(value: datetime, dtype: pl.DataType) -> pl.Expr:
     if dtype == pl.Date:
         return pl.lit(value.date()).cast(dtype)
     return pl.lit(value)
-
-
-def _propagated_tokenization(
-    parents: list[Node],
-    lazyframe: pl.LazyFrame,
-) -> dict[str, TokenizationMeta]:
-    columns = set(lazyframe.collect_schema().names())
-    result: dict[str, TokenizationMeta] = {}
-    for parent in parents:
-        for source_column, metadata in parent.tokenization.items():
-            token_column = metadata.get("column_name")
-            if source_column not in columns or token_column not in columns:
-                continue
-            existing = result.get(source_column)
-            if existing is not None and existing != metadata:
-                raise InvalidInputError(
-                    "Source nodes have conflicting tokenization metadata"
-                )
-            result[source_column] = cast(TokenizationMeta, dict(metadata))
-    return result
 
 
 def _propagated_document(parents: list[Node], lazyframe: pl.LazyFrame) -> str | None:

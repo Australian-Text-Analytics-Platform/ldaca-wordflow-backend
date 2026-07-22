@@ -43,7 +43,6 @@ from ..domain.workspace import (
     AnalysisRecord,
     AnalysisState,
     Node,
-    TokenizationMeta,
     Workspace,
     analysis_input_ids,
     referenced_node_ids,
@@ -731,14 +730,6 @@ def _compile_materialized_archive(
                 raise InvalidWorkspaceArchiveError(
                     "Workspace document column is absent from node data"
                 )
-            for source_column, tokenization in node.tokenization.items():
-                if (
-                    source_column not in schema_names
-                    or tokenization.column_name not in schema_names
-                ):
-                    raise InvalidWorkspaceArchiveError(
-                        "Workspace tokenization columns are absent from node data"
-                    )
             materialized = Node(
                 id=node_id,
                 data=lazyframe,
@@ -746,13 +737,7 @@ def _compile_materialized_archive(
                 provenance=node.provenance,
                 document=node.document,
                 color=node.color,
-                tokenization={
-                    source_column: cast(
-                        TokenizationMeta,
-                        tokenization.model_dump(mode="python"),
-                    )
-                    for source_column, tokenization in node.tokenization.items()
-                },
+                tokenizer_model=node.tokenizer_model,
                 parents=[workspace.nodes[parent_id] for parent_id in parent_ids],
             )
             workspace.add_node(materialized)
@@ -786,14 +771,6 @@ def _compile_materialized_archive(
                     raise InvalidWorkspaceArchiveError(
                         "Workspace Analysis document column is absent from query data"
                     )
-                for source_column, tokenization in item.tokenization.items():
-                    if (
-                        source_column not in schema_names
-                        or tokenization.column_name not in schema_names
-                    ):
-                        raise InvalidWorkspaceArchiveError(
-                            "Workspace Analysis tokenization columns are absent from query data"
-                        )
                 query_workspace.add_node(
                     Node(
                         id=str(item.id),
@@ -801,13 +778,6 @@ def _compile_materialized_archive(
                         name=item.name,
                         document=item.document,
                         color=item.color,
-                        tokenization={
-                            source_column: cast(
-                                TokenizationMeta,
-                                tokenization.model_dump(mode="python"),
-                            )
-                            for source_column, tokenization in item.tokenization.items()
-                        },
                     )
                 )
             create_worker_input_snapshot(
@@ -985,7 +955,7 @@ def _create_workspace_export(
                     "provenance": node.provenance.model_dump(mode="json"),
                     "document": node.document,
                     "color": node.color,
-                    "tokenization": cast(JsonData, node.tokenization),
+                    "tokenizer_model": node.tokenizer_model,
                     "data_file": data_file,
                 }
             )
@@ -1024,7 +994,6 @@ def _create_workspace_export(
                             "name": snapshot_node.name,
                             "document": snapshot_node.document,
                             "color": snapshot_node.color,
-                            "tokenization": cast(JsonData, snapshot_node.tokenization),
                             "data_file": data_file.as_posix(),
                         }
                     )
@@ -1040,7 +1009,7 @@ def _create_workspace_export(
         manifest = WorkspaceArchiveManifest.model_validate(
             {
                 "format": "wordflow-materialized-workspace",
-                "version": 4,
+                "version": 5,
                 "workspace": {
                     "id": workspace.id,
                     "name": workspace.name,

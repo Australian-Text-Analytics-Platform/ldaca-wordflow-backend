@@ -51,7 +51,6 @@ def _collect_quotation_source_from_snapshot(
 
     import polars as pl
 
-    from ..analysis.generated_columns import is_tokenization_column_name
     from .input_snapshots import load_snapshot_node
 
     snapshot_node = load_snapshot_node(input_snapshot_dir, node_id)
@@ -61,7 +60,7 @@ def _collect_quotation_source_from_snapshot(
         metadata_columns = [
             column
             for column in schema_names
-            if column != document_column and not is_tokenization_column_name(column)
+            if column != document_column
         ]
     else:
         metadata_columns = list(extra_column_names or [])

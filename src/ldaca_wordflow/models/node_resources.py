@@ -10,6 +10,7 @@ from pydantic import (
     ConfigDict,
     Field,
     StringConstraints,
+    field_validator,
     model_validator,
 )
 
@@ -210,6 +211,14 @@ class NodeUpdateRequest(_StrictRequest):
     name: NodeName | None = None
     document: str | None = None
     color: str | None = None
+    tokenizer_model: str | None = Field(default=None, max_length=500)
+
+    @field_validator("tokenizer_model", mode="before")
+    @classmethod
+    def normalize_tokenizer_model(cls, value: object) -> object:
+        if not isinstance(value, str):
+            return value
+        return value.strip() or None
 
     @model_validator(mode="after")
     def validate_patch(self) -> "NodeUpdateRequest":

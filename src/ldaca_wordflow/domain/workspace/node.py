@@ -5,11 +5,7 @@ from __future__ import annotations
 import uuid
 from typing import (
     TYPE_CHECKING,
-    Any,
-    Mapping,
     Sequence,
-    TypedDict,
-    cast,
 )
 
 import polars as pl
@@ -24,15 +20,6 @@ PlanHistorySnapshot = tuple[
     tuple[pl.LazyFrame, ...],
     tuple[pl.LazyFrame, ...],
 ]
-
-
-class TokenizationMeta(TypedDict):
-    """Metadata for one source column's tokenization spec."""
-
-    column_name: str
-    model: str
-    language: str | None
-    params: dict[str, Any]
 
 
 class Node:
@@ -57,7 +44,7 @@ class Node:
         id: str | None = None,
         document: str | None = None,
         color: str | None = None,
-        tokenization: Mapping[str, TokenizationMeta] | None = None,
+        tokenizer_model: str | None = None,
     ) -> None:
         self.id = id or str(uuid.uuid4())
         self.name = name or f"node_{self.id[:8]}"
@@ -72,10 +59,12 @@ class Node:
         self._redo_stack: list[pl.LazyFrame] = []
         self._document_column: str | None = document
         self.color: str | None = color
-        self.tokenization = cast(
-            dict[str, TokenizationMeta],
-            {k: dict(v) for k, v in tokenization.items()} if tokenization else {},
+        normalized_tokenizer_model = (
+            tokenizer_model.strip() if tokenizer_model is not None else ""
         )
+        if len(normalized_tokenizer_model) > 500:
+            raise ValueError("Tokenizer model ID exceeds 500 characters")
+        self.tokenizer_model: str | None = normalized_tokenizer_model or None
         self.parents: list[Node] = list(parents)
         # Graph attachment is an explicit Workspace operation; construction
         # itself never mutates or implicitly joins an aggregate.
@@ -176,24 +165,6 @@ class Node:
     def document(self, value: str | None) -> None:
         self._document_column = value
 
-    def register_tokenization(self, source_column: str, meta: TokenizationMeta) -> None:
-        """Record tokenization metadata keyed by source column."""
-        self.tokenization[source_column] = cast(TokenizationMeta, dict(meta))
-
-    def find_tokenization_column(
-        self,
-        source_column: str,
-        *,
-        model: str | None = None,
-    ) -> str | None:
-        """Return the hydrated token column name for ``source_column``."""
-        meta = self.tokenization.get(source_column)
-        if meta is None:
-            return None
-        if model is not None and meta.get("model") != model:
-            return None
-        return meta["column_name"]
-
     # Representation --------------------------------------------------
     def __repr__(self) -> str:  # pragma: no cover
         return (
@@ -202,4 +173,4 @@ class Node:
         )
 
 
-__all__ = ["Node", "PlanHistorySnapshot", "TokenizationMeta"]
+__all__ = ["Node", "PlanHistorySnapshot"]

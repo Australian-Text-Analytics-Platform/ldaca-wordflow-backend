@@ -14,6 +14,7 @@ from __future__ import annotations
 
 
 import polars as pl
+import pytest
 from ldaca_wordflow.analysis.concordance_core import (
     compute_node_concordance_page,
 )
@@ -30,9 +31,8 @@ from ldaca_wordflow.analysis.generated_columns import (
     CONC_RIGHT_CONTEXT_COLUMN,
     CONC_START_IDX_COLUMN,
 )
-from ldaca_wordflow.analysis.tokenization import tokenise_column
-
-from ldaca_wordflow.domain.workspace import Node
+from ldaca_wordflow.analysis.token_cache import tokenize_lazyframe
+from ldaca_wordflow.shared.errors import InvalidInputError
 
 # Toy Chinese document tokenised by lindera:jieba-style segmentation. Offsets are
 # char positions in the original text.
@@ -148,28 +148,46 @@ def test_compute_tokens_page_groups_hits_per_row() -> None:
     assert sample_hit[CONC_MATCHED_TEXT_COLUMN] == "今天"
 
 
+def test_compute_tokens_page_rejects_a_generated_sort_column() -> None:
+    tokenization_col = "tokenization.text.native:plain_words_en"
+    source = pl.DataFrame(
+        {
+            "text": ["alpha"],
+            tokenization_col: [[{"token": "alpha", "start": 0, "end": 5}]],
+        }
+    ).lazy()
+
+    with pytest.raises(InvalidInputError, match="Sort column"):
+        compute_tokens_concordance_page(
+            source,
+            column="text",
+            tokenization_column=tokenization_col,
+            request={"search_word": "alpha"},
+            page=1,
+            page_size=10,
+            sort_by=CONC_MATCHED_TEXT_COLUMN,
+            descending=False,
+        )
+
+
 def test_token_mode_hydrates_only_requested_page_slice(tmp_path) -> None:
     cache_file = tmp_path / "tokens.duckdb"
-    node = Node(
-        data=pl.DataFrame({"text": [f"hello {index}" for index in range(5)]}).lazy(),
-        name="probe",
-    )
-    tokenization_col = tokenise_column(
-        node,
+    source = pl.DataFrame(
+        {"text": [f"hello {index}" for index in range(5)]}
+    ).lazy()
+    tokenized, tokenization_col = tokenize_lazyframe(
+        data=source,
         source_column="text",
         model="huggingface:bert-base-uncased",
-        language="en",
+        cache_path=cache_file,
     )
 
     page = compute_node_concordance_page(
         {
-            "lf": node.data,
+            "lf": tokenized,
             "column": "text",
             "label": "probe",
             "tokenization_column": tokenization_col,
-            "language": "en",
-            "node": node,
-            "token_cache_path": cache_file,
         },
         {
             "search_word": "hello",

@@ -292,10 +292,6 @@ def _publish_analysis_data_block(
             provenance=metadata.provenance,
             document=metadata.document,
             color=metadata.color,
-            tokenization={
-                source_column: value.model_dump(mode="python")
-                for source_column, value in metadata.tokenization.items()
-            },
             parents=parents,
         )
         workspace.add_node(node)
@@ -418,16 +414,11 @@ def _validate_published_data_block_identity(
                 )
             ],
         )
-        expected_tokenization = {
-            name: value.model_dump(mode="python")
-            for name, value in metadata.tokenization.items()
-        }
         if (
             metadata.name != request.output_node_name
             or metadata.provenance != expected_provenance
             or metadata.document != source.document
             or metadata.color != source.color
-            or expected_tokenization != source.tokenization
             or str(metadata.id) in workspace.nodes
         ):
             raise ValueError("Annotation Data Block metadata is invalid")
@@ -480,21 +471,11 @@ def _validate_published_data_block_identity(
             if source is None or source_uuid not in request.node_ids:
                 raise ValueError("Topic Modeling source Data Block is unavailable")
             selected = request.selected_columns[source_uuid]
-            expected_tokenization = {
-                column: value
-                for column, value in source.tokenization.items()
-                if column in selected
-            }
             if (
                 metadata.name != request.new_node_names[source_uuid]
                 or metadata.document
                 != (source.document if source.document in selected else None)
                 or metadata.color != source.color
-                or {
-                    name: value.model_dump(mode="python")
-                    for name, value in metadata.tokenization.items()
-                }
-                != expected_tokenization
                 or str(metadata.id) in workspace.nodes
             ):
                 raise ValueError("Topic Modeling Data Block metadata is invalid")
@@ -505,7 +486,6 @@ def _validate_published_data_block_identity(
             or metadata.name != f"{topic_data.name} topic meanings"
             or metadata.document is not None
             or metadata.color != topic_data.color
-            or metadata.tokenization
             or str(metadata.id) in workspace.nodes
         ):
             raise ValueError("Topic meanings Data Block metadata is invalid")
@@ -526,7 +506,6 @@ def _validate_published_data_block_identity(
         or metadata.provenance != expected_provenance
         or metadata.document != document
         or metadata.color is not None
-        or metadata.tokenization
         or str(metadata.id) in workspace.nodes
     ):
         raise ValueError("Child Analysis Data Block metadata is invalid")

@@ -29,11 +29,7 @@ def canonical_node_info(node: Node) -> dict[str, Any]:
         "document": node.document,
         "color": node.color,
         "shape": (node.shape[0], column_count),
-        "tokenizer_models": {
-            source: str(meta["model"])
-            for source, meta in node.tokenization.items()
-            if meta.get("model")
-        },
+        "tokenizer_model": node.tokenizer_model,
         "can_undo": node.can_undo,
         "can_redo": node.can_redo,
     }

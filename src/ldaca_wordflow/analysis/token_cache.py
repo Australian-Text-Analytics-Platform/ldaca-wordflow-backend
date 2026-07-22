@@ -1,16 +1,4 @@
-"""Analysis integration for the polars-text token cache.
-
-Nodes store per-column tokenisation specs in ``Node.tokenization``. Analyses
-attach those specs to a LazyFrame with ``hydrate_tokenization_lazyframe``.
-The generic DuckDB cache mechanics live in ``pl.col(...).text.tokenize(...,
-cache=...)``. Callers pass the runtime-owned cache path explicitly so worker
-processes and independently configured app instances never consult globals.
-
-Used by Analysis preparation, process entrypoints, and focused backend tests.
-
-Flow: resolve tokenization preferences, hydrate or create token columns, aggregate
-    frequencies, and persist derived artifacts for result queries.
-"""
+"""Request-owned dynamic tokenization with an explicit per-user cache."""
 
 from __future__ import annotations
 
@@ -20,9 +8,18 @@ from typing import Any, cast
 import polars as pl
 import polars_text  # noqa: F401
 
-from ..domain.workspace import Node
+from .generated_columns import tokenization_column_name
 
 TOKENS_CACHE_FILENAME = "tokens.duckdb"
+PLAIN_WORDS_EN_MODEL = "native:plain_words_en"
+_CASE_FREE_MODELS = frozenset(
+    {
+        "lindera:jieba",
+        "lindera:ja-ipadic",
+        "lindera:ja-unidic",
+        "lindera:ko-dic",
+    }
+)
 
 
 def tokens_cache_path(cache_root: str | Path) -> Path:
@@ -30,47 +27,49 @@ def tokens_cache_path(cache_root: str | Path) -> Path:
     return Path(cache_root) / TOKENS_CACHE_FILENAME
 
 
-def hydrate_tokenization_lazyframe(
+def tokenize_lazyframe(
     *,
-    node: Node,
+    data: pl.LazyFrame,
     source_column: str,
-    cache_path: str | Path,
-) -> pl.LazyFrame:
-    """Lazily attach a tokenization column registered on ``node``.
+    model: str,
+    cache_path: str | Path | None,
+) -> tuple[pl.LazyFrame, str]:
+    """Attach tokens selected by an immutable Analysis request.
 
-    Short-circuits if the column is already physically present. Otherwise reads
-    the model, token column, and tokenisation params from
-    ``node.tokenization[source_column]`` and attaches a cache-backed elementwise
-    expression keyed on the explicit runtime-owned cache path.
-
-    The hydrated column exists only in the returned plan; it is never written
-    back to the Workspace aggregate.
+    The native plain-word tokenizer deliberately receives no cache path and
+    therefore never opens DuckDB. Every other model requires the caller's
+    per-user cache path; polars-text keys entries by model, parameters, and
+    content hash.
     """
-    tokenization_meta = node.tokenization.get(source_column)
-    if tokenization_meta is None:
-        return node.data
+    normalized_model = model.strip()
+    if not normalized_model:
+        raise ValueError("Tokenizer model must be non-empty")
+    if source_column not in data.collect_schema().names():
+        raise KeyError(f"Data Block has no column {source_column!r}")
+    if normalized_model != PLAIN_WORDS_EN_MODEL and cache_path is None:
+        raise ValueError("Non-plain tokenization requires a cache path")
 
-    tokenization_column = tokenization_meta["column_name"]
-    model = tokenization_meta["model"]
-    params = tokenization_meta["params"]
-
-    if tokenization_column in node.data.collect_schema().names():
-        return node.data
-
-    return node.data.with_columns(
+    tokenization_column = tokenization_column_name(source_column, normalized_model)
+    cache: Path | None = None
+    if normalized_model != PLAIN_WORDS_EN_MODEL:
+        assert cache_path is not None
+        cache = Path(cache_path)
+    tokenized = data.with_columns(
         cast(Any, pl.col(source_column))
         .text.tokenize(
-            lowercase=bool(params.get("lowercase", True)),
-            remove_punct=bool(params.get("remove_punct", True)),
-            model=model,
-            cache=Path(cache_path),
+            lowercase=normalized_model not in _CASE_FREE_MODELS,
+            remove_punct=True,
+            model=normalized_model,
+            cache=cache,
         )
         .alias(tokenization_column)
     )
+    return tokenized, tokenization_column
 
 
 __all__ = [
+    "PLAIN_WORDS_EN_MODEL",
     "TOKENS_CACHE_FILENAME",
-    "hydrate_tokenization_lazyframe",
+    "tokenize_lazyframe",
     "tokens_cache_path",
 ]

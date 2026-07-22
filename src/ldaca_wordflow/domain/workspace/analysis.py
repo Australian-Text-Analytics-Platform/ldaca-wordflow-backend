@@ -97,13 +97,13 @@ class TokenFrequencyAnalysisRequest(_StrictModel):
     node_columns: dict[uuid.UUID, NonEmptyText]
     stop_words: list[str] = Field(default_factory=list)
     token_limit: int = Field(default=25, ge=1, le=5000)
-    node_tokenizer_models: dict[uuid.UUID, NonEmptyText] = Field(default_factory=dict)
+    node_tokenizer_models: dict[uuid.UUID, NonEmptyText]
 
     @model_validator(mode="after")
     def validate_nodes(self) -> "TokenFrequencyAnalysisRequest":
         _validate_node_columns(self.node_ids, self.node_columns)
-        if set(self.node_tokenizer_models) - set(self.node_ids):
-            raise ValueError("Tokenizer models may reference only requested inputs")
+        if set(self.node_tokenizer_models) != set(self.node_ids):
+            raise ValueError("Tokenizer models must exactly match requested inputs")
         return self
 
 
@@ -142,10 +142,19 @@ class ConcordanceAnalysisRequest(_StrictModel):
     whole_word: bool = False
     case_sensitive: bool = False
     search_mode: Literal["regex", "tokens"] = "regex"
+    node_tokenizer_models: dict[uuid.UUID, NonEmptyText] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def validate_nodes(self) -> "ConcordanceAnalysisRequest":
         _validate_node_columns(self.node_ids, self.node_columns)
+        tokenizer_ids = set(self.node_tokenizer_models)
+        requested_ids = set(self.node_ids)
+        if tokenizer_ids - requested_ids:
+            raise ValueError("Tokenizer models may reference only requested inputs")
+        if self.search_mode == "tokens" and tokenizer_ids != requested_ids:
+            raise ValueError(
+                "Tokens mode tokenizer models must exactly match requested inputs"
+            )
         return self
 
 

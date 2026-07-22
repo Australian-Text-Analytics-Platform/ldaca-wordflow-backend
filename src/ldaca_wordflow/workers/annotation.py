@@ -107,7 +107,6 @@ def run_annotation_analysis(
             ),
             document=source.document,
             color=source.color,
-            tokenization=source.tokenization,
         )
         if progress_callback:
             progress_callback(0.95, "Publishing annotated Data Block")

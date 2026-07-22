@@ -64,7 +64,6 @@ async def test_missing_preferences_return_schema_versioned_defaults(tmp_path: Pa
     assert result.model_dump() == {
         "hidden_views": [],
         "favorite_workspaces": [],
-        "default_tokenizer_model": None,
         "analysis_multi_tab_enabled": False,
         "contextual_hints_enabled": True,
     }
@@ -75,7 +74,7 @@ async def test_missing_preferences_return_schema_versioned_defaults(tmp_path: Pa
 
 
 @pytest.mark.anyio
-async def test_patch_changes_only_explicit_fields_and_accepts_explicit_null(
+async def test_patch_changes_only_explicit_fields(
     tmp_path: Path,
 ) -> None:
     preferences, _credentials, _settings = _stores(tmp_path)
@@ -83,22 +82,22 @@ async def test_patch_changes_only_explicit_fields_and_accepts_explicit_null(
         "root",
         UserPreferencesPatch(
             hidden_views=["quotation", "quotation", " "],
-            default_tokenizer_model=" model ",
+            contextual_hints_enabled=False,
         ),
     )
 
     result = await preferences.update(
         "root",
-        UserPreferencesPatch(default_tokenizer_model=None),
+        UserPreferencesPatch(favorite_workspaces=["workspace-a"]),
     )
 
     assert result.hidden_views == ["quotation"]
-    assert result.default_tokenizer_model is None
-    assert result.contextual_hints_enabled is True
+    assert result.favorite_workspaces == ["workspace-a"]
+    assert result.contextual_hints_enabled is False
     stored = rtoml.loads(
         user_preferences_path(_settings, "root").read_text(encoding="utf-8")
     )
-    assert "default_tokenizer_model" not in stored
+    assert stored["schema_version"] == 2
 
 
 @pytest.mark.anyio
@@ -203,6 +202,28 @@ async def test_unversioned_preference_file_is_rejected(tmp_path: Path) -> None:
     path = user_preferences_path(settings, "root")
     path.parent.mkdir(parents=True)
     path.write_text(rtoml.dumps({"contextual_hints_enabled": False}), encoding="utf-8")
+
+    with pytest.raises(UserPreferencesCorruptError):
+        await preferences.get("root")
+
+
+@pytest.mark.anyio
+async def test_schema_one_preference_file_is_rejected_without_migration(
+    tmp_path: Path,
+) -> None:
+    preferences, _credentials, settings = _stores(tmp_path)
+    path = user_preferences_path(settings, "root")
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        rtoml.dumps(
+            {
+                "schema_version": 1,
+                "default_tokenizer_model": "native:plain_words_en",
+                "contextual_hints_enabled": False,
+            }
+        ),
+        encoding="utf-8",
+    )
 
     with pytest.raises(UserPreferencesCorruptError):
         await preferences.get("root")

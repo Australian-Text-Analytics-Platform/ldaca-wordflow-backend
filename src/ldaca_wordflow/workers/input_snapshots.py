@@ -15,13 +15,11 @@ import tempfile
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
-from typing import cast
-
 import polars as pl
 from polars_source_utils import list_source_paths, replace_source_paths
 from pydantic import BaseModel, ConfigDict
 
-from ..domain.workspace import Node, TokenizationMeta, Workspace
+from ..domain.workspace import Node, Workspace
 from ..infrastructure.storage.durable_fs import (
     atomic_output_path,
     fsync_directory as _fsync_directory,
@@ -29,19 +27,8 @@ from ..infrastructure.storage.durable_fs import (
 )
 
 from ..shared.errors import ResourceTooLargeError
-from ..shared.json_data import JsonData
-
 _SNAPSHOT_FILENAME = "snapshot.json"
 _SNAPSHOT_DATA_DIR = "data"
-
-
-class _SnapshotTokenization(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    column_name: str
-    model: str
-    language: str | None
-    params: dict[str, JsonData]
 
 
 class _SnapshotNodeManifest(BaseModel):
@@ -51,7 +38,6 @@ class _SnapshotNodeManifest(BaseModel):
     name: str
     document: str | None
     color: str | None
-    tokenization: dict[str, _SnapshotTokenization]
     data_path: str
 
 
@@ -76,10 +62,9 @@ class SnapshotNode:
     data: pl.LazyFrame
     document: str | None
     color: str | None
-    tokenization: dict[str, TokenizationMeta]
 
     def to_node(self) -> Node:
-        """Build a detached domain node for tokenization helpers."""
+        """Build a detached domain node for existing worker helpers."""
 
         return Node(
             data=self.data,
@@ -87,7 +72,6 @@ class SnapshotNode:
             id=self.id,
             document=self.document,
             color=self.color,
-            tokenization=self.tokenization,
         )
 
 
@@ -104,10 +88,6 @@ def _node_snapshot_payload(node: Node, rel_data_path: Path) -> _SnapshotNodeMani
         name=node.name,
         document=node.document,
         color=node.color,
-        tokenization={
-            source: _SnapshotTokenization.model_validate(meta)
-            for source, meta in node.tokenization.items()
-        },
         data_path=rel_data_path.as_posix(),
     )
 
@@ -413,17 +393,12 @@ def load_snapshot_node(snapshot_dir: str | Path, node_id: str) -> SnapshotNode:
     for raw_source in list_source_paths(plan_path):
         _snapshot_member(root, raw_source, required_parent="sources")
     data = pl.LazyFrame.deserialize(plan_path, format="binary")
-    tokenization = {
-        source: cast(TokenizationMeta, metadata.model_dump())
-        for source, metadata in raw_node.tokenization.items()
-    }
     return SnapshotNode(
         id=raw_node.id,
         name=raw_node.name,
         data=data,
         document=raw_node.document,
         color=raw_node.color,
-        tokenization=tokenization,
     )
 
 

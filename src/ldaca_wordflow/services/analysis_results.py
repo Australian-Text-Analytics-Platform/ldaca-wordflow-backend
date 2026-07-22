@@ -19,7 +19,7 @@ from pydantic import BaseModel, ValidationError
 
 from ..analysis.concordance_core import compute_node_concordance_page
 from ..analysis.quotation_core import compute_quotation_page
-from ..analysis.token_cache import tokens_cache_path
+from ..analysis.token_cache import tokenize_lazyframe, tokens_cache_path
 from ..analysis.generated_columns import TOPIC_DISTRIBUTION_COLUMN
 from ..domain.workspace import (
     AnalysisArtifactRecord,
@@ -663,8 +663,16 @@ def _query_concordance_snapshot(
     sources: list[JsonData] = []
     for node_id in node_ids:
         snapshot = load_snapshot_node(snapshot_dir, str(node_id))
-        node = snapshot.to_node()
         column = request.node_columns[node_id]
+        node_data = snapshot.data
+        tokenization_column: str | None = None
+        if request.search_mode == "tokens":
+            node_data, tokenization_column = tokenize_lazyframe(
+                data=node_data,
+                source_column=column,
+                model=request.node_tokenizer_models[node_id],
+                cache_path=token_cache,
+            )
         sources.append(
             cast(
                 JsonData,
@@ -673,14 +681,10 @@ def _query_concordance_snapshot(
                     "node_name": snapshot.name,
                     "result": compute_node_concordance_page(
                         {
-                            "lf": snapshot.data,
+                            "lf": node_data,
                             "column": column,
                             "label": snapshot.name,
-                            "tokenization_column": node.find_tokenization_column(
-                                column
-                            ),
-                            "node": node,
-                            "token_cache_path": token_cache,
+                            "tokenization_column": tokenization_column,
                         },
                         request_payload,
                         page=query.page,

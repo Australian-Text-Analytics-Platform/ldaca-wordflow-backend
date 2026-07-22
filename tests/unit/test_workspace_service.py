@@ -553,7 +553,7 @@ async def test_archive_install_rejects_uncompiled_client_plan_payloads(
                     "workspace_metadata": {
                         "id": workspace_id,
                         "name": "Unsafe",
-                        "version": 5,
+                        "version": 6,
                         "description": "",
                         "created_at": None,
                         "modified_at": None,
@@ -566,7 +566,7 @@ async def test_archive_install_rejects_uncompiled_client_plan_payloads(
                                 "provenance": {"type": "source"},
                                 "document": None,
                                 "color": None,
-                                "tokenization": {},
+                                "tokenizer_model": None,
                             },
                             "data_path": data_path,
                         }

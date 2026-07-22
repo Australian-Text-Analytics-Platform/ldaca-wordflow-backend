@@ -13,7 +13,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterable, cast
+from typing import TYPE_CHECKING, Any, Iterable
 
 from polars_source_utils import list_source_paths, replace_source_paths
 import polars as pl
@@ -36,13 +36,12 @@ from ...domain.workspace import (
     Node,
     NodeProvenance,
     Tab,
-    TokenizationMeta,
     referenced_node_ids,
     validate_node_provenance,
 )
 
 logger = logging.getLogger(__name__)
-WORKSPACE_SCHEMA_VERSION = 5
+WORKSPACE_SCHEMA_VERSION = 6
 _WORKSPACE_ENVELOPE_FIELDS = {"workspace_metadata", "nodes", "tabs", "analyses"}
 _WORKSPACE_METADATA_FIELDS = {
     "id",
@@ -809,7 +808,7 @@ def _read_workspace(
             NodeProvenance,
             str | None,
             str | None,
-            dict[str, TokenizationMeta],
+            str | None,
         ],
     ] = {}
     data_paths: set[Path] = set()
@@ -828,7 +827,7 @@ def _read_workspace(
             "provenance",
             "document",
             "color",
-            "tokenization",
+            "tokenizer_model",
         }:
             raise ValueError("Workspace node metadata fields are invalid")
         raw_id = metadata.get("id")
@@ -875,40 +874,23 @@ def _read_workspace(
         name = metadata.get("name")
         if not isinstance(name, str) or not name:
             raise ValueError("Workspace node name is invalid")
-        for optional_key in ("document", "color"):
+        for optional_key in ("document", "color", "tokenizer_model"):
             if metadata.get(optional_key) is not None and not isinstance(
                 metadata.get(optional_key), str
             ):
                 raise ValueError(f"Workspace node {optional_key} is invalid")
-        raw_tokenization = metadata["tokenization"]
-        if not isinstance(raw_tokenization, Mapping):
-            raise ValueError("Workspace node tokenization is invalid")
+        raw_tokenizer_model = metadata["tokenizer_model"]
+        tokenizer_model = (
+            raw_tokenizer_model.strip()
+            if isinstance(raw_tokenizer_model, str)
+            else None
+        )
+        if raw_tokenizer_model is not None and (
+            not tokenizer_model or len(tokenizer_model) > 500
+        ):
+            raise ValueError("Workspace node tokenizer model is invalid")
 
         lazyframe = pl.LazyFrame.deserialize(absolute_data_path, format="binary")
-        tokenization: dict[str, TokenizationMeta] = {}
-        for source, raw_meta in raw_tokenization.items():
-            if not isinstance(source, str) or not isinstance(raw_meta, Mapping):
-                raise ValueError("Workspace node tokenization entries are invalid")
-            column_name = raw_meta.get("column_name")
-            model = raw_meta.get("model")
-            language = raw_meta.get("language")
-            params = raw_meta.get("params")
-            if (
-                not isinstance(column_name, str)
-                or not isinstance(model, str)
-                or (language is not None and not isinstance(language, str))
-                or not isinstance(params, Mapping)
-            ):
-                raise ValueError("Workspace node tokenization metadata is invalid")
-            tokenization[source] = cast(
-                TokenizationMeta,
-                {
-                    "column_name": column_name,
-                    "model": model,
-                    "language": language,
-                    "params": dict(params),
-                },
-            )
 
         node_specs_by_id[node_id] = (
             lazyframe,
@@ -916,7 +898,7 @@ def _read_workspace(
             provenance,
             metadata["document"],
             metadata["color"],
-            tokenization,
+            tokenizer_model,
         )
         ordered_ids.append(node_id)
         parent_ids_by_node[node_id] = parent_ids
@@ -950,9 +932,9 @@ def _read_workspace(
 
     nodes_by_id: dict[str, Node] = {}
     for node_id in topological_ids:
-        lazyframe, name, provenance, document, color, tokenization = node_specs_by_id[
-            node_id
-        ]
+        lazyframe, name, provenance, document, color, tokenizer_model = (
+            node_specs_by_id[node_id]
+        )
         node = Node(
             id=node_id,
             data=lazyframe,
@@ -960,7 +942,7 @@ def _read_workspace(
             provenance=provenance,
             document=document,
             color=color,
-            tokenization=tokenization,
+            tokenizer_model=tokenizer_model,
             parents=[
                 nodes_by_id[parent_id] for parent_id in parent_ids_by_node[node_id]
             ],

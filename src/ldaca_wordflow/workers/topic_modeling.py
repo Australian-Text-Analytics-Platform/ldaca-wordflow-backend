@@ -198,11 +198,6 @@ def run_topic_modeling_detachment(
                         if source.document in selected_columns
                         else None,
                         "color": source.color,
-                        "tokenization": {
-                            column: metadata
-                            for column, metadata in source.tokenization.items()
-                            if column in selected_columns
-                        },
                     },
                     "parquet_path": str(topic_data_path),
                     "output_columns": output_columns,
@@ -215,7 +210,6 @@ def run_topic_modeling_detachment(
                         "provenance": topic_meanings_provenance,
                         "document": None,
                         "color": source.color,
-                        "tokenization": {},
                     },
                     "parquet_path": str(topic_meanings_output_path),
                     "output_columns": [TOPIC_COLUMN, TOPIC_MEANING_COLUMN],

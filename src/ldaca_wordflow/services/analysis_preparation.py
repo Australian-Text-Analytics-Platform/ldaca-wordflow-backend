@@ -24,7 +24,6 @@ from ..domain.workspace import (
     ConcordanceDetachmentAnalysisRequest,
     ConcordanceDispersionDetachmentAnalysisRequest,
     ConcordanceAnalysisRequest,
-    Node,
     QuotationAnalysisRequest,
     QuotationDetachmentAnalysisRequest,
     SequentialAnalysisRequest,
@@ -136,7 +135,6 @@ class AnalysisExecutionPreparer:
         credential: str | None,
     ) -> AnalysisInvocation:
         request = record.request
-        nodes = workspace.nodes
         common: dict[str, object] = {
             "user_id": user_id,
             "workspace_id": workspace_id,
@@ -173,15 +171,10 @@ class AnalysisExecutionPreparer:
             node_columns = {
                 str(node_id): column for node_id, column in request.node_columns.items()
             }
-            tokenizer_models = _resolve_tokenizer_models(
-                nodes,
-                node_ids=node_ids,
-                node_columns=node_columns,
-                requested={
-                    str(node_id): model
-                    for node_id, model in request.node_tokenizer_models.items()
-                },
-            )
+            tokenizer_models = {
+                str(node_id): model
+                for node_id, model in request.node_tokenizer_models.items()
+            }
             return owned(
                 token_frequency_process,
                 {
@@ -335,6 +328,9 @@ class AnalysisExecutionPreparer:
                     "whole_word": source.whole_word,
                     "case_sensitive": source.case_sensitive,
                     "search_mode": source.search_mode,
+                    "tokenizer_model": source.node_tokenizer_models.get(
+                        request.node_id
+                    ),
                     "new_node_name": request.name
                     or f"Concordance {str(request.node_id)[:8]}",
                     "include_document_column": column in request.selected_columns,
@@ -376,6 +372,9 @@ class AnalysisExecutionPreparer:
                     "whole_word": source.whole_word,
                     "case_sensitive": source.case_sensitive,
                     "search_mode": source.search_mode,
+                    "tokenizer_model": source.node_tokenizer_models.get(
+                        request.node_id
+                    ),
                     "new_node_name": request.name
                     or f"Concordance dispersion {str(request.node_id)[:8]}",
                     "include_document_column": column in request.selected_columns,
@@ -451,36 +450,6 @@ def _request_node_ids(record: AnalysisRecord) -> list[str]:
     ):
         return [str(node_id) for node_id in request.node_ids]
     return [str(request.node_id)]
-
-
-def _resolve_tokenizer_models(
-    nodes: dict[str, Node],
-    *,
-    node_ids: list[str],
-    node_columns: dict[str, str],
-    requested: dict[str, str],
-) -> dict[str, str]:
-    resolved: dict[str, str] = {}
-    for node_id in node_ids:
-        node = nodes[node_id]
-        column = node_columns[node_id]
-        token_column = node.find_tokenization_column(column)
-        if token_column is None:
-            model = requested.get(node_id, "").strip()
-            if not model:
-                raise InvalidInputError(
-                    "Raw-text Data Blocks require a tokenizer model"
-                )
-            resolved[node_id] = model
-            continue
-        model = node.tokenization[column]["model"].strip()
-        requested_model = requested.get(node_id)
-        if not model or (
-            requested_model is not None and requested_model.strip() != model
-        ):
-            raise InvalidInputError("Tokenizer metadata does not match the request")
-        resolved[node_id] = model
-    return resolved
 
 
 def _metadata_columns(

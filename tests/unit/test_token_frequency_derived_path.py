@@ -10,7 +10,6 @@ from typing import Any, cast
 import polars as pl
 import pytest
 from ldaca_wordflow.domain.workspace import Node, Workspace
-from ldaca_wordflow.analysis.tokenization import tokenise_column
 from ldaca_wordflow.workers.input_snapshots import create_worker_input_snapshot
 from ldaca_wordflow.workers.token_frequency import _compute_token_frequencies
 
@@ -92,7 +91,7 @@ def test_worker_mixes_token_stream_and_text_paths(tmp_path, monkeypatch):
     assert tokens_counts == {"beta": 1, "gamma": 2}
 
 
-def test_worker_plain_words_tokenization_preference_uses_raw_text_fast_path(
+def test_worker_plain_request_uses_raw_text_even_if_node_preference_differs(
     tmp_path, monkeypatch
 ):
     requested_models = _stub_polars_text(monkeypatch)
@@ -101,12 +100,7 @@ def test_worker_plain_words_tokenization_preference_uses_raw_text_fast_path(
         data=pl.DataFrame({"document": ["alpha beta alpha", "beta"]}).lazy(),
         name="EN Corpus",
         id="node-1",
-    )
-    tokenise_column(
-        node,
-        source_column="document",
-        model="native:plain_words_en",
-        language=None,
+        tokenizer_model="lindera:jieba",
     )
     workspace = Workspace(name="tokens", workspace_id="ws-1")
     workspace.add_node(node)
@@ -121,10 +115,10 @@ def test_worker_plain_words_tokenization_preference_uses_raw_text_fast_path(
 
     import ldaca_wordflow.analysis.token_cache as tokens_cache
 
-    def _fail_hydrate(*_args, **_kwargs):
-        raise AssertionError("plain words token frequency should not hydrate tokens")
+    def _fail_tokenize(*_args, **_kwargs):
+        raise AssertionError("plain words token frequency should not build tokens")
 
-    monkeypatch.setattr(tokens_cache, "hydrate_tokenization_lazyframe", _fail_hydrate)
+    monkeypatch.setattr(tokens_cache, "tokenize_lazyframe", _fail_tokenize)
 
     result = _compute_token_frequencies(
         workspace_id="ws-1",

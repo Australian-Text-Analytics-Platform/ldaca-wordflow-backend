@@ -21,6 +21,7 @@ from ldaca_wordflow.domain.workspace import (
     Failure,
     Progress,
     Tab,
+    TokenFrequencyAnalysisRequest,
     ValidAnalysisIntegrity,
     Workspace,
     TopicModelingDetachmentAnalysisRequest,
@@ -49,6 +50,49 @@ def test_analysis_request_union_is_strict_and_discriminated() -> None:
         TypeAdapter(AnalysisRequest).validate_python(
             {**request.model_dump(mode="json"), "unknown": True}
         )
+
+
+def test_tokenizer_mappings_follow_each_analysis_mode_contract() -> None:
+    first = uuid.uuid4()
+    second = uuid.uuid4()
+
+    with pytest.raises(ValidationError, match="exactly match"):
+        TokenFrequencyAnalysisRequest(
+            node_ids=[first, second],
+            node_columns={first: "text", second: "body"},
+            node_tokenizer_models={first: "native:plain_words_en"},
+        )
+
+    text_request = ConcordanceAnalysisRequest(
+        node_ids=[first, second],
+        node_columns={first: "text", second: "body"},
+        node_tokenizer_models={first: "native:plain_words_en"},
+        search_word="word",
+    )
+    assert text_request.node_tokenizer_models == {
+        first: "native:plain_words_en"
+    }
+
+    with pytest.raises(ValidationError, match="Tokens mode"):
+        ConcordanceAnalysisRequest(
+            node_ids=[first, second],
+            node_columns={first: "text", second: "body"},
+            node_tokenizer_models={first: "native:plain_words_en"},
+            search_word="word",
+            search_mode="tokens",
+        )
+
+    tokens_request = ConcordanceAnalysisRequest(
+        node_ids=[first, second],
+        node_columns={first: "text", second: "body"},
+        node_tokenizer_models={
+            first: "native:plain_words_en",
+            second: "lindera:jieba",
+        },
+        search_word="word",
+        search_mode="tokens",
+    )
+    assert set(tokens_request.node_tokenizer_models) == {first, second}
 
 
 def test_topic_modeling_detachment_request_preserves_ordered_sources() -> None:

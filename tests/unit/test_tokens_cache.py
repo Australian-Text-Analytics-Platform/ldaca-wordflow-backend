@@ -1,4 +1,4 @@
-"""Unit tests for the per-user DuckDB-backed token cache."""
+"""Request-owned dynamic tokenization and per-user cache tests."""
 
 from __future__ import annotations
 
@@ -9,13 +9,8 @@ import duckdb
 import polars as pl
 import polars_text  # noqa: F401
 import pytest
-from ldaca_wordflow.analysis.generated_columns import (
-    tokenization_column_name,
-)
+from ldaca_wordflow.analysis.generated_columns import tokenization_column_name
 from ldaca_wordflow.analysis import token_cache as tc
-from ldaca_wordflow.analysis.tokenization import tokenise_column
-
-from ldaca_wordflow.domain.workspace import Node
 
 TEST_USER = "test_user"
 
@@ -52,51 +47,59 @@ def test_cache_schema_has_six_columns(isolated_cache_db: Path) -> None:
     ]
 
 
-def test_tokenise_column_registers_metadata_without_mutating_node_data() -> None:
-    node = Node(
-        data=pl.DataFrame({"text": ["hello world"]}).lazy(),
-        name="probe",
-    )
-
-    tokenization_name = tokenise_column(
-        node,
+def test_non_plain_dynamic_tokenization_uses_cache_without_mutating_source(
+    isolated_cache_db: Path,
+) -> None:
+    source = pl.DataFrame({"text": ["hello world", "hello again"]}).lazy()
+    tokenized, tokenization_name = tc.tokenize_lazyframe(
+        data=source,
         source_column="text",
         model="huggingface:bert-base-uncased",
-        language="en",
+        cache_path=isolated_cache_db,
     )
+    tokenized_df = tokenized.collect()
 
     assert tokenization_name == tokenization_column_name(
         "text", "huggingface:bert-base-uncased"
     )
-    assert node.tokenization["text"]["column_name"] == tokenization_name
-    assert tokenization_name not in node.data.collect_schema().names()
-    tokenization_meta = cast(dict[str, Any], node.tokenization["text"])
-    assert "source_column" not in tokenization_meta
-    assert "cache_backend" not in tokenization_meta
-    assert "generated_at" not in tokenization_meta
-
-
-def test_hydrate_tokenization_adds_tokens_column() -> None:
-    node = Node(
-        data=pl.DataFrame({"text": ["hello world", "hello again"]}).lazy(),
-        name="probe",
-    )
-    tokenization_name = tokenise_column(
-        node,
-        source_column="text",
-        model="huggingface:bert-base-uncased",
-        language="en",
-    )
-
-    hydrated = tc.hydrate_tokenization_lazyframe(
-        node=node,
-        source_column="text",
-        cache_path=tc.tokens_cache_path(TEST_USER),
-    )
-    hydrated_df = hydrated.collect()
-
-    assert tokenization_name in hydrated_df.columns
-    assert tokenization_name not in node.data.collect_schema().names()
-    first_tokens = hydrated_df.to_dicts()[0][tokenization_name]
+    assert tokenization_name in tokenized_df.columns
+    assert tokenization_name not in source.collect_schema().names()
+    assert isolated_cache_db.is_file()
+    first_tokens = tokenized_df.to_dicts()[0][tokenization_name]
     assert isinstance(first_tokens, list) and first_tokens
     assert first_tokens[0]["token"]
+
+
+def test_plain_model_bypasses_duckdb_cache(isolated_cache_db: Path) -> None:
+    source = pl.DataFrame({"text": ["Hello, world!"]}).lazy()
+
+    tokenized, tokenization_name = tc.tokenize_lazyframe(
+        data=source,
+        source_column="text",
+        model=tc.PLAIN_WORDS_EN_MODEL,
+        cache_path=isolated_cache_db,
+    )
+    collected = tokenized.collect()
+
+    assert collected.get_column(tokenization_name).to_list()[0]
+    assert not isolated_cache_db.exists()
+
+
+def test_non_plain_model_requires_cache_path() -> None:
+    with pytest.raises(ValueError, match="requires a cache path"):
+        tc.tokenize_lazyframe(
+            data=pl.DataFrame({"text": ["hello"]}).lazy(),
+            source_column="text",
+            model="huggingface:bert-base-uncased",
+            cache_path=None,
+        )
+
+
+def test_dynamic_tokenization_rejects_missing_source_column(tmp_path: Path) -> None:
+    with pytest.raises(KeyError, match="missing"):
+        tc.tokenize_lazyframe(
+            data=pl.DataFrame({"text": ["hello"]}).lazy(),
+            source_column="missing",
+            model="huggingface:bert-base-uncased",
+            cache_path=tmp_path / "tokens.duckdb",
+        )

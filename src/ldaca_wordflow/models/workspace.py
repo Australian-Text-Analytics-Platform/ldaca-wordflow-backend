@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import uuid
-from typing import Annotated, Literal
+from typing import Literal
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
-from .tokenization import TokenizationMetadata
 from .names import NodeName
 from ..domain.workspace import (
     AnalysisRecord,
@@ -44,7 +50,7 @@ class WorkspaceNodeInfo(_StrictModel):
     color: str | None = None
     shape: tuple[int | None, int | None] = (None, None)
     dtype_normalization: list[DtypeNormalizationChange] | None = None
-    tokenizer_models: dict[str, str] = Field(default_factory=dict)
+    tokenizer_model: str | None = Field(default=None, max_length=500)
     can_undo: bool
     can_redo: bool
 
@@ -93,7 +99,7 @@ class WorkspaceUpdateRequest(_StrictModel):
 
 
 class WorkspaceArchiveMetadata(_StrictModel):
-    """Safe portable workspace metadata stored in archive manifest version 4."""
+    """Safe portable workspace metadata stored in archive manifest version 5."""
 
     id: uuid.UUID
     name: str = Field(min_length=1, max_length=500)
@@ -120,11 +126,15 @@ class WorkspaceArchiveNode(_StrictModel):
     provenance: NodeProvenance
     document: str | None = None
     color: str | None = None
-    tokenization: dict[
-        Annotated[str, Field(min_length=1, max_length=500)],
-        TokenizationMetadata,
-    ] = Field(default_factory=dict, max_length=500)
+    tokenizer_model: str | None = Field(default=None, min_length=1, max_length=500)
     data_file: str = Field(min_length=1)
+
+    @field_validator("tokenizer_model", mode="before")
+    @classmethod
+    def normalize_tokenizer_model(cls, value: object) -> object:
+        if not isinstance(value, str):
+            return value
+        return value.strip() or None
 
 
 class WorkspaceArchiveAnalysisInput(_StrictModel):
@@ -134,10 +144,6 @@ class WorkspaceArchiveAnalysisInput(_StrictModel):
     name: NodeName
     document: str | None = None
     color: str | None = None
-    tokenization: dict[
-        Annotated[str, Field(min_length=1, max_length=500)],
-        TokenizationMetadata,
-    ] = Field(default_factory=dict, max_length=500)
     data_file: str = Field(min_length=1)
 
 
@@ -169,7 +175,7 @@ class WorkspaceArchiveManifest(_StrictModel):
     """Only accepted client workspace archive manifest."""
 
     format: Literal["wordflow-materialized-workspace"]
-    version: Literal[4]
+    version: Literal[5]
     workspace: WorkspaceArchiveMetadata
     nodes: list[WorkspaceArchiveNode]
     tabs: list[Tab]

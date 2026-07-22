@@ -9,15 +9,19 @@ from typing import Any, cast
 import anyio
 import polars as pl
 import pytest
+import uuid
 
 from ldaca_wordflow.domain.workspace import Node, Workspace
 from ldaca_wordflow.models.node_resources import (
     AnnotationClassesNodeEditRequest,
     DeleteColumnNodeEditRequest,
+    CloneNodeCreateRequest,
     RenameColumnNodeEditRequest,
     SetCellNodeEditRequest,
+    NodeUpdateRequest,
 )
 from ldaca_wordflow.services.nodes import NodeService
+from ldaca_wordflow.services.node_operations import build_derived_node
 from ldaca_wordflow.shared.errors import InvalidInputError
 
 
@@ -51,7 +55,7 @@ def _service(workspace: Workspace) -> NodeService:
 
 
 @pytest.mark.anyio
-async def test_forward_edits_retarget_and_reconcile_non_undoable_metadata() -> None:
+async def test_column_edits_change_document_without_changing_tokenizer() -> None:
     workspace = Workspace(name="metadata")
     node = workspace.add_node(
         Node(
@@ -64,14 +68,7 @@ async def test_forward_edits_retarget_and_reconcile_non_undoable_metadata() -> N
             ).lazy(),
             name="source",
             document="text",
-            tokenization={
-                "text": {
-                    "column_name": "text_tokens",
-                    "model": "native:plain_words_en",
-                    "language": "en",
-                    "params": {},
-                }
-            },
+            tokenizer_model="native:plain_words_en",
         )
     )
     service = _service(workspace)
@@ -83,9 +80,7 @@ async def test_forward_edits_retarget_and_reconcile_non_undoable_metadata() -> N
         RenameColumnNodeEditRequest(column="text", new_name="body"),
     )
     assert renamed_source.document == "body"
-    assert renamed_source.tokenizer_models == {
-        "body": "native:plain_words_en"
-    }
+    assert renamed_source.tokenizer_model == "native:plain_words_en"
 
     renamed_tokens, _revision = await service.edit(
         "user",
@@ -96,10 +91,7 @@ async def test_forward_edits_retarget_and_reconcile_non_undoable_metadata() -> N
             new_name="tokens",
         ),
     )
-    assert renamed_tokens.tokenizer_models == {
-        "body": "native:plain_words_en"
-    }
-    assert node.tokenization["body"]["column_name"] == "tokens"
+    assert renamed_tokens.tokenizer_model == "native:plain_words_en"
 
     deleted_source, _revision = await service.edit(
         "user",
@@ -108,12 +100,74 @@ async def test_forward_edits_retarget_and_reconcile_non_undoable_metadata() -> N
         DeleteColumnNodeEditRequest(column="body"),
     )
     assert deleted_source.document is None
-    assert deleted_source.tokenizer_models == {}
+    assert deleted_source.tokenizer_model == "native:plain_words_en"
 
     restored_plan, _revision = await service.undo("user", workspace.id, node.id)
     assert "body" in node.data.collect_schema()
     assert restored_plan.document is None
-    assert restored_plan.tokenizer_models == {}
+    assert restored_plan.tokenizer_model == "native:plain_words_en"
+
+
+@pytest.mark.anyio
+async def test_document_and_tokenizer_patches_are_independent_and_clearable() -> None:
+    workspace = Workspace(name="preferences")
+    node = workspace.add_node(
+        Node(
+            data=pl.DataFrame({"text": ["hello"], "body": ["world"]}).lazy(),
+            name="source",
+            document="text",
+            tokenizer_model="native:plain_words_en",
+        )
+    )
+    service = _service(workspace)
+
+    tokenizer_updated, _revision = await service.update(
+        "user",
+        workspace.id,
+        node.id,
+        NodeUpdateRequest(tokenizer_model="  lindera:jieba  "),
+    )
+    assert tokenizer_updated.document == "text"
+    assert tokenizer_updated.tokenizer_model == "lindera:jieba"
+
+    document_updated, _revision = await service.update(
+        "user",
+        workspace.id,
+        node.id,
+        NodeUpdateRequest(document="body"),
+    )
+    assert document_updated.document == "body"
+    assert document_updated.tokenizer_model == "lindera:jieba"
+
+    tokenizer_cleared, _revision = await service.update(
+        "user",
+        workspace.id,
+        node.id,
+        NodeUpdateRequest(tokenizer_model="   "),
+    )
+    assert tokenizer_cleared.document == "body"
+    assert tokenizer_cleared.tokenizer_model is None
+
+
+def test_clone_inherits_document_but_not_tokenizer_preference() -> None:
+    workspace = Workspace(name="derived")
+    source = workspace.add_node(
+        Node(
+            id=str(uuid.uuid4()),
+            data=pl.DataFrame({"text": ["hello"]}).lazy(),
+            name="source",
+            document="text",
+            tokenizer_model="native:plain_words_en",
+        )
+    )
+
+    clone = build_derived_node(
+        workspace,
+        CloneNodeCreateRequest(source_node_id=uuid.UUID(source.id)),
+    )
+
+    assert clone.document == "text"
+    assert clone.tokenizer_model is None
 
 
 @pytest.mark.anyio

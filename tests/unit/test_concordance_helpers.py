@@ -121,3 +121,24 @@ def test_compute_concordance_page_rejects_an_unknown_sort_column() -> None:
             sort_by="missing",
             descending=False,
         )
+
+
+def test_compute_concordance_page_rejects_a_generated_sort_column() -> None:
+    source = pl.DataFrame({"text": ["alpha"]}).lazy()
+
+    with pytest.raises(InvalidInputError, match="Sort column"):
+        compute_concordance_page(
+            source,
+            "text",
+            {
+                "search_word": "alpha",
+                "num_left_tokens": 1,
+                "num_right_tokens": 1,
+                "regex": False,
+                "case_sensitive": False,
+            },
+            page=1,
+            page_size=10,
+            sort_by="CONC_matched_text",
+            descending=False,
+        )

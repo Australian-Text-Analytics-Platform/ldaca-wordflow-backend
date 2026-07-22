@@ -14,7 +14,7 @@ from typing import Any
 import polars as pl
 
 from .durable_fs import atomic_output_path
-from ...domain.workspace import Node, NodeProvenance, TokenizationMeta
+from ...domain.workspace import Node, NodeProvenance
 
 NODE_DATA_DIR = "data"
 
@@ -66,9 +66,7 @@ def to_dict(
             "provenance": node.provenance.model_dump(mode="json"),
             "document": node.document,
             "color": node.color,
-            "tokenization": {
-                source: dict(meta) for source, meta in node.tokenization.items()
-            },
+            "tokenizer_model": node.tokenizer_model,
         },
         "data_path": rel_data_path.as_posix(),
     }
@@ -82,7 +80,6 @@ def write_detached_frame(
     provenance: NodeProvenance,
     document: str | None,
     color: str | None = None,
-    tokenization: dict[str, TokenizationMeta] | None = None,
 ) -> dict[str, Any]:
     """Write one child-Analysis output as a private transferable Parquet file."""
 
@@ -97,7 +94,6 @@ def write_detached_frame(
             "provenance": provenance.model_dump(mode="json"),
             "document": document,
             "color": color,
-            "tokenization": tokenization or {},
         },
         "parquet_path": relative.as_posix(),
     }

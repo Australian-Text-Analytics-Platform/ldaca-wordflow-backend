@@ -11,7 +11,6 @@ from ..domain.workspace import NodeProvenance
 from ..shared.json_data import JsonData
 from .names import NodeName
 from .tables import CompleteTableResource, PagedTableResource
-from .tokenization import TokenizationMetadata
 
 
 class _StrictModel(BaseModel):
@@ -302,7 +301,6 @@ class DetachedDataBlockMetadata(_StrictModel):
     provenance: NodeProvenance
     document: str | None = Field(default=None, max_length=500)
     color: str | None = Field(default=None, max_length=100)
-    tokenization: dict[str, TokenizationMetadata] = Field(default_factory=dict)
 
 
 class _DetachmentWorkerData(_StrictModel):

@@ -4,8 +4,8 @@ Used by:
 - canonical Analysis execution and backend tests that exercise token-frequency
   computation from immutable inputs.
 
-Flow: resolve tokenization preferences, hydrate or create token columns, aggregate
-    frequencies, and persist derived artifacts for result queries.
+Flow: tokenize from immutable request parameters, aggregate frequencies, and
+persist derived artifacts for result queries.
 """
 
 from __future__ import annotations
@@ -18,7 +18,6 @@ from .utils import process_entrypoint
 
 logger = logging.getLogger(__name__)
 
-_PLAIN_WORDS_EN_MODEL = "native:plain_words_en"
 _COMPARATIVE_STATISTICS_COLUMN_NAMES = {
     "freq_corpus_0": "freq_reference",
     "percent_corpus_0": "percent_reference",
@@ -57,8 +56,8 @@ def _compute_token_frequencies(
         - Computes token frequencies off the API thread and writes Parquet artifacts
             for main-process lazy retrieval.
 
-    Flow: resolve tokenization preferences, hydrate or create token columns, aggregate
-        frequencies, and persist derived artifacts for result queries.
+    Flow: tokenize from immutable request parameters, aggregate frequencies,
+        and persist derived artifacts for result queries.
     """
     try:
         if progress_callback:
@@ -105,7 +104,10 @@ def _compute_token_frequencies(
             if progress_callback:
                 progress_callback(0.25, "Preparing token frequency inputs...")
             from .input_snapshots import load_snapshot_node
-            from ..analysis.token_cache import hydrate_tokenization_lazyframe
+            from ..analysis.token_cache import (
+                PLAIN_WORDS_EN_MODEL,
+                tokenize_lazyframe,
+            )
 
             if not node_ids:
                 raise ValueError("Token frequency snapshot input requires node_ids")
@@ -119,7 +121,11 @@ def _compute_token_frequencies(
                         f"Missing token-frequency column for node {node_id}"
                     )
                 display_names[node_id] = snapshot_node.name
-                node = snapshot_node.to_node()
+                tokenizer_model = requested_node_tokenizer_models.get(node_id)
+                if tokenizer_model is None:
+                    raise ValueError(
+                        f"Missing tokenizer model for Data Block {node_id}"
+                    )
 
                 def collect_source_corpus() -> list[str]:
                     """Collect raw source text for direct token-frequency counting.
@@ -139,58 +145,29 @@ def _compute_token_frequencies(
                         for value in docs_df["__doc_col__"].to_list()
                     ]
 
-                tokenization_col = node.find_tokenization_column(source_column)
-                if tokenization_col is not None:
-                    tokenization_meta = node.tokenization.get(source_column, {})
-                    model = (
-                        tokenization_meta.get("model")
-                        if isinstance(tokenization_meta, dict)
-                        else None
-                    )
-                    tokenization_model = (
-                        model.strip()
-                        if isinstance(model, str) and model.strip()
-                        else None
-                    )
-                    if tokenization_model is not None:
-                        requested_model = requested_node_tokenizer_models.get(node_id)
-                        if requested_model != tokenization_model:
-                            raise ValueError(
-                                "Snapshotted tokenizer metadata does not match the Analysis request"
-                            )
-                    if tokenization_model == _PLAIN_WORDS_EN_MODEL:
-                        # Plain words is stateless and cheap to count directly.
-                        # Hydrating the tokenization preference would build
-                        # offset structs, touch DuckDB, and spill an exploded
-                        # token stream before doing the same frequency count.
-                        corpora[node_id] = collect_source_corpus()
-                        continue
-                    if token_cache_path is None:
-                        raise ValueError(
-                            "Tokenized input requires an explicit token cache path"
-                        )
-                    node_data = hydrate_tokenization_lazyframe(
-                        node=node,
-                        source_column=source_column,
-                        cache_path=token_cache_path,
-                    )
-                    stream_path = (
-                        scratch_root
-                        / f"{artifact_prefix}_tokens_stream_{node_id}.parquet"
-                    )
-                    (
-                        node_data.select(
-                            pl.col(tokenization_col)
-                            .list.eval(pl.element().struct.field("token"))
-                            .explode()
-                            .alias("token")
-                        )
-                        .filter(pl.col("token").is_not_null())
-                        .sink_parquet(stream_path)
-                    )
-                    token_streams[node_id] = str(stream_path)
-                else:
+                if tokenizer_model == PLAIN_WORDS_EN_MODEL:
                     corpora[node_id] = collect_source_corpus()
+                    continue
+                node_data, tokenization_col = tokenize_lazyframe(
+                    data=snapshot_node.data,
+                    source_column=source_column,
+                    model=tokenizer_model,
+                    cache_path=token_cache_path,
+                )
+                stream_path = (
+                    scratch_root / f"{artifact_prefix}_tokens_stream_{node_id}.parquet"
+                )
+                (
+                    node_data.select(
+                        pl.col(tokenization_col)
+                        .list.eval(pl.element().struct.field("token"))
+                        .explode()
+                        .alias("token")
+                    )
+                    .filter(pl.col("token").is_not_null())
+                    .sink_parquet(stream_path)
+                )
+                token_streams[node_id] = str(stream_path)
 
         prepared_node_ids = list({**corpora, **token_streams}.keys())
         if not prepared_node_ids:

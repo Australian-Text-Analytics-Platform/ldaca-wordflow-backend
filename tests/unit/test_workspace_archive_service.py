@@ -183,7 +183,7 @@ def _valid_archive(
     name: str = "Imported",
     tabs: list[dict[str, Any]] | None = None,
     analyses: list[dict[str, Any]] | None = None,
-    version: int = 4,
+    version: int = 5,
 ) -> bytes:
     node_id = str(uuid.uuid4())
     manifest = {
@@ -203,7 +203,7 @@ def _valid_archive(
                 "provenance": {"type": "source"},
                 "document": None,
                 "color": None,
-                "tokenization": {},
+                "tokenizer_model": None,
                 "data_file": f"data/{node_id}.parquet",
             }
         ],
@@ -301,6 +301,7 @@ async def test_archive_round_trip_preserves_terminal_analysis_result_and_tab(
             id=str(uuid.uuid4()),
             name="Corpus",
             data=pl.DataFrame({"text": ["hello"]}).lazy(),
+            tokenizer_model="native:plain_words_en",
         )
     )
     timestamp = datetime.now(UTC)
@@ -308,6 +309,9 @@ async def test_archive_round_trip_preserves_terminal_analysis_result_and_tab(
         TokenFrequencyAnalysisRequest(
             node_ids=[uuid.UUID(node.id)],
             node_columns={uuid.UUID(node.id): "text"},
+            node_tokenizer_models={
+                uuid.UUID(node.id): "native:plain_words_en"
+            },
         ),
         timestamp=timestamp,
     ).start(timestamp)
@@ -327,7 +331,7 @@ async def test_archive_round_trip_preserves_terminal_analysis_result_and_tab(
     _create_workspace_export(source, tmp_path, exported, 1024 * 1024)
     with zipfile.ZipFile(exported) as archive:
         manifest = json.loads(archive.read("workspace/workspace.json"))
-    assert manifest["version"] == 4
+    assert manifest["version"] == 5
     assert len(manifest["analyses"]) == 1
 
     storage = FakeWorkspaceStorage(tmp_path / "installed")
@@ -343,6 +347,7 @@ async def test_archive_round_trip_preserves_terminal_analysis_result_and_tab(
     ).load(installed).workspace
 
     assert loaded.tabs[str(tab.id)].analysis_id == analysis.id
+    assert loaded.nodes[node.id].tokenizer_model == "native:plain_words_en"
     restored = loaded.analyses[str(analysis.id)]
     assert restored.request == analysis.request
     assert restored.result_payload == analysis.result_payload
@@ -441,7 +446,7 @@ async def test_archive_rejects_previous_manifest_version(tmp_path: Path) -> None
         await _service(storage).import_upload(
             "alice",
             "workspace.zip",
-            ByteSource(_valid_archive(version=3)),
+            ByteSource(_valid_archive(version=4)),
         )
 
     assert list((tmp_path / ".staging").iterdir()) == []

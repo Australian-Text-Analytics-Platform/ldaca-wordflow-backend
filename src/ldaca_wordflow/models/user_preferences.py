@@ -6,7 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-PREFERENCES_SCHEMA_VERSION = 1
+PREFERENCES_SCHEMA_VERSION = 2
 
 
 class _StrictModel(BaseModel):
@@ -18,7 +18,6 @@ class UserPreferences(_StrictModel):
 
     hidden_views: list[str] = Field(default_factory=list)
     favorite_workspaces: list[str] = Field(default_factory=list)
-    default_tokenizer_model: str | None = None
     analysis_multi_tab_enabled: bool = False
     contextual_hints_enabled: bool = True
 
@@ -32,19 +31,11 @@ class UserPreferences(_StrictModel):
                 cleaned.append(normalized)
         return cleaned
 
-    @field_validator("default_tokenizer_model")
-    @classmethod
-    def normalize_default_tokenizer(cls, value: str | None) -> str | None:
-        normalized = value.strip() if value is not None else ""
-        return normalized or None
-
-
 class UserPreferencesPatch(_StrictModel):
     """Partial update; only explicitly provided fields are changed."""
 
     hidden_views: list[str] = Field(default_factory=list)
     favorite_workspaces: list[str] = Field(default_factory=list)
-    default_tokenizer_model: str | None = None
     analysis_multi_tab_enabled: bool = False
     contextual_hints_enabled: bool = True
 
@@ -53,16 +44,10 @@ class UserPreferencesPatch(_StrictModel):
     def unique_non_empty_values(cls, values: list[str]) -> list[str]:
         return UserPreferences.unique_non_empty_values(values)
 
-    @field_validator("default_tokenizer_model")
-    @classmethod
-    def normalize_default_tokenizer(cls, value: str | None) -> str | None:
-        return UserPreferences.normalize_default_tokenizer(value)
-
-
 class StoredUserPreferences(UserPreferences):
     """Schema-versioned representation persisted to preferences.toml."""
 
-    schema_version: Literal[1] = Field(default=PREFERENCES_SCHEMA_VERSION, frozen=True)
+    schema_version: Literal[2] = Field(default=PREFERENCES_SCHEMA_VERSION, frozen=True)
 
 
 __all__ = [

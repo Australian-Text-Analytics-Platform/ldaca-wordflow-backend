@@ -5,7 +5,7 @@ package so the aggregate can be tested without I/O or framework dependencies.
 """
 
 from .graph import Workspace
-from .node import Node, TokenizationMeta
+from .node import Node
 from .provenance import (
     AnnotationDerivation,
     ConcordanceDetachmentDerivation,
@@ -101,7 +101,6 @@ __all__ = [
     "Tab",
     "TabName",
     "TokenFrequencyAnalysisRequest",
-    "TokenizationMeta",
     "TopicModelingAnalysisRequest",
     "TopicModelingDetachmentAnalysisRequest",
     "TopicMeaningOverride",
