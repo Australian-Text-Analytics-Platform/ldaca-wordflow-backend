@@ -5,7 +5,13 @@ from __future__ import annotations
 import uuid
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    model_validator,
+)
 
 from ..domain.workspace.provenance import (
     CastDerivation,
@@ -140,13 +146,60 @@ class ExpressionNodeEditRequest(ExpressionDerivation):
     """Apply a typed Polars expression to the target Data Block."""
 
 
+NonEmptyColumnName = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=200),
+]
+
+
+class SetCellNodeEditRequest(_StrictRequest):
+    """Replace one string cell at an absolute Data Block row index."""
+
+    kind: Literal["set_cell"] = "set_cell"
+    column: NonEmptyColumnName
+    row_index: int = Field(ge=0)
+    value: str | None = None
+
+
+class AnnotationClassRow(_StrictRequest):
+    """One validated manual Annotation class-description row."""
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    class_name: Annotated[
+        str,
+        StringConstraints(strip_whitespace=True, min_length=1, max_length=200),
+    ] = Field(alias="class")
+    description: str = Field(default="", max_length=2_000)
+
+
+class AnnotationClassesNodeEditRequest(_StrictRequest):
+    """Replace class-description rows while preserving other columns."""
+
+    kind: Literal["annotation_classes"] = "annotation_classes"
+    class_column: NonEmptyColumnName
+    description_column: NonEmptyColumnName
+    rows: list[AnnotationClassRow] = Field(default_factory=list, max_length=200)
+
+    @model_validator(mode="after")
+    def validate_columns_and_rows(self) -> "AnnotationClassesNodeEditRequest":
+        if self.class_column == self.description_column:
+            raise ValueError("Class and description columns must be different")
+        normalized = [row.class_name.casefold() for row in self.rows]
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("Annotation class names must be unique")
+        return self
+
+
 NodeEditRequest = Annotated[
     CastNodeEditRequest
     | RenameColumnNodeEditRequest
     | DeleteColumnNodeEditRequest
     | FilterNodeEditRequest
     | ReplaceNodeEditRequest
-    | ExpressionNodeEditRequest,
+    | ExpressionNodeEditRequest
+    | SetCellNodeEditRequest
+    | AnnotationClassesNodeEditRequest,
     Field(discriminator="kind"),
 ]
 

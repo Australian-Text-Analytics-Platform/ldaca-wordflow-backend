@@ -44,6 +44,7 @@ from ..shared.errors import InvalidInputError, NodeNotFoundError
 from ..shared.json_data import JsonData
 from .node_casting import cast_lazyframe_column
 from ..models.node_resources import (
+    AnnotationClassesNodeEditRequest,
     CastNodeEditRequest,
     CloneNodeCreateRequest,
     ConcatNodeCreateRequest,
@@ -58,6 +59,7 @@ from ..models.node_resources import (
     RenameColumnNodeEditRequest,
     ReplaceNodeEditRequest,
     ReplaceNodeCreateRequest,
+    SetCellNodeEditRequest,
     SliceNodeCreateRequest,
 )
 from ..infrastructure.storage.layout import validate_display_name
@@ -259,7 +261,106 @@ def build_edited_lazyframe(
     if isinstance(request, ExpressionNodeEditRequest):
         return _apply_expression(node.data, request), None
 
+    if isinstance(request, SetCellNodeEditRequest):
+        return _set_string_cell(node, request), None
+
+    if isinstance(request, AnnotationClassesNodeEditRequest):
+        return _replace_annotation_classes(node, request), None
+
     raise InvalidInputError("Unsupported Data Block Edit")
+
+
+def _set_string_cell(
+    node: Node,
+    request: SetCellNodeEditRequest,
+) -> pl.LazyFrame:
+    schema = node.data.collect_schema()
+    if request.column not in schema:
+        raise InvalidInputError("Cell column is not present on the Data Block")
+    if schema[request.column] != pl.String:
+        raise InvalidInputError("Cell edits require a string column")
+    current = node.data.select(request.column).slice(request.row_index, 1).collect()
+    if current.height != 1:
+        raise InvalidInputError("Cell row index is outside the Data Block")
+    if current.item() == request.value:
+        return node.data
+    return node.data.with_columns(
+        pl.when(pl.int_range(pl.len()) == request.row_index)
+        .then(pl.lit(request.value, dtype=pl.String))
+        .otherwise(pl.col(request.column))
+        .alias(request.column)
+    )
+
+
+def _replace_annotation_classes(
+    node: Node,
+    request: AnnotationClassesNodeEditRequest,
+) -> pl.LazyFrame:
+    schema = dict(node.data.collect_schema().items())
+    missing = [
+        column
+        for column in (request.class_column, request.description_column)
+        if column not in schema
+    ]
+    if missing:
+        raise InvalidInputError(
+            f"Annotation class column is not present: {', '.join(missing)}"
+        )
+
+    row_count = len(request.rows)
+    existing = node.data.slice(0, row_count).collect()
+    total_rows = int(node.data.select(pl.len()).collect().item())
+    values: dict[str, list[object]] = {}
+    for column in schema:
+        if column == request.class_column:
+            values[column] = [row.class_name for row in request.rows]
+        elif column == request.description_column:
+            values[column] = [row.description for row in request.rows]
+        else:
+            existing_values = existing[column].to_list()
+            values[column] = [
+                existing_values[index] if index < len(existing_values) else None
+                for index in range(row_count)
+            ]
+
+    output_schema = dict(schema)
+    output_schema[request.class_column] = cast(pl.DataType, pl.String)
+    output_schema[request.description_column] = cast(pl.DataType, pl.String)
+    updated = pl.DataFrame(values, schema=output_schema)
+    if total_rows == row_count and existing.equals(updated, null_equal=True):
+        return node.data
+
+    row_index = "__wordflow_annotation_row_index"
+    while row_index in schema:
+        row_index = f"_{row_index}"
+    extra_columns = [
+        column
+        for column in schema
+        if column not in {request.class_column, request.description_column}
+    ]
+    source_marker = "__wordflow_annotation_source"
+    while source_marker in schema or source_marker == row_index:
+        source_marker = f"_{source_marker}"
+    source_expressions: list[pl.Expr] = [pl.col(row_index)]
+    source_expressions.extend(pl.col(column) for column in extra_columns)
+    source_expressions.append(pl.lit(True).alias(source_marker))
+    source_rows = (
+        node.data.with_row_index(row_index)
+        .slice(0, row_count)
+        .select(source_expressions)
+    )
+    payload = updated.select(
+        request.class_column,
+        request.description_column,
+    ).with_columns(
+        pl.Series(row_index, range(row_count), dtype=pl.UInt32)
+    )
+    return (
+        payload.lazy()
+        .join(source_rows, on=row_index, how="left")
+        .drop(row_index, source_marker)
+        .select(list(schema))
+    )
 
 
 def _cast_is_no_op(

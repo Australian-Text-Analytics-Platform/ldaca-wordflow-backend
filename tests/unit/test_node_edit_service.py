@@ -12,10 +12,13 @@ import pytest
 
 from ldaca_wordflow.domain.workspace import Node, Workspace
 from ldaca_wordflow.models.node_resources import (
+    AnnotationClassesNodeEditRequest,
     DeleteColumnNodeEditRequest,
     RenameColumnNodeEditRequest,
+    SetCellNodeEditRequest,
 )
 from ldaca_wordflow.services.nodes import NodeService
+from ldaca_wordflow.shared.errors import InvalidInputError
 
 
 class _WorkspaceGate:
@@ -111,3 +114,153 @@ async def test_forward_edits_retarget_and_reconcile_non_undoable_metadata() -> N
     assert "body" in node.data.collect_schema()
     assert restored_plan.document is None
     assert restored_plan.tokenizer_models == {}
+
+
+@pytest.mark.anyio
+async def test_set_cell_is_identity_preserving_undoable_and_no_op_aware() -> None:
+    workspace = Workspace(name="cells")
+    node = workspace.add_node(
+        Node(
+            data=pl.DataFrame(
+                {
+                    "text": ["first", "second"],
+                    "annotation": [None, None],
+                },
+                schema={"text": pl.String, "annotation": pl.String},
+            ).lazy(),
+            name="source",
+        )
+    )
+    service = _service(workspace)
+
+    edited, revision = await service.edit(
+        "user",
+        workspace.id,
+        node.id,
+        SetCellNodeEditRequest(
+            column="annotation",
+            row_index=1,
+            value="Relevant",
+        ),
+    )
+
+    assert str(edited.id) == node.id
+    assert revision == 2
+    assert node.data.collect()["annotation"].to_list() == [None, "Relevant"]
+    assert node.can_undo is True
+
+    no_op, no_op_revision = await service.edit(
+        "user",
+        workspace.id,
+        node.id,
+        SetCellNodeEditRequest(
+            column="annotation",
+            row_index=1,
+            value="Relevant",
+        ),
+    )
+
+    assert no_op_revision == revision
+    assert no_op.can_undo is True
+    await service.undo("user", workspace.id, node.id)
+    assert node.data.collect()["annotation"].to_list() == [None, None]
+    assert node.can_undo is False
+
+
+@pytest.mark.anyio
+async def test_set_cell_rejects_missing_non_string_and_out_of_range_targets() -> None:
+    workspace = Workspace(name="invalid cells")
+    node = workspace.add_node(
+        Node(
+            data=pl.DataFrame(
+                {"count": [1], "annotation": [None]},
+                schema={"count": pl.Int64, "annotation": pl.String},
+            ).lazy(),
+            name="source",
+        )
+    )
+    service = _service(workspace)
+
+    for request in (
+        SetCellNodeEditRequest(column="missing", row_index=0, value="x"),
+        SetCellNodeEditRequest(column="count", row_index=0, value="x"),
+        SetCellNodeEditRequest(column="annotation", row_index=2, value="x"),
+    ):
+        with pytest.raises(InvalidInputError):
+            await service.edit("user", workspace.id, node.id, request)
+
+
+@pytest.mark.anyio
+async def test_annotation_classes_preserve_extra_columns_and_commit_once() -> None:
+    workspace = Workspace(name="classes")
+    node = workspace.add_node(
+        Node(
+            data=pl.DataFrame(
+                {
+                    "class": ["support", "critical"],
+                    "description": ["Supportive", "Critical"],
+                    "code": [10, 20],
+                }
+            ).lazy(),
+            name="classes",
+        )
+    )
+    service = _service(workspace)
+
+    edited, revision = await service.edit(
+        "user",
+        workspace.id,
+        node.id,
+        AnnotationClassesNodeEditRequest(
+            class_column="class",
+            description_column="description",
+            rows=[
+                {"class": "support", "description": "Supports"},
+                {"class": "critical", "description": "Criticises"},
+                {"class": "neutral", "description": "Neither"},
+            ],
+        ),
+    )
+
+    assert str(edited.id) == node.id
+    assert revision == 2
+    assert node.data.collect().to_dicts() == [
+        {"class": "support", "description": "Supports", "code": 10},
+        {"class": "critical", "description": "Criticises", "code": 20},
+        {"class": "neutral", "description": "Neither", "code": None},
+    ]
+    assert node.can_undo is True
+
+    await service.undo("user", workspace.id, node.id)
+    assert node.data.collect().to_dicts() == [
+        {"class": "support", "description": "Supportive", "code": 10},
+        {"class": "critical", "description": "Critical", "code": 20},
+    ]
+
+
+@pytest.mark.anyio
+async def test_identical_annotation_classes_create_no_checkpoint() -> None:
+    workspace = Workspace(name="classes")
+    node = workspace.add_node(
+        Node(
+            data=pl.DataFrame(
+                {"class": ["support"], "description": ["Supportive"]}
+            ).lazy(),
+            name="classes",
+        )
+    )
+    service = _service(workspace)
+
+    _edited, revision = await service.edit(
+        "user",
+        workspace.id,
+        node.id,
+        AnnotationClassesNodeEditRequest(
+            class_column="class",
+            description_column="description",
+            rows=[{"class": "support", "description": "Supportive"}],
+        ),
+    )
+
+    assert revision == 1
+    assert node.can_undo is False

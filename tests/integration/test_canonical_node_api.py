@@ -574,3 +574,131 @@ def test_data_block_edits_preserve_identity_history_and_frozen_descendants(
             headers=unsafe,
         )
         assert sample_edit.status_code == 422
+
+
+def test_manual_annotation_edits_share_node_history_and_persistence(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(
+        data_root=tmp_path,
+        multi_user=False,
+        session_cookie_secure=False,
+        cors_allowed_origins=("http://testserver",),
+        trusted_hosts=("testserver",),
+    )
+    with TestClient(
+        create_app(settings, serve_frontend=False),
+        base_url="http://testserver",
+    ) as client:
+        csrf = client.get("/api/session").json()["csrf_token"]
+        unsafe = {"Origin": "http://testserver", "X-CSRF-Token": csrf}
+        assert (
+            client.post(
+                "/api/user-files/uploads",
+                params={"path": "annotations.csv"},
+                content=(
+                    b"class,description,annotation,code\n"
+                    b"support,Supportive,,10\n"
+                    b"critical,Critical,,20\n"
+                ),
+                headers={**unsafe, "Content-Type": "application/octet-stream"},
+            ).status_code
+            == 201
+        )
+        workspace_id = client.post(
+            "/api/workspaces",
+            json={"name": "Manual annotation"},
+            headers=unsafe,
+        ).json()["id"]
+        assert (
+            client.put(f"/api/workspaces/{workspace_id}/open", headers=unsafe).status_code
+            == 200
+        )
+        node_id = client.post(
+            f"/api/workspaces/{workspace_id}/nodes",
+            json={"kind": "file", "file_path": "annotations.csv"},
+            headers=unsafe,
+        ).json()["id"]
+
+        cell = client.post(
+            f"/api/workspaces/{workspace_id}/nodes/{node_id}/edits",
+            json={
+                "kind": "set_cell",
+                "column": "annotation",
+                "row_index": 1,
+                "value": "support",
+            },
+            headers=unsafe,
+        )
+        assert cell.status_code == 200, cell.text
+        assert cell.json()["can_undo"] is True
+
+        classes = client.post(
+            f"/api/workspaces/{workspace_id}/nodes/{node_id}/edits",
+            json={
+                "kind": "annotation_classes",
+                "class_column": "class",
+                "description_column": "description",
+                "rows": [
+                    {"class": "support", "description": "Supports"},
+                    {"class": "critical", "description": "Criticises"},
+                    {"class": "neutral", "description": "Neither"},
+                ],
+            },
+            headers=unsafe,
+        )
+        assert classes.status_code == 200, classes.text
+        assert classes.json()["can_undo"] is True
+        rows = client.post(
+            f"/api/workspaces/{workspace_id}/sql",
+            json={
+                "mode": "query",
+                "node_ids": [node_id],
+                "sql": f'SELECT * FROM "{node_id}"',
+            },
+            headers=unsafe,
+        )
+        assert pl.read_ipc_stream(BytesIO(rows.content)).to_dicts() == [
+            {
+                "class": "support",
+                "description": "Supports",
+                "annotation": None,
+                "code": 10,
+            },
+            {
+                "class": "critical",
+                "description": "Criticises",
+                "annotation": "support",
+                "code": 20,
+            },
+            {
+                "class": "neutral",
+                "description": "Neither",
+                "annotation": None,
+                "code": None,
+            },
+        ]
+
+        assert (
+            client.post(
+                f"/api/workspaces/{workspace_id}/nodes/{node_id}/undo",
+                headers=unsafe,
+            ).status_code
+            == 200
+        )
+        assert (
+            client.delete(
+                f"/api/workspaces/{workspace_id}/open",
+                headers=unsafe,
+            ).status_code
+            == 204
+        )
+        assert (
+            client.put(f"/api/workspaces/{workspace_id}/open", headers=unsafe).status_code
+            == 200
+        )
+        reopened = client.get(
+            f"/api/workspaces/{workspace_id}/nodes/{node_id}"
+        ).json()
+        assert reopened["can_undo"] is False
+        assert reopened["can_redo"] is False
