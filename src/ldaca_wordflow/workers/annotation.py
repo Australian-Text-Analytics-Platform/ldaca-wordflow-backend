@@ -35,7 +35,7 @@ def run_annotation_analysis(
     input_snapshot_dir: str,
     output_dir: str,
     request_payload: dict[str, Any],
-    api_key: str,
+    api_key: str | None,
     progress_callback: Callable[[float, str], None] | None = None,
 ) -> dict[str, Any]:
     """Classify one immutable Data Block snapshot and publish one private output."""
@@ -61,7 +61,10 @@ def run_annotation_analysis(
             progress_callback(0.1, "Classifying rows")
         labels = asyncio.run(
             annotate_all(
-                resolve_provider_wire(request.provider),
+                resolve_provider_wire(
+                    request.provider,
+                    request.provider_base_url,
+                ),
                 request.model,
                 api_key,
                 request.instruction,

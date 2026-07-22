@@ -19,7 +19,7 @@ from pydantic import (
 )
 
 from ...shared.json_data import JsonData
-from ..annotation import AnnotationClass, AnnotationProvider
+from ..annotation import AnnotationClass, AnnotationProviderSnapshot
 from ..background import BackgroundState, Failure, Progress
 
 
@@ -204,13 +204,12 @@ class SequentialAnalysisRequest(_StrictModel):
         return self
 
 
-class _AnnotationFields(_StrictModel):
+class _AnnotationFields(AnnotationProviderSnapshot):
     kind: Literal["annotation"] = "annotation"
     node_id: uuid.UUID
     text_column: NonEmptyText = Field(max_length=500)
     annotation_column: NonEmptyText = Field(max_length=500)
     classes: list[AnnotationClass] = Field(min_length=1, max_length=200)
-    provider: AnnotationProvider
     model: NonEmptyText = Field(max_length=500)
     instruction: NonEmptyText = Field(max_length=20_000)
     temperature: float = Field(default=0.0, ge=0.0, le=2.0, allow_inf_nan=False)

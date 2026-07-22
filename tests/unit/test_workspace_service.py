@@ -553,7 +553,7 @@ async def test_archive_install_rejects_uncompiled_client_plan_payloads(
                     "workspace_metadata": {
                         "id": workspace_id,
                         "name": "Unsafe",
-                        "version": 6,
+                        "version": 7,
                         "description": "",
                         "created_at": None,
                         "modified_at": None,

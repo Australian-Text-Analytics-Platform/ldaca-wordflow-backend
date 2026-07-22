@@ -258,6 +258,7 @@ async def test_multi_user_annotation_secret_reaches_execution_but_not_workspace_
         text_column="text",
         annotation_column="class",
         classes=[{"name": "Relevant", "description": ""}],
+        provider_configuration_id=uuid.uuid4(),
         provider="openai",
         model="model",
         instruction="Classify the text",

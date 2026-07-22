@@ -15,7 +15,7 @@ from ldaca_wordflow.spa import _runtime_config_js
 
 HTTP_METHODS = {"delete", "get", "patch", "post", "put"}
 EXPECTED_OPERATIONS = {
-    ("POST", "/api/annotation-providers/{provider}/models", "list_annotation_models"),
+    ("POST", "/api/annotation-providers/models", "list_annotation_models"),
     ("GET", "/api/auth/cilogon/callback", "cilogon_callback"),
     ("GET", "/api/auth/cilogon/login", "cilogon_login"),
     ("POST", "/api/auth/google/callback", "google_callback"),
@@ -26,8 +26,28 @@ EXPECTED_OPERATIONS = {
     ("GET", "/api/preferences", "get_preferences"),
     ("PATCH", "/api/preferences", "update_preferences"),
     ("GET", "/api/provider-credentials", "get_provider_credentials"),
-    ("PATCH", "/api/provider-credentials", "update_provider_credentials"),
+    ("PATCH", "/api/provider-credentials", "update_data_portal_credential"),
     ("DELETE", "/api/provider-credentials", "clear_provider_credentials"),
+    (
+        "POST",
+        "/api/provider-credentials/annotation-providers",
+        "create_annotation_provider_configuration",
+    ),
+    (
+        "DELETE",
+        "/api/provider-credentials/annotation-providers",
+        "clear_annotation_provider_configurations",
+    ),
+    (
+        "PATCH",
+        "/api/provider-credentials/annotation-providers/{configuration_id}",
+        "rename_annotation_provider_configuration",
+    ),
+    (
+        "DELETE",
+        "/api/provider-credentials/annotation-providers/{configuration_id}",
+        "delete_annotation_provider_configuration",
+    ),
     ("GET", "/api/user-files", "list_user_files"),
     ("GET", "/api/user-files/resource", "get_user_file_resource"),
     ("PATCH", "/api/user-files", "move_file"),
@@ -224,6 +244,11 @@ def test_cookie_security_is_explicit_and_no_bearer_or_query_token_is_advertised(
 
 def test_transient_provider_secrets_are_write_only_and_absent_from_resources() -> None:
     schemas = app.openapi()["components"]["schemas"]
+    assert "ProviderCredentialPatch" not in schemas
+    data_portal_patch = schemas["DataPortalCredentialPatch"]["properties"]
+    assert set(data_portal_patch) == {"data_portal_api_token"}
+    assert data_portal_patch["data_portal_api_token"]["anyOf"][0]["writeOnly"] is True
+
     for schema_name, field_name in (
         ("AnnotationModelsRequest", "api_key"),
         ("AnnotationPreviewRequest", "api_key"),

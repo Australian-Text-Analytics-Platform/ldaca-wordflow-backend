@@ -10,8 +10,8 @@ Why it exists:
   providers.
 
 Flow (per call):
-- Resolve a fixed provider id to a server-owned endpoint. Arbitrary base URLs
-  are deliberately unsupported so annotation requests cannot become SSRF.
+- Resolve a built-in provider id or the immutable, validated API root captured
+  for a trusted user's Custom OpenAI-compatible configuration.
 - Build a shared system prompt (instruction + labelled class list + strict JSON
   contract) and a user prompt (the texts as a JSON array, order preserved).
 - Dispatch one request per batch through the provider's *native* async SDK
@@ -75,8 +75,8 @@ class ProviderWire:
     supports_json_response_format: bool
 
 
-# Fixed provider catalogue. Endpoints are backend-owned; clients cannot supply
-# an alternate base URL.
+# Built-in provider catalogue. Custom OpenAI-compatible providers carry their
+# validated API-root snapshot separately.
 PROVIDER_WIRES: dict[str, ProviderWire] = {
     "openrouter": ProviderWire("openai", "https://openrouter.ai/api/v1", True),
     "openai": ProviderWire("openai", None, True),
@@ -85,8 +85,18 @@ PROVIDER_WIRES: dict[str, ProviderWire] = {
 }
 
 
-def resolve_provider_wire(provider_id: str) -> ProviderWire:
-    """Resolve one supported provider to its server-owned wire configuration."""
+def resolve_provider_wire(
+    provider_id: str,
+    base_url: str | None = None,
+) -> ProviderWire:
+    """Resolve one built-in or trusted Custom provider wire configuration."""
+
+    if provider_id == "custom":
+        if base_url is None:
+            raise ValueError("Custom annotation providers require a base URL")
+        return ProviderWire("openai", base_url, False)
+    if base_url is not None:
+        raise ValueError("Built-in annotation providers cannot define a base URL")
 
     try:
         return PROVIDER_WIRES[provider_id]
@@ -304,7 +314,7 @@ def align_labels(content: str, count: int, class_names: list[str]) -> list[str |
 async def _complete_openai(
     wire: ProviderWire,
     model: str,
-    api_key: str,
+    api_key: str | None,
     system: str,
     user: str,
     config: InferenceConfig,
@@ -466,7 +476,7 @@ async def _complete_google(
 async def annotate_batch(
     wire: ProviderWire,
     model: str,
-    api_key: str,
+    api_key: str | None,
     instruction: str,
     classes: list[AnnotationClassOption],
     texts: list[str],
@@ -489,8 +499,12 @@ async def annotate_batch(
     system = build_annotation_system_prompt(instruction, classes)
     user = build_annotation_user_prompt(texts)
     if wire.chat_style == "anthropic":
+        if api_key is None:
+            raise AnnotationAiError("Anthropic requires an API key")
         content = await _complete_anthropic(model, api_key, system, user, config)
     elif wire.chat_style == "google":
+        if api_key is None:
+            raise AnnotationAiError("Google requires an API key")
         content = await _complete_google(model, api_key, system, user, config)
     else:
         content = await _complete_openai(wire, model, api_key, system, user, config)
@@ -500,7 +514,7 @@ async def annotate_batch(
 async def annotate_all(
     wire: ProviderWire,
     model: str,
-    api_key: str,
+    api_key: str | None,
     instruction: str,
     classes: list[AnnotationClassOption],
     texts: list[str],
@@ -549,16 +563,17 @@ def _strip_google_model_prefix(name: str) -> str:
     return name[len(prefix) :] if name.startswith(prefix) else name
 
 
-async def list_models(provider_id: str, api_key: str) -> list[str]:
+async def list_models(wire: ProviderWire, api_key: str | None) -> list[str]:
     """List a provider's available model ids through its native SDK.
 
     Used by the provider-model resource route. SDK failures are normalized to
     ``AnnotationAiError`` and model ids are de-duplicated and sorted.
     """
-    wire = resolve_provider_wire(provider_id)
     ids: set[str] = set()
     try:
         if wire.chat_style == "anthropic":
+            if api_key is None:
+                raise AnnotationAiError("Anthropic requires an API key")
             from anthropic import AsyncAnthropic
 
             anthropic_client = AsyncAnthropic(
@@ -570,6 +585,8 @@ async def list_models(provider_id: str, api_key: str) -> list[str]:
                 if isinstance(model.id, str) and model.id:
                     ids.add(model.id)
         elif wire.chat_style == "google":
+            if api_key is None:
+                raise AnnotationAiError("Google requires an API key")
             from google import genai
 
             google_client = genai.Client(api_key=api_key)

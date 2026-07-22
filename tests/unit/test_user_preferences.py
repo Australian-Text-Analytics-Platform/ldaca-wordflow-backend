@@ -6,11 +6,15 @@ import anyio
 import pytest
 import rtoml
 
+from ldaca_wordflow.domain.annotation import AnnotationProviderSnapshot
 from ldaca_wordflow.infrastructure.storage.layout import (
     user_preferences_path,
     user_provider_credentials_path,
 )
-from ldaca_wordflow.models.provider_credentials import ProviderCredentialPatch
+from ldaca_wordflow.models.provider_credentials import (
+    AnnotationProviderConfigurationCreate,
+    DataPortalCredentialPatch,
+)
 from ldaca_wordflow.models.user_preferences import (
     PREFERENCES_SCHEMA_VERSION,
     UserPreferencesPatch,
@@ -107,8 +111,12 @@ async def test_credential_updates_never_touch_sanitized_preferences(
     preferences, credentials, settings = _stores(tmp_path)
     await preferences.get("root")
 
-    await credentials.update(
-        ProviderCredentialPatch(openai_api_key="top-secret"),
+    await credentials.create_annotation_provider(
+        AnnotationProviderConfigurationCreate(
+            name="OpenAI",
+            provider="openai",
+            api_key="top-secret",
+        )
     )
 
     assert "top-secret" not in user_preferences_path(
@@ -125,15 +133,23 @@ async def test_single_user_credentials_use_only_the_canonical_root_file(
 ) -> None:
     _preferences, credentials, settings = _stores(tmp_path)
 
-    await credentials.update(
-        ProviderCredentialPatch(openai_api_key="root-secret"),
+    configuration = await credentials.create_annotation_provider(
+        AnnotationProviderConfigurationCreate(
+            name="OpenAI",
+            provider="openai",
+            api_key="root-secret",
+        )
     )
 
     summary = await credentials.summary()
     assert summary.storage == "backend"
-    assert summary.annotation is not None
-    assert summary.annotation.openai is True
-    assert await credentials.annotation_credential("openai") == "root-secret"
+    assert summary.annotation_providers == [configuration]
+    assert await credentials.resolve_annotation_provider(
+        AnnotationProviderSnapshot(
+            provider_configuration_id=configuration.id,
+            provider="openai",
+        )
+    ) == "root-secret"
     assert user_provider_credentials_path(settings, "root").is_file()
     assert list(settings.get_users_root_folder().glob("*/provider-credentials.toml")) == [
         user_provider_credentials_path(settings, "root")
@@ -143,9 +159,22 @@ async def test_single_user_credentials_use_only_the_canonical_root_file(
 @pytest.mark.anyio
 async def test_single_user_rejects_request_supplied_credentials(tmp_path: Path) -> None:
     _preferences, credentials, _settings = _stores(tmp_path)
+    configuration = await credentials.create_annotation_provider(
+        AnnotationProviderConfigurationCreate(
+            name="OpenAI",
+            provider="openai",
+            api_key="root-secret",
+        )
+    )
 
     with pytest.raises(InvalidInputError):
-        await credentials.annotation_credential("openai", supplied="request-secret")
+        await credentials.resolve_annotation_provider(
+            AnnotationProviderSnapshot(
+                provider_configuration_id=configuration.id,
+                provider="openai",
+            ),
+            supplied="request-secret",
+        )
     with pytest.raises(InvalidInputError):
         await credentials.data_portal_credential(supplied="request-secret")
 
@@ -166,20 +195,26 @@ async def test_multi_user_credentials_are_browser_owned_and_legacy_files_unread(
     summary = await credentials.summary()
 
     assert summary.storage == "browser"
-    assert summary.annotation is None
+    assert summary.annotation_providers is None
     assert summary.data_portal.user_configured is None
     assert summary.data_portal.deployment_configured is True
-    assert await credentials.annotation_credential(
-        "openai", supplied="browser-secret"
+    browser_snapshot = AnnotationProviderSnapshot(
+        provider_configuration_id="0b3da4fe-edbe-45f2-a1cb-80ddc562b2fc",
+        provider="openai",
+    )
+    assert await credentials.resolve_annotation_provider(
+        browser_snapshot, supplied="browser-secret"
     ) == "browser-secret"
     assert await credentials.data_portal_credential(
         supplied="browser-token"
     ) == "browser-token"
     assert await credentials.data_portal_credential() == "deployment-token"
     with pytest.raises(ProviderCredentialMissingError):
-        await credentials.annotation_credential("openai")
+        await credentials.resolve_annotation_provider(browser_snapshot)
     with pytest.raises(AccessDeniedError):
-        await credentials.update(ProviderCredentialPatch(openai_api_key="denied"))
+        await credentials.update_data_portal_credential(
+            DataPortalCredentialPatch(data_portal_api_token="denied")
+        )
     with pytest.raises(AccessDeniedError):
         await credentials.clear()
     assert legacy_path.read_text(encoding="utf-8") == "invalid = ["
@@ -292,7 +327,7 @@ def test_multi_user_credential_api_reports_browser_ownership_and_denies_writes(
     assert status.status_code == 200
     assert status.json() == {
         "storage": "browser",
-        "annotation": None,
+        "annotation_providers": None,
         "data_portal": {
             "user_configured": None,
             "deployment_configured": False,
@@ -300,7 +335,7 @@ def test_multi_user_credential_api_reports_browser_ownership_and_denies_writes(
     }
     patched = multi_user_test_client.patch(
         "/api/provider-credentials",
-        json={"openai_api_key": "must-not-persist"},
+        json={"data_portal_api_token": "must-not-persist"},
     )
     assert patched.status_code == 403
     assert patched.json()["code"] == "access_denied"

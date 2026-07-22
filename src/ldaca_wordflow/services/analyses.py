@@ -198,8 +198,8 @@ class AnalysisService:
             raise BackendStoppingError()
         request = persisted_submission(submission)
         credential = (
-            await self._credentials.annotation_credential(
-                request.provider,
+            await self._credentials.resolve_annotation_provider(
+                request,
                 supplied=(
                     submission.api_key
                     if isinstance(submission, AnnotationAnalysisSubmission)

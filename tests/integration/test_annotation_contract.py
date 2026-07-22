@@ -61,7 +61,12 @@ def _source(client: TestClient, unsafe: dict[str, str]) -> tuple[str, str, str]:
     return workspace_id, node.json()["id"], node.headers["etag"]
 
 
-def _request() -> dict[str, object]:
+def _request(
+    configuration_id: str,
+    *,
+    provider: str = "openai",
+    provider_base_url: str | None = None,
+) -> dict[str, object]:
     return {
         "text_column": "text",
         "annotation_column": "stance",
@@ -69,19 +74,26 @@ def _request() -> dict[str, object]:
             {"name": "support", "description": "supports the claim"},
             {"name": "critical", "description": "criticises the claim"},
         ],
-        "provider": "openai",
+        "provider_configuration_id": configuration_id,
+        "provider": provider,
+        "provider_base_url": provider_base_url,
         "model": "test-model",
         "instruction": "Classify each document.",
     }
 
 
-def _configure_credentials(client: TestClient, unsafe: dict[str, str]) -> None:
-    response = client.patch(
-        "/api/provider-credentials",
-        json={"openai_api_key": "provider-secret"},
+def _configure_credentials(client: TestClient, unsafe: dict[str, str]) -> str:
+    response = client.post(
+        "/api/provider-credentials/annotation-providers",
+        json={
+            "name": "OpenAI",
+            "provider": "openai",
+            "api_key": "provider-secret",
+        },
         headers=unsafe,
     )
-    assert response.status_code == 200, response.text
+    assert response.status_code == 201, response.text
+    return str(response.json()["id"])
 
 
 def _wait_analysis(
@@ -120,12 +132,12 @@ def test_preview_is_stateless_and_uses_one_based_paging(
     with _client(tmp_path) as client:
         csrf = client.get("/api/session").json()["csrf_token"]
         unsafe = {"Origin": "http://testserver", "X-CSRF-Token": csrf}
-        _configure_credentials(client, unsafe)
+        configuration_id = _configure_credentials(client, unsafe)
         workspace_id, node_id, _etag = _source(client, unsafe)
         rejected = client.post(
             f"/api/workspaces/{workspace_id}/nodes/{node_id}/annotation-previews",
             json={
-                **_request(),
+                **_request(configuration_id),
                 "api_key": "request-secret",
                 "page": 2,
                 "page_size": 1,
@@ -136,7 +148,7 @@ def test_preview_is_stateless_and_uses_one_based_paging(
         assert rejected.json()["code"] == "invalid_input"
         response = client.post(
             f"/api/workspaces/{workspace_id}/nodes/{node_id}/annotation-previews",
-            json={**_request(), "page": 2, "page_size": 1},
+            json={**_request(configuration_id), "page": 2, "page_size": 1},
             headers=unsafe,
         )
         assert response.status_code == 200
@@ -195,7 +207,7 @@ def test_full_annotation_is_secret_free_and_completes_as_an_analysis(
     with _client(tmp_path) as client:
         csrf = client.get("/api/session").json()["csrf_token"]
         unsafe = {"Origin": "http://testserver", "X-CSRF-Token": csrf}
-        _configure_credentials(client, unsafe)
+        configuration_id = _configure_credentials(client, unsafe)
         workspace_id, node_id, _etag = _source(client, unsafe)
         tab_id = client.post(
             f"/api/workspaces/{workspace_id}/tabs",
@@ -207,7 +219,7 @@ def test_full_annotation_is_secret_free_and_completes_as_an_analysis(
             json={
                 "kind": "annotation",
                 "node_id": node_id,
-                **_request(),
+                **_request(configuration_id),
                 "output_node_name": "Classified documents",
                 "api_key": "request-secret",
             },
@@ -220,7 +232,7 @@ def test_full_annotation_is_secret_free_and_completes_as_an_analysis(
                 json={
                     "kind": "annotation",
                     "node_id": node_id,
-                **_request(),
+                **_request(configuration_id),
                 "output_node_name": "Classified documents",
             },
             headers=unsafe,
@@ -268,12 +280,12 @@ def test_full_annotation_is_secret_free_and_completes_as_an_analysis(
         )
 
 
-def test_model_discovery_rejects_custom_provider_urls_by_construction(
+def test_model_discovery_uses_the_verified_configuration_snapshot(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    async def fake_models(provider, api_key):
-        assert provider == "openai"
+    async def fake_models(wire, api_key):
+        assert wire.base_url is None
         assert api_key == "provider-secret"
         return ["model-b", "model-a"]
 
@@ -281,31 +293,34 @@ def test_model_discovery_rejects_custom_provider_urls_by_construction(
     with _client(tmp_path) as client:
         csrf = client.get("/api/session").json()["csrf_token"]
         unsafe = {"Origin": "http://testserver", "X-CSRF-Token": csrf}
-        _configure_credentials(client, unsafe)
+        configuration_id = _configure_credentials(client, unsafe)
         supplied = client.post(
-            "/api/annotation-providers/openai/models",
-            json={"api_key": "request-secret"},
+            "/api/annotation-providers/models",
+            json={
+                "provider_configuration_id": configuration_id,
+                "provider": "openai",
+                "api_key": "request-secret",
+            },
             headers=unsafe,
         )
         assert supplied.status_code == 400
         assert supplied.json()["code"] == "invalid_input"
         response = client.post(
-            "/api/annotation-providers/openai/models",
-            json={},
+            "/api/annotation-providers/models",
+            json={
+                "provider_configuration_id": configuration_id,
+                "provider": "openai",
+            },
             headers=unsafe,
         )
         assert response.status_code == 200
         assert response.json() == {
+            "provider_configuration_id": configuration_id,
             "provider": "openai",
+            "provider_base_url": None,
             "models": ["model-b", "model-a"],
         }
-        rejected = client.post(
-            "/api/annotation-providers/custom/models",
-            json={},
-            headers=unsafe,
-        )
-        assert rejected.status_code == 422
-        assert client.get("/api/annotation-providers/openai/models").status_code == 405
+        assert client.get("/api/annotation-providers/models").status_code == 405
 
 
 def test_multi_user_model_and_preview_credentials_are_request_only(
@@ -313,8 +328,10 @@ def test_multi_user_model_and_preview_credentials_are_request_only(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    async def fake_models(provider, api_key):
-        assert provider == "openai"
+    configuration_id = "2ac23eb8-6708-48fe-a49e-519723190c91"
+
+    async def fake_models(wire, api_key):
+        assert wire.base_url is None
         assert api_key == "browser-only-secret"
         return ["model-a"]
 
@@ -331,14 +348,21 @@ def test_multi_user_model_and_preview_credentials_are_request_only(
         fake_annotate_batch,
     )
     missing = multi_user_test_client.post(
-        "/api/annotation-providers/openai/models",
-        json={},
+        "/api/annotation-providers/models",
+        json={
+            "provider_configuration_id": configuration_id,
+            "provider": "openai",
+        },
     )
     assert missing.status_code == 409
     assert missing.json()["code"] == "provider_credential_missing"
     models = multi_user_test_client.post(
-        "/api/annotation-providers/openai/models",
-        json={"api_key": "browser-only-secret"},
+        "/api/annotation-providers/models",
+        json={
+            "provider_configuration_id": configuration_id,
+            "provider": "openai",
+            "api_key": "browser-only-secret",
+        },
     )
     assert models.status_code == 200
     assert models.json()["models"] == ["model-a"]
@@ -347,7 +371,7 @@ def test_multi_user_model_and_preview_credentials_are_request_only(
     preview = multi_user_test_client.post(
         f"/api/workspaces/{workspace_id}/nodes/{node_id}/annotation-previews",
         json={
-            **_request(),
+            **_request(configuration_id),
             "api_key": "browser-only-secret",
             "page": 1,
             "page_size": 1,

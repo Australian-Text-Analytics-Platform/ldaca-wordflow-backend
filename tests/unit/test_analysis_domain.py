@@ -142,6 +142,7 @@ def test_annotation_submission_strips_transient_secret_before_persistence() -> N
         text_column="text",
         annotation_column="class",
         classes=[{"name": "Relevant", "description": ""}],
+        provider_configuration_id=uuid.uuid4(),
         provider="openai",
         model="model",
         instruction="Classify the text",

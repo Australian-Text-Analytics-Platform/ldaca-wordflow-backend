@@ -2,11 +2,26 @@
 
 from __future__ import annotations
 
+import uuid
 from typing import Annotated, Literal
+from urllib.parse import urlsplit, urlunsplit
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
-AnnotationProvider = Literal["openai", "openrouter", "anthropic", "google"]
+AnnotationProvider = Literal[
+    "openai",
+    "openrouter",
+    "anthropic",
+    "google",
+    "custom",
+]
 
 AnnotationClassName = Annotated[
     str,
@@ -23,4 +38,50 @@ class AnnotationClass(BaseModel):
     description: str = Field(default="", max_length=2_000)
 
 
-__all__ = ["AnnotationClass", "AnnotationProvider"]
+def normalize_annotation_provider_base_url(value: str) -> str:
+    """Validate and normalize one trusted OpenAI-compatible API root."""
+
+    candidate = value.strip()
+    parsed = urlsplit(candidate)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("Custom base URL must be an absolute HTTP(S) URL")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("Custom base URL cannot contain user information")
+    if parsed.query or parsed.fragment:
+        raise ValueError("Custom base URL cannot contain a query or fragment")
+    return urlunsplit(
+        (parsed.scheme.lower(), parsed.netloc, parsed.path.rstrip("/"), "", "")
+    )
+
+
+class AnnotationProviderSnapshot(BaseModel):
+    """Safe immutable provider locator captured by an Annotation request."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    provider_configuration_id: uuid.UUID
+    provider: AnnotationProvider
+    provider_base_url: str | None = Field(default=None, max_length=2_000)
+
+    @field_validator("provider_base_url", mode="before")
+    @classmethod
+    def normalize_base_url(cls, value: object) -> object:
+        if value is None or not isinstance(value, str):
+            return value
+        return normalize_annotation_provider_base_url(value)
+
+    @model_validator(mode="after")
+    def validate_locator(self) -> "AnnotationProviderSnapshot":
+        if self.provider == "custom" and self.provider_base_url is None:
+            raise ValueError("Custom providers require a base URL")
+        if self.provider != "custom" and self.provider_base_url is not None:
+            raise ValueError("Built-in providers cannot define a base URL")
+        return self
+
+
+__all__ = [
+    "AnnotationClass",
+    "AnnotationProvider",
+    "AnnotationProviderSnapshot",
+    "normalize_annotation_provider_base_url",
+]

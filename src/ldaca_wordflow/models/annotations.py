@@ -13,12 +13,16 @@ from pydantic import (
     model_validator,
 )
 
-from ..domain.annotation import AnnotationClass, AnnotationProvider
+from ..domain.annotation import (
+    AnnotationClass,
+    AnnotationProvider,
+    AnnotationProviderSnapshot,
+)
 
 NonEmptyText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
 
-class AnnotationConfig(BaseModel):
+class AnnotationConfig(AnnotationProviderSnapshot):
     """Persistable provider-independent annotation configuration."""
 
     model_config = ConfigDict(extra="forbid")
@@ -26,7 +30,6 @@ class AnnotationConfig(BaseModel):
     text_column: NonEmptyText = Field(max_length=500)
     annotation_column: NonEmptyText = Field(max_length=500)
     classes: list[AnnotationClass] = Field(min_length=1, max_length=200)
-    provider: AnnotationProvider
     model: NonEmptyText = Field(max_length=500)
     instruction: NonEmptyText = Field(max_length=20_000)
     temperature: float = Field(default=0.0, ge=0.0, le=2.0)
@@ -77,10 +80,8 @@ class AnnotationPreviewResource(BaseModel):
     labels: list[AnnotationPreviewLabel]
 
 
-class AnnotationModelsRequest(BaseModel):
+class AnnotationModelsRequest(AnnotationProviderSnapshot):
     """Optional request-only credential for provider model discovery."""
-
-    model_config = ConfigDict(extra="forbid")
 
     api_key: SecretStr | None = Field(
         default=None,
@@ -90,12 +91,9 @@ class AnnotationModelsRequest(BaseModel):
     )
 
 
-class AnnotationModelsResource(BaseModel):
+class AnnotationModelsResource(AnnotationProviderSnapshot):
     """Sorted model identifiers returned by one configured provider."""
 
-    model_config = ConfigDict(extra="forbid")
-
-    provider: AnnotationProvider
     models: list[str]
 
 

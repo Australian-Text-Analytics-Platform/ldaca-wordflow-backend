@@ -9,7 +9,6 @@ from typing import TypeVar
 import anyio
 import polars as pl
 from anyio.to_thread import run_sync as run_sync_in_worker_thread
-from pydantic import SecretStr
 
 from ..infrastructure.providers.annotation_ai import (
     AnnotationAiError,
@@ -26,11 +25,11 @@ from ..shared.errors import (
 )
 from ..models.annotations import (
     AnnotationConfig,
+    AnnotationModelsRequest,
     AnnotationModelsResource,
     AnnotationPreviewLabel,
     AnnotationPreviewRequest,
     AnnotationPreviewResource,
-    AnnotationProvider,
 )
 from .workspace import WorkspaceService
 from .provider_credentials import ProviderCredentialStore
@@ -54,20 +53,27 @@ class AnnotationService:
 
     async def models(
         self,
-        provider: AnnotationProvider,
-        supplied_credential: SecretStr | None,
+        request: AnnotationModelsRequest,
     ) -> AnnotationModelsResource:
-        """List models for a fixed built-in provider without accepting an SSRF URL."""
+        """List models for one verified built-in or trusted Custom configuration."""
 
-        api_key = await self._credentials.annotation_credential(
-            provider,
-            supplied=supplied_credential,
+        api_key = await self._credentials.resolve_annotation_provider(
+            request,
+            supplied=request.api_key,
         )
         try:
-            discovered = await list_models(provider, api_key)
+            discovered = await list_models(
+                resolve_provider_wire(request.provider, request.provider_base_url),
+                api_key,
+            )
         except AnnotationAiError as exc:
             raise BadGatewayError("Annotation provider request failed") from exc
-        return AnnotationModelsResource(provider=provider, models=discovered)
+        return AnnotationModelsResource(
+            provider_configuration_id=request.provider_configuration_id,
+            provider=request.provider,
+            provider_base_url=request.provider_base_url,
+            models=discovered,
+        )
 
     async def preview(
         self,
@@ -93,13 +99,13 @@ class AnnotationService:
                 request.page,
                 request.page_size,
             )
-        api_key = await self._credentials.annotation_credential(
-            request.provider,
+        api_key = await self._credentials.resolve_annotation_provider(
+            request,
             supplied=request.api_key,
         )
         try:
             labels = await annotate_batch(
-                resolve_provider_wire(request.provider),
+                resolve_provider_wire(request.provider, request.provider_base_url),
                 request.model,
                 api_key,
                 request.instruction,

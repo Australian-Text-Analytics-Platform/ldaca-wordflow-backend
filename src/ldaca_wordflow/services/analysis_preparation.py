@@ -154,7 +154,7 @@ class AnalysisExecutionPreparer:
             )
 
         if isinstance(request, AnnotationAnalysisRequest):
-            if not credential:
+            if credential is None and request.provider != "custom":
                 raise InvalidInputError("Annotation credential is unavailable")
             return owned(
                 annotation_process,

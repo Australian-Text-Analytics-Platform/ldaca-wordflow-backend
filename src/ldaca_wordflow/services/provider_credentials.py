@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import secrets
+import uuid
 from collections.abc import Callable
 from functools import partial
 from pathlib import Path
@@ -12,20 +14,26 @@ import rtoml
 from anyio.to_thread import run_sync as run_sync_in_worker_thread
 from pydantic import SecretStr, ValidationError
 
+from ..domain.annotation import AnnotationProviderSnapshot
 from ..infrastructure.storage.durable_fs import atomic_output_path
 from ..infrastructure.storage.layout import user_provider_credentials_path
 from ..models.provider_credentials import (
-    AnnotationProvider,
-    ProviderCredentialPatch,
+    AnnotationProviderConfigurationCreate,
+    AnnotationProviderConfigurationRename,
+    AnnotationProviderConfigurationResource,
+    DataPortalCredentialPatch,
     ProviderCredentialSummary,
+    StoredAnnotationProviderConfiguration,
     StoredProviderCredentials,
 )
 from ..settings import Settings
 from ..shared.errors import (
     AccessDeniedError,
     InvalidInputError,
+    NotFoundError,
     ProviderCredentialMissingError,
     ProviderCredentialsCorruptError,
+    ResourceConflictError,
 )
 from .sessions import SINGLE_USER
 
@@ -49,7 +57,7 @@ class ProviderCredentialStore:
         if self._settings.multi_user:
             return ProviderCredentialSummary(
                 storage="browser",
-                annotation=None,
+                annotation_providers=None,
                 data_portal={
                     "user_configured": None,
                     "deployment_configured": self._deployment_credential() is not None,
@@ -59,14 +67,92 @@ class ProviderCredentialStore:
             stored = await self._load()
         return self._summary(stored)
 
-    async def update(
+    async def create_annotation_provider(
         self,
-        patch: ProviderCredentialPatch,
+        command: AnnotationProviderConfigurationCreate,
+    ) -> AnnotationProviderConfigurationResource:
+        self._require_backend_storage()
+        async with self._lock:
+            stored = await self._load()
+            configuration = StoredAnnotationProviderConfiguration(
+                id=uuid.uuid4(),
+                name=command.name,
+                provider=command.provider,
+                base_url=command.base_url,
+                api_key=command.api_key,
+            )
+            if any(
+                _same_configuration_identity(configuration, existing)
+                for existing in stored.annotation_providers
+            ):
+                raise ResourceConflictError(
+                    "An Annotation provider with this identity is already configured"
+                )
+            updated = stored.model_copy(
+                update={
+                    "annotation_providers": [
+                        *stored.annotation_providers,
+                        configuration,
+                    ]
+                }
+            )
+            await self._run_io(_write_credentials, self._path(), updated)
+        return _configuration_resource(configuration)
+
+    async def rename_annotation_provider(
+        self,
+        configuration_id: uuid.UUID,
+        command: AnnotationProviderConfigurationRename,
+    ) -> AnnotationProviderConfigurationResource:
+        self._require_backend_storage()
+        async with self._lock:
+            stored = await self._load()
+            configurations = list(stored.annotation_providers)
+            for index, configuration in enumerate(configurations):
+                if configuration.id == configuration_id:
+                    renamed = configuration.model_copy(update={"name": command.name})
+                    configurations[index] = renamed
+                    updated = stored.model_copy(
+                        update={"annotation_providers": configurations}
+                    )
+                    await self._run_io(_write_credentials, self._path(), updated)
+                    return _configuration_resource(renamed)
+        raise NotFoundError("Annotation provider configuration not found")
+
+    async def delete_annotation_provider(
+        self,
+        configuration_id: uuid.UUID,
+    ) -> None:
+        self._require_backend_storage()
+        async with self._lock:
+            stored = await self._load()
+            configurations = [
+                configuration
+                for configuration in stored.annotation_providers
+                if configuration.id != configuration_id
+            ]
+            if len(configurations) == len(stored.annotation_providers):
+                raise NotFoundError("Annotation provider configuration not found")
+            updated = stored.model_copy(
+                update={"annotation_providers": configurations}
+            )
+            await self._run_io(_write_credentials, self._path(), updated)
+
+    async def clear_annotation_providers(self) -> None:
+        self._require_backend_storage()
+        async with self._lock:
+            stored = await self._load()
+            updated = stored.model_copy(update={"annotation_providers": []})
+            await self._run_io(_write_credentials, self._path(), updated)
+
+    async def update_data_portal_credential(
+        self,
+        patch: DataPortalCredentialPatch,
     ) -> ProviderCredentialSummary:
         self._require_backend_storage()
         async with self._lock:
             stored = await self._load()
-            updated = self._apply_patch(stored, patch)
+            updated = self._apply_data_portal_patch(stored, patch)
             await self._run_io(
                 _write_credentials,
                 self._path(),
@@ -81,27 +167,46 @@ class ProviderCredentialStore:
             await self._run_io(
                 _write_credentials,
                 self._path(),
-                StoredProviderCredentials(),
+                StoredProviderCredentials(schema_version=2),
             )
 
-    async def annotation_credential(
+    async def resolve_annotation_provider(
         self,
-        provider: AnnotationProvider,
+        snapshot: AnnotationProviderSnapshot,
         *,
         supplied: SecretStr | str | None = None,
-    ) -> str:
+    ) -> str | None:
         if self._settings.multi_user:
             credential = _secret_value(supplied)
-        else:
-            self._reject_supplied(supplied)
-            async with self._lock:
-                stored = await self._load()
-            credential = _secret_value(getattr(stored.annotation, provider))
-        if credential is None:
+            if snapshot.provider != "custom" and credential is None:
+                raise ProviderCredentialMissingError(
+                    f"No credential is configured for {snapshot.provider}"
+                )
+            return credential
+
+        self._reject_supplied(supplied)
+        async with self._lock:
+            stored = await self._load()
+        configuration = next(
+            (
+                item
+                for item in stored.annotation_providers
+                if item.id == snapshot.provider_configuration_id
+            ),
+            None,
+        )
+        if configuration is None:
             raise ProviderCredentialMissingError(
-                f"No credential is configured for {provider}"
+                "Annotation provider configuration is not available"
             )
-        return credential
+        if (
+            configuration.provider != snapshot.provider
+            or configuration.base_url != snapshot.provider_base_url
+        ):
+            raise InvalidInputError(
+                "Annotation provider configuration does not match the request"
+            )
+        return _secret_value(configuration.api_key)
 
     async def data_portal_credential(
         self,
@@ -147,21 +252,12 @@ class ProviderCredentialStore:
             )
 
     @staticmethod
-    def _apply_patch(
+    def _apply_data_portal_patch(
         stored: StoredProviderCredentials,
-        patch: ProviderCredentialPatch,
+        patch: DataPortalCredentialPatch,
     ) -> StoredProviderCredentials:
         values = stored.model_dump()
-        annotation = values["annotation"]
         portal = values["data_portal"]
-        for field, provider in (
-            ("openai_api_key", "openai"),
-            ("openrouter_api_key", "openrouter"),
-            ("anthropic_api_key", "anthropic"),
-            ("google_api_key", "google"),
-        ):
-            if field in patch.model_fields_set:
-                annotation[provider] = getattr(patch, field)
         if "data_portal_api_token" in patch.model_fields_set:
             portal["api_token"] = patch.data_portal_api_token
         return StoredProviderCredentials.model_validate(values)
@@ -172,12 +268,10 @@ class ProviderCredentialStore:
     ) -> ProviderCredentialSummary:
         return ProviderCredentialSummary(
             storage="backend",
-            annotation={
-                "openai": stored.annotation.openai is not None,
-                "openrouter": stored.annotation.openrouter is not None,
-                "anthropic": stored.annotation.anthropic is not None,
-                "google": stored.annotation.google is not None,
-            },
+            annotation_providers=[
+                _configuration_resource(configuration)
+                for configuration in stored.annotation_providers
+            ],
             data_portal={
                 "user_configured": stored.data_portal.api_token is not None,
                 "deployment_configured": self._deployment_credential() is not None,
@@ -204,7 +298,7 @@ def _secret_value(value: SecretStr | str | None) -> str | None:
 
 def _load_credentials(path: Path) -> StoredProviderCredentials:
     if not path.exists():
-        return StoredProviderCredentials()
+        return StoredProviderCredentials(schema_version=2)
     if path.is_symlink() or not path.is_file():
         raise _InvalidCredentials("Stored file must be a regular file")
     try:
@@ -221,11 +315,25 @@ def _load_credentials(path: Path) -> StoredProviderCredentials:
 
 def _write_credentials(path: Path, credentials: StoredProviderCredentials) -> None:
     payload: dict[str, object] = {
-        "annotation": {
-            provider: secret.get_secret_value()
-            for provider in ("openai", "openrouter", "anthropic", "google")
-            if (secret := getattr(credentials.annotation, provider)) is not None
-        },
+        "schema_version": credentials.schema_version,
+        "annotation_providers": [
+            {
+                "id": str(configuration.id),
+                "name": configuration.name,
+                "provider": configuration.provider,
+                **(
+                    {"base_url": configuration.base_url}
+                    if configuration.base_url is not None
+                    else {}
+                ),
+                **(
+                    {"api_key": configuration.api_key.get_secret_value()}
+                    if configuration.api_key is not None
+                    else {}
+                ),
+            }
+            for configuration in credentials.annotation_providers
+        ],
         "data_portal": (
             {"api_token": credentials.data_portal.api_token.get_secret_value()}
             if credentials.data_portal.api_token is not None
@@ -237,6 +345,31 @@ def _write_credentials(path: Path, credentials: StoredProviderCredentials) -> No
         temporary.write_text(rtoml.dumps(payload), encoding="utf-8")
         temporary.chmod(0o600)
     path.chmod(0o600)
+
+
+def _configuration_resource(
+    configuration: StoredAnnotationProviderConfiguration,
+) -> AnnotationProviderConfigurationResource:
+    return AnnotationProviderConfigurationResource(
+        id=configuration.id,
+        name=configuration.name,
+        provider=configuration.provider,
+        base_url=configuration.base_url,
+        has_api_key=configuration.api_key is not None,
+    )
+
+
+def _same_configuration_identity(
+    left: StoredAnnotationProviderConfiguration,
+    right: StoredAnnotationProviderConfiguration,
+) -> bool:
+    if left.provider != right.provider:
+        return False
+    if left.provider == "custom" and left.base_url != right.base_url:
+        return False
+    left_key = _secret_value(left.api_key) or ""
+    right_key = _secret_value(right.api_key) or ""
+    return secrets.compare_digest(left_key, right_key)
 
 
 __all__ = ["ProviderCredentialStore"]

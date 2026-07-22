@@ -9,6 +9,7 @@ from typing import Annotated, Literal, TypeAlias
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
 from ...shared.json_data import JsonData
+from ..annotation import AnnotationProvider
 
 
 class _StrictModel(BaseModel):
@@ -252,7 +253,7 @@ class SqlDerivation(_StrictModel):
 class AnnotationDerivation(_StrictModel):
     kind: Literal["annotation"] = "annotation"
     annotation_column: str = Field(min_length=1, max_length=500)
-    provider: Literal["openai", "openrouter", "anthropic", "google"]
+    provider: AnnotationProvider
     model: str = Field(min_length=1, max_length=500)
 
 

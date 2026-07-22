@@ -16,6 +16,7 @@ from ldaca_wordflow.infrastructure.providers.annotation_ai import (
     InferenceConfig,
     _complete_openai,
     _reasoning_budget_tokens,
+    list_models,
     resolve_provider_wire,
 )
 
@@ -50,6 +51,14 @@ def test_reasoning_budget_tokens_orders_low_below_high():
     assert low < medium < high
     # An unrecognised level uses the medium budget as a safe default.
     assert _reasoning_budget_tokens("bogus") == medium
+
+
+def test_custom_provider_wire_uses_the_immutable_openai_compatible_base_url():
+    wire = resolve_provider_wire("custom", "http://127.0.0.1:8080/v1")
+
+    assert wire.chat_style == "openai"
+    assert wire.base_url == "http://127.0.0.1:8080/v1"
+    assert wire.supports_json_response_format is False
 
 
 # --- OpenAI SDK dispatch probes -------------------------------------------------
@@ -135,3 +144,60 @@ async def test_complete_openai_always_disables_streaming(monkeypatch):
     )
     assert result == "positive"
     assert create_kwargs["stream"] is False
+
+
+async def test_custom_model_discovery_uses_its_base_url_and_allows_no_key(
+    monkeypatch,
+):
+    constructor_kwargs: dict = {}
+
+    class _FakeModels:
+        def list(self):
+            return _AsyncModelIterator(["local-model"])
+
+    class _FakeAsyncOpenAI:
+        def __init__(self, **kwargs) -> None:
+            constructor_kwargs.update(kwargs)
+            self.models = _FakeModels()
+
+    monkeypatch.setattr("openai.AsyncOpenAI", _FakeAsyncOpenAI)
+    wire = resolve_provider_wire("custom", "http://localhost:8080/v1")
+
+    models = await list_models(wire, None)
+
+    assert models == ["local-model"]
+    assert constructor_kwargs["base_url"] == "http://localhost:8080/v1"
+    assert constructor_kwargs["api_key"] == "no-key-required"
+
+
+async def test_custom_chat_completion_uses_its_base_url_and_allows_no_key(
+    monkeypatch,
+):
+    constructor_kwargs: dict = {}
+    create_kwargs: dict = {}
+
+    class _FakeCompletions:
+        async def create(self, **kwargs):
+            create_kwargs.update(kwargs)
+            return _FakeCompletion('{"labels": ["positive"]}')
+
+    class _FakeChat:
+        def __init__(self) -> None:
+            self.completions = _FakeCompletions()
+
+    class _FakeAsyncOpenAI:
+        def __init__(self, **kwargs) -> None:
+            constructor_kwargs.update(kwargs)
+            self.chat = _FakeChat()
+
+    monkeypatch.setattr("openai.AsyncOpenAI", _FakeAsyncOpenAI)
+    wire = resolve_provider_wire("custom", "http://localhost:8080/v1")
+
+    result = await _complete_openai(
+        wire, "local-model", None, "system", "user", InferenceConfig()
+    )
+
+    assert result == '{"labels": ["positive"]}'
+    assert constructor_kwargs["base_url"] == "http://localhost:8080/v1"
+    assert constructor_kwargs["api_key"] == "no-key-required"
+    assert create_kwargs["model"] == "local-model"
