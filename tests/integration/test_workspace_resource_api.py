@@ -174,6 +174,44 @@ def test_workspace_patch_can_explicitly_clear_nullable_description(
         assert repeated.headers["etag"] == '"2"'
 
 
+def test_opening_a_workspace_closes_the_previous_idle_workspace(
+    tmp_path: Path,
+) -> None:
+    with _client(tmp_path) as client:
+        unsafe = _unsafe_headers(client)
+        first = client.post(
+            "/api/workspaces",
+            json={"name": "First"},
+            headers=unsafe,
+        ).json()
+        second = client.post(
+            "/api/workspaces",
+            json={"name": "Second"},
+            headers=unsafe,
+        ).json()
+
+        assert (
+            client.put(
+                f"/api/workspaces/{first['id']}/open",
+                headers=unsafe,
+            ).status_code
+            == 200
+        )
+        assert (
+            client.put(
+                f"/api/workspaces/{second['id']}/open",
+                headers=unsafe,
+            ).status_code
+            == 200
+        )
+
+        states = {
+            workspace["id"]: workspace["runtime_state"]
+            for workspace in client.get("/api/workspaces").json()
+        }
+        assert states == {first["id"]: "closed", second["id"]: "open"}
+
+
 def test_workspace_delete_is_empty_204_and_removed_action_routes_stay_absent(
     tmp_path: Path,
 ) -> None:

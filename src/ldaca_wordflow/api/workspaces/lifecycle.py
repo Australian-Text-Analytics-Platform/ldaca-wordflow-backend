@@ -100,11 +100,11 @@ async def open_workspace_by_id(
     workspace_id: uuid.UUID,
     response: Response,
     current_user: SessionUser = Depends(get_current_user),
-    workspace_service: WorkspaceService = Depends(get_workspace_service),
+    runtime: Runtime = Depends(get_runtime),
 ) -> WorkspaceResource:
-    """Idempotently load one Workspace into its process-local slot."""
+    """Make one Workspace the user's sole open process-local aggregate."""
 
-    record = await workspace_service.open_workspace(
+    record = await runtime.workspace_lifecycle_service.open(
         current_user.id,
         str(workspace_id),
     )

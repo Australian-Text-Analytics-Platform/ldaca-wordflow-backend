@@ -1,9 +1,21 @@
-"""Explicit Workspace close and referential deletion coordination."""
+"""Exclusive Workspace open, close, and referential deletion coordination."""
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+
+import anyio
+
 from .analysis_execution import AnalysisExecutionRuntime
 from .workspace import WorkspaceRecord, WorkspaceService
+
+
+@dataclass(slots=True)
+class _UserLifecycleGate:
+    lock: anyio.Lock
+    users: int = 0
 
 
 class WorkspaceLifecycleService:
@@ -16,6 +28,33 @@ class WorkspaceLifecycleService:
     ) -> None:
         self._workspaces = workspaces
         self._analyses = analyses
+        self._gate_registry_lock = anyio.Lock()
+        self._user_gates: dict[str, _UserLifecycleGate] = {}
+
+    async def open(
+        self,
+        user_id: str,
+        workspace_id: str,
+    ) -> WorkspaceRecord:
+        """Make the target the user's sole open Workspace.
+
+        Target validation precedes any sibling transition. Once switching has
+        begun, failures are left visible through the authoritative runtime
+        states rather than being hidden behind an in-memory rollback.
+        """
+
+        async with self._user_gate(user_id):
+            await self._workspaces.get_workspace(user_id, workspace_id)
+            siblings = await self._workspaces.list_workspaces(user_id)
+            for sibling in siblings:
+                if sibling.id == workspace_id or sibling.runtime_state != "open":
+                    continue
+                await self._workspaces.request_close(
+                    user_id,
+                    sibling.id,
+                    self._analyses.has_workspace_work,
+                )
+            return await self._workspaces.open_workspace(user_id, workspace_id)
 
     async def request_close(
         self,
@@ -24,11 +63,12 @@ class WorkspaceLifecycleService:
     ) -> WorkspaceRecord | None:
         """Return a closing resource, or ``None`` after immediate closure."""
 
-        return await self._workspaces.request_close(
-            user_id,
-            workspace_id,
-            self._analyses.has_workspace_work,
-        )
+        async with self._user_gate(user_id):
+            return await self._workspaces.request_close(
+                user_id,
+                workspace_id,
+                self._analyses.has_workspace_work,
+            )
 
     async def delete(
         self,
@@ -37,8 +77,26 @@ class WorkspaceLifecycleService:
     ) -> None:
         """Stop Workspace-owned execution and atomically remove the Workspace."""
 
-        async with self._workspaces.deletion_context(user_id, workspace_id):
-            await self._analyses.cancel_workspace(user_id, workspace_id)
+        async with self._user_gate(user_id):
+            async with self._workspaces.deletion_context(user_id, workspace_id):
+                await self._analyses.cancel_workspace(user_id, workspace_id)
+
+    @asynccontextmanager
+    async def _user_gate(self, user_id: str) -> AsyncIterator[None]:
+        async with self._gate_registry_lock:
+            gate = self._user_gates.get(user_id)
+            if gate is None:
+                gate = _UserLifecycleGate(anyio.Lock())
+                self._user_gates[user_id] = gate
+            gate.users += 1
+        try:
+            async with gate.lock:
+                yield
+        finally:
+            async with self._gate_registry_lock:
+                gate.users -= 1
+                if gate.users == 0:
+                    self._user_gates.pop(user_id, None)
 
 
 __all__ = ["WorkspaceLifecycleService"]
