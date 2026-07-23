@@ -59,27 +59,29 @@ jobs:
       - name: Install dependencies
         id: install
         shell: bash
-        run: uv sync --no-sources --group dev
+        run: |
+          uv venv --python 3.14
+          uv pip install --no-sources --group dev --editable .
 
       - name: Run Ruff
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         shell: bash
-        run: uv run ruff check .
+        run: uv run --no-sync ruff check .
 
       - name: Run Ty
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         shell: bash
-        run: uv run ty check
+        run: uv run --no-sync ty check
 
       - name: Run pytest
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         shell: bash
-        run: uv run pytest -q
+        run: uv run --no-sync pytest -q
 
       - name: Export OpenAPI without runtime startup
         shell: bash
         run: |
-          uv run python scripts/export_openapi.py --output "$RUNNER_TEMP/openapi.json"
+          uv run --no-sync python scripts/export_openapi.py --output "$RUNNER_TEMP/openapi.json"
           python - <<'PY'
           import json, os, pathlib
 
