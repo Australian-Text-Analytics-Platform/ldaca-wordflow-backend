@@ -56,7 +56,10 @@ from ..infrastructure.storage.layout import (
     USER_FILE_IMPORT_STAGING_DIRECTORY,
     validate_display_name,
 )
-from ..infrastructure.storage.durable_fs import fsync_directory as _fsync_directory
+from ..infrastructure.storage.durable_fs import (
+    fsync_directory as _fsync_directory,
+    fsync_file as _fsync_file,
+)
 from .storage_admission import StorageAdmissionService, StorageReservation
 from .safe_paths import SafePathResolver
 from .response_snapshots import ResponseSnapshot, ResponseSnapshotService
@@ -697,8 +700,7 @@ def _fsync_import_staging_tree(staging: Path) -> None:
                 ) from exc
             if _is_link_or_reparse(metadata) or not stat.S_ISREG(metadata.st_mode):
                 raise UnsafePathError("Import staging contains an unsafe file")
-            with child.open("rb") as handle:
-                os.fsync(handle.fileno())
+            _fsync_file(child)
     for directory in reversed(directories):
         _fsync_directory(directory)
 

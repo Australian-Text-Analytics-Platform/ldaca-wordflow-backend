@@ -18,7 +18,10 @@ from pydantic import ValidationError
 
 from ..domain import SampleUserFileImportResult
 from ..domain.background import Progress
-from ..infrastructure.storage.durable_fs import fsync_directory as _fsync_directory
+from ..infrastructure.storage.durable_fs import (
+    fsync_directory as _fsync_directory,
+    fsync_file as _fsync_file,
+)
 from ..models.data_sources import (
     SampleCatalogueResource,
     SampleCollection,
@@ -229,8 +232,7 @@ class SampleDataService:
 
 
 def _publish_download(temporary: Path, destination: Path) -> None:
-    with temporary.open("rb") as handle:
-        os.fsync(handle.fileno())
+    _fsync_file(temporary)
     os.replace(temporary, destination)
     _fsync_directory(destination.parent)
 

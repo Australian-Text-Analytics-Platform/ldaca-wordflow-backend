@@ -39,7 +39,11 @@ from ..domain.workspace import (
     node_reference,
     referenced_node_ids,
 )
-from ..infrastructure.storage.durable_fs import fsync_directory, mkdir_durable
+from ..infrastructure.storage.durable_fs import (
+    fsync_directory,
+    fsync_file,
+    mkdir_durable,
+)
 from ..models.analysis_results import (
     ANALYSIS_STORED_RESULT_MODELS,
     ANALYSIS_WORKER_RESULT_MODELS,
@@ -556,8 +560,7 @@ def _publish_result(
         )
 
     for path in sorted(owned_files):
-        with path.open("rb") as handle:
-            os.fsync(handle.fileno())
+        fsync_file(path)
     for directory in sorted(
         {path.parent for path in owned_files},
         key=lambda path: len(path.parts),

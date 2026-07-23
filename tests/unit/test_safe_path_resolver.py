@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from ldaca_wordflow.services import safe_paths as safe_paths_module
 from ldaca_wordflow.shared.errors import UnsafePathError
 from ldaca_wordflow.services.safe_paths import SafePathResolver
 
@@ -79,6 +80,28 @@ def test_open_new_file_uses_no_follow_and_never_overwrites(tmp_path: Path) -> No
 
     with pytest.raises(FileExistsError):
         resolver.open_new_file(destination)
+
+
+def test_create_directory_falls_back_without_directory_descriptors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolver = SafePathResolver(tmp_path)
+    destination = resolver.resolve("created")
+    real_open = os.open
+
+    def reject_directory_open(path, flags, *args, **kwargs):
+        if Path(path).is_dir():
+            raise AssertionError("directory descriptor is unavailable")
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(safe_paths_module, "_O_DIRECTORY", 0)
+    monkeypatch.setattr(safe_paths_module.os, "supports_dir_fd", set())
+    monkeypatch.setattr(safe_paths_module.os, "open", reject_directory_open)
+
+    resolver.create_directory(destination)
+
+    assert destination.is_dir()
 
 
 def test_resolver_rejects_existing_case_or_unicode_collisions(tmp_path: Path) -> None:

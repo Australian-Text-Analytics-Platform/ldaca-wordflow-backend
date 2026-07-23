@@ -308,6 +308,8 @@ class SafePathResolver:
 
     @staticmethod
     def _fsync_path(directory: Path) -> None:
+        if not _O_DIRECTORY:
+            return
         descriptor = os.open(directory, os.O_RDONLY | _O_DIRECTORY)
         try:
             os.fsync(descriptor)

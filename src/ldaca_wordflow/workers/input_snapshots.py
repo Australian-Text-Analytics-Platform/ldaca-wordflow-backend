@@ -23,6 +23,7 @@ from ..domain.workspace import Node, Workspace
 from ..infrastructure.storage.durable_fs import (
     atomic_output_path,
     fsync_directory as _fsync_directory,
+    fsync_file,
     mkdir_durable as _mkdir_durable,
 )
 
@@ -299,8 +300,7 @@ def rebase_worker_input_snapshot_sources(
 
 
 def _fsync_file(path: Path) -> None:
-    with path.open("rb") as handle:
-        os.fsync(handle.fileno())
+    fsync_file(path)
 
 
 def _tree_size(root: Path) -> int:

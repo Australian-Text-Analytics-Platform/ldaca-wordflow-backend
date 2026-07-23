@@ -64,6 +64,7 @@ from ..infrastructure.storage.bounded_io import write_parquet_bounded
 from ..infrastructure.storage.durable_fs import (
     atomic_write_json as _atomic_json_write,
     fsync_directory as _fsync_directory,
+    fsync_file as _fsync_file,
 )
 from ..infrastructure.storage.layout import (
     SAFE_WORKSPACE_IMPORT_MARKER,
@@ -915,8 +916,7 @@ def _copy_export_artifact(
     destination = staging / archive_path
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(source, destination, follow_symlinks=False)
-    with destination.open("rb") as copied:
-        os.fsync(copied.fileno())
+    _fsync_file(destination)
     return metadata.st_size
 
 

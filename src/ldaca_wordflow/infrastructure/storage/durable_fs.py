@@ -15,15 +15,29 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+_O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+
 
 class AtomicWriteCapacityError(ValueError):
     """Serialized content exceeds a caller-owned persistence budget."""
 
 
+def fsync_file(path: Path) -> None:
+    """Flush one completed file through a Windows-compatible descriptor."""
+
+    descriptor = os.open(path, os.O_WRONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def fsync_directory(path: Path) -> None:
     """Durably record directory-entry changes where the platform supports it."""
 
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    if not _O_DIRECTORY:
+        return
+    flags = os.O_RDONLY | _O_DIRECTORY
     try:
         descriptor = os.open(path, flags)
     except OSError:
@@ -61,8 +75,7 @@ def atomic_output_path(target: Path) -> Iterator[Path]:
     temporary = Path(raw_path)
     try:
         yield temporary
-        with temporary.open("rb") as handle:
-            os.fsync(handle.fileno())
+        fsync_file(temporary)
         os.replace(temporary, target)
         fsync_directory(target.parent)
     except BaseException:
@@ -90,6 +103,7 @@ __all__ = [
     "AtomicWriteCapacityError",
     "atomic_output_path",
     "atomic_write_json",
+    "fsync_file",
     "fsync_directory",
     "mkdir_durable",
 ]
