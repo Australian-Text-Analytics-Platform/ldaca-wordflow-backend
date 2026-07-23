@@ -18,6 +18,10 @@ jobs:
   test:
     name: Test ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    env:
+      # CI validates the published dependency contract. The parent workspace
+      # retains editable source overrides for local cross-repository work.
+      UV_NO_SOURCES: "1"
     strategy:
       fail-fast: false
       matrix:
@@ -32,31 +36,6 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
-
-      - name: Check out source dependencies
-        shell: bash
-        env:
-          REF_NAME: ${{ github.head_ref || github.ref_name }}
-        run: |
-          set -euo pipefail
-
-          clone_source_dependency() {
-            local repo_url="$1"
-            local target="$2"
-
-            if git ls-remote --exit-code --heads "$repo_url" "$REF_NAME" >/dev/null 2>&1; then
-              git clone --depth 1 --branch "$REF_NAME" "$repo_url" "$target"
-            else
-              git clone --depth 1 --branch main "$repo_url" "$target"
-            fi
-          }
-
-          clone_source_dependency \
-            https://github.com/Australian-Text-Analytics-Platform/polars-text.git \
-            "$GITHUB_WORKSPACE/../polars-text"
-          clone_source_dependency \
-            https://github.com/AlexDrBanana/polars-source-utils.git \
-            "$GITHUB_WORKSPACE/../polars-source-utils"
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v8.2.0
@@ -80,7 +59,7 @@ jobs:
       - name: Install dependencies
         id: install
         shell: bash
-        run: uv sync --frozen --group dev
+        run: uv sync --no-sources --group dev
 
       - name: Run Ruff
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
