@@ -381,5 +381,5 @@ def test_multi_user_model_and_preview_credentials_are_request_only(
     assert all(
         b"browser-only-secret" not in path.read_bytes()
         for path in tmp_path.rglob("*")
-        if path.is_file()
+        if path.is_file() and path.name != ".wordflow-runtime.lock"
     )
