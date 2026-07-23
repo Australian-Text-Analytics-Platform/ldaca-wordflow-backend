@@ -232,7 +232,17 @@ class SafePathResolver:
                     if source_parent != destination_parent:
                         os.fsync(source_parent)
             return
-        self.publish_file(source_checked, destination_checked)
+        if destination_checked.exists():
+            raise FileExistsError(destination_checked)
+        os.link(source_checked, destination_checked, follow_symlinks=False)
+        try:
+            source_checked.unlink()
+        except BaseException:
+            destination_checked.unlink()
+            raise
+        self._fsync_path(destination_checked.parent)
+        if source_checked.parent != destination_checked.parent:
+            self._fsync_path(source_checked.parent)
 
     def delete(self, target: Path) -> None:
         """Delete one file or tree without following swapped directory entries."""

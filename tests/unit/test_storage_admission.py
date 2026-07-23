@@ -49,6 +49,14 @@ def _quota_service(
         "_probe_allocation_unit",
         lambda _root: _ALLOCATION_UNIT,
     )
+    monkeypatch.setattr(
+        quota_module,
+        "_entry_allocated_bytes",
+        lambda metadata, unit: max(
+            ((metadata.st_size + unit - 1) // unit) * unit,
+            unit,
+        ),
+    )
     return QuotaService(
         repository,
         data_root=root,

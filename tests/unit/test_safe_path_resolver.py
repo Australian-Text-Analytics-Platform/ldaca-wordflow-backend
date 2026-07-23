@@ -104,6 +104,27 @@ def test_create_directory_falls_back_without_directory_descriptors(
     assert destination.is_dir()
 
 
+def test_move_file_falls_back_across_directories_without_directory_descriptors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_parent = tmp_path / "incoming"
+    destination_parent = tmp_path / "archive"
+    source_parent.mkdir()
+    destination_parent.mkdir()
+    source = source_parent / "data.csv"
+    source.write_text("value\n", encoding="utf-8")
+    destination = destination_parent / source.name
+    resolver = SafePathResolver(tmp_path)
+
+    monkeypatch.setattr(safe_paths_module.os, "supports_dir_fd", set())
+
+    resolver.move_file(source, destination)
+
+    assert not source.exists()
+    assert destination.read_text(encoding="utf-8") == "value\n"
+
+
 def test_resolver_rejects_existing_case_or_unicode_collisions(tmp_path: Path) -> None:
     (tmp_path / "Report.csv").write_text("value\n")
     resolver = SafePathResolver(tmp_path)

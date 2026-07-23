@@ -37,7 +37,10 @@ def _set_quota(settings: Settings, value: int | None) -> None:
         )
 
 
-def test_storage_resource_is_fresh_strict_and_no_store(tmp_path: Path) -> None:
+def test_storage_resource_is_fresh_strict_and_no_store(
+    tmp_path: Path,
+    finite_quota_test_filesystem: None,
+) -> None:
     settings = _settings(tmp_path)
     app = create_app(settings, serve_frontend=False)
     with TestClient(app, base_url="http://testserver") as client:

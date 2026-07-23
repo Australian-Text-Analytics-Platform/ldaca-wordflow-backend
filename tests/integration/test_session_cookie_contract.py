@@ -225,6 +225,7 @@ def test_dns_rebinding_host_cannot_obtain_single_user_capabilities(
 def test_hosted_callback_issues_hashed_multi_session_cookie_and_exact_logout(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    finite_quota_test_filesystem: None,
 ) -> None:
     settings = _settings(tmp_path, multi_user=True)
     captured: dict[str, Runtime] = {}
@@ -332,6 +333,7 @@ def test_hosted_callback_issues_hashed_multi_session_cookie_and_exact_logout(
 def test_google_callback_rejects_unsafe_redirect_before_issuing_session(
     tmp_path: Path,
     return_to: str,
+    finite_quota_test_filesystem: None,
 ) -> None:
     settings = _settings(tmp_path, multi_user=True)
     app = create_app(settings, serve_frontend=False)

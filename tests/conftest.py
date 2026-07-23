@@ -19,6 +19,7 @@ from ldaca_wordflow.domain.workspace import Node, Workspace
 from ldaca_wordflow.main import create_app
 from ldaca_wordflow.runtime import Runtime, runtime_context
 from ldaca_wordflow.api.security import SESSION_COOKIE_NAME
+from ldaca_wordflow.services import quota as quota_module
 from ldaca_wordflow.settings import Settings
 from ldaca_wordflow.workers.input_snapshots import create_worker_input_snapshot
 
@@ -26,6 +27,33 @@ from ldaca_wordflow.workers.input_snapshots import create_worker_input_snapshot
 @pytest.fixture(scope="session")
 def anyio_backend() -> str:
     return "asyncio"
+
+
+@pytest.fixture
+def finite_quota_test_filesystem(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Emulate allocation metrics only on hosts that intentionally lack them."""
+
+    metadata = tmp_path.stat()
+    if hasattr(os, "statvfs") and hasattr(metadata, "st_blocks"):
+        return
+
+    allocation_unit = 4096
+    monkeypatch.setattr(
+        quota_module,
+        "_probe_allocation_unit",
+        lambda _root: allocation_unit,
+    )
+    monkeypatch.setattr(
+        quota_module,
+        "_entry_allocated_bytes",
+        lambda entry, unit: max(
+            ((entry.st_size + unit - 1) // unit) * unit,
+            unit,
+        ),
+    )
 
 
 @pytest.fixture
@@ -54,7 +82,10 @@ def files_test_client(tmp_path: Path):
 
 
 @pytest.fixture
-def multi_user_test_client(tmp_path: Path) -> Iterator[TestClient]:
+def multi_user_test_client(
+    tmp_path: Path,
+    finite_quota_test_filesystem: None,
+) -> Iterator[TestClient]:
     """Run an authenticated hosted session without an external OAuth round trip."""
 
     settings = Settings(

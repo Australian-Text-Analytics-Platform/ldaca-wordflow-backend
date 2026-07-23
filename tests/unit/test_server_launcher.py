@@ -124,7 +124,8 @@ async def test_dynamic_port_is_bound_before_final_settings_and_readiness(
     assert record["status"] == "ready"
     assert record["port"] == handle.server.config.port
     assert record["port"] > 0
-    assert startup_file.stat().st_mode & 0o777 == 0o600
+    if os.name != "nt":
+        assert startup_file.stat().st_mode & 0o777 == 0o600
 
     cast(Any, handle.server).release.set()
     await handle.close()
@@ -170,7 +171,8 @@ async def test_bind_failure_preserves_socket_error_and_publishes_failure(
         "code": "startup_failed",
         "version": __version__,
     }
-    assert startup_file.stat().st_mode & 0o777 == 0o600
+    if os.name != "nt":
+        assert startup_file.stat().st_mode & 0o777 == 0o600
 
 
 @pytest.mark.anyio

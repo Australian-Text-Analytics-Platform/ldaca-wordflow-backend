@@ -1159,6 +1159,7 @@ dependencies = [
     { name = "scikit-learn" },
     { name = "spacy" },
     { name = "tbb", marker = "sys_platform != 'darwin'" },
+    { name = "tzdata", marker = "sys_platform == 'win32'" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -1199,6 +1200,7 @@ requires-dist = [
     { name = "scikit-learn", specifier = ">=1.5.0" },
     { name = "spacy", specifier = ">=3.7.0" },
     { name = "tbb", marker = "sys_platform != 'darwin'", specifier = ">=2022.3.1" },
+    { name = "tzdata", marker = "sys_platform == 'win32'", specifier = ">=2025.2" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.35.0" },
 ]
 provides-extras = ["deploy"]
