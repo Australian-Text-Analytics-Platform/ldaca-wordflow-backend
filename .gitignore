@@ -1,4 +1,5 @@
 .DS_Store
+._*
 .coverage
 .mypy_cache/
 .pytest_cache/
