@@ -17,6 +17,7 @@ from ldaca_wordflow.domain.workspace import (
     AnalysisRecord,
     AnalysisState,
     AnnotationAnalysisSubmission,
+    AnnotationRunAllSubmission,
     ConcordanceAnalysisRequest,
     ConcordanceRunAllAnalysisRequest,
     DerivationInput,
@@ -321,6 +322,73 @@ async def test_multi_user_annotation_secret_reaches_execution_but_not_workspace_
         for path in tmp_path.rglob("*")
         if path.is_file()
     )
+
+
+@pytest.mark.anyio
+async def test_annotation_submission_immediately_replaces_the_previous_analysis(
+    tmp_path: Path,
+) -> None:
+    workspaces, workspace_id, node_id, tab_id = await _opened_workspace_with_tab(
+        tmp_path,
+        kind=AnalysisKind.ANNOTATION,
+    )
+    execution = _ExecutionControl()
+    service = _analysis_service(
+        tmp_path,
+        workspaces,
+        execution,
+        multi_user=True,
+    )
+    preview = AnnotationAnalysisSubmission(
+        node_id=uuid.UUID(node_id),
+        text_column="text",
+        annotation_column="class",
+        class_node_id=uuid.UUID(node_id),
+        class_column="text",
+        description_column="text",
+        classes=[{"name": "Relevant", "description": ""}],
+        provider_configuration_id=uuid.uuid4(),
+        provider="openai",
+        model="model",
+        instruction="Classify the text",
+        api_key="request-only-secret",
+    )
+
+    first = await _submit(service, "user", workspace_id, tab_id, preview)
+    await _mark_succeeded(workspaces, workspace_id, first.id)
+
+    first_run_all = await _submit(
+        service,
+        "user",
+        workspace_id,
+        tab_id,
+        AnnotationRunAllSubmission(
+            source=preview.persisted_request(),
+            api_key="request-only-secret",
+        ),
+        execution_scope=AnalysisExecutionScope.RUN_ALL,
+    )
+
+    assert [item.id for item in await service.for_tab("user", workspace_id, tab_id)] == [
+        first_run_all.id
+    ]
+    await _mark_succeeded(workspaces, workspace_id, first_run_all.id)
+
+    second_run_all = await _submit(
+        service,
+        "user",
+        workspace_id,
+        tab_id,
+        AnnotationRunAllSubmission(
+            source=preview.persisted_request(),
+            api_key="request-only-secret",
+        ),
+        execution_scope=AnalysisExecutionScope.RUN_ALL,
+    )
+
+    assert [item.id for item in await service.for_tab("user", workspace_id, tab_id)] == [
+        second_run_all.id
+    ]
 
 
 @pytest.mark.anyio

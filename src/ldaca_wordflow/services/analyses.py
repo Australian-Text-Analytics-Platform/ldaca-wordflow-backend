@@ -18,6 +18,7 @@ from ..domain.workspace import (
     Analysis,
     AnalysisArtifactRecord,
     AnalysisExecutionScope,
+    AnalysisKind,
     AnalysisQuerySnapshotRecord,
     AnalysisRecord,
     AnalysisState,
@@ -262,6 +263,15 @@ class AnalysisService:
                 raise TabNotFoundError("Tab not found")
             if self._tab_kind_for(request) != tab.kind.value:
                 raise AnalysisKindMismatchError("Analysis kind does not match the Tab")
+            linear_annotation = tab.kind is AnalysisKind.ANNOTATION
+            if linear_annotation and (
+                command.execution_scope is AnalysisExecutionScope.SUPPORTING
+                or command.parent_analysis_id is not None
+                or command.supersedes_analysis_ids
+            ):
+                raise AnalysisParentInvalidError(
+                    "Annotation Analyses use one linear Tab-owned lifecycle"
+                )
             tab_records = [
                 record
                 for record in lease.workspace.analyses.values()
@@ -349,6 +359,9 @@ class AnalysisService:
                         "missing_input_ids": [str(node_id) for node_id in missing]
                     },
                 )
+            if linear_annotation:
+                for analysis_id in list(tab.analysis_ids):
+                    lease.workspace.remove_analysis(str(analysis_id))
             record = AnalysisRecord.create(
                 request,
                 tab_id=tab.id,

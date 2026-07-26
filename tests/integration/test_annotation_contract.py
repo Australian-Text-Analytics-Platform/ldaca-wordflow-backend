@@ -243,7 +243,6 @@ def test_annotation_preview_is_durable_and_run_all_edits_the_source(
                     "kind": "annotation_run_all",
                     "source": preview_request,
                 },
-                "supersedes_analysis_ids": [preview_id],
             },
             headers=unsafe,
         )
@@ -251,6 +250,10 @@ def test_annotation_preview_is_durable_and_run_all_edits_the_source(
         child = _wait(client, workspace_id, run_all.json()["id"])
         assert child["state"] == "succeeded", child
         assert child["output_node_ids"] == []
+        forest = client.get(
+            f"/api/workspaces/{workspace_id}/tabs/{tab_id}/analyses"
+        ).json()
+        assert [item["id"] for item in forest] == [child["id"]]
         reviewed = client.post(
             f"/api/workspaces/{workspace_id}/sql",
             json={
