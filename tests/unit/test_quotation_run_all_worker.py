@@ -1,11 +1,12 @@
-from pathlib import Path
-
 import polars as pl
-from ldaca_wordflow.analysis.generated_columns import QUOTE_COLUMN_NAMES
-from ldaca_wordflow.workers.quotation import run_quotation_detachment
+from ldaca_wordflow.analysis.generated_columns import (
+    QUOTE_COLUMN_NAMES,
+    QUOTE_EXTRACTION_COLUMN,
+)
+from ldaca_wordflow.workers.quotation import run_quotation_run_all
 
 
-def test_quotation_detach_task_writes_node_payload_without_internal_source_column(
+def test_quotation_run_all_writes_complete_analysis_table_artifact(
     tmp_path,
     monkeypatch,
     worker_snapshot,
@@ -50,8 +51,8 @@ def test_quotation_detach_task_writes_node_payload_without_internal_source_colum
         fake_quotation_groups_via_quote_extractor,
     )
 
-    result = run_quotation_detachment(
-        workspace_dir=str(tmp_path),
+    result = run_quotation_run_all(
+        artifact_dir=str(tmp_path),
         input_snapshot_dir=str(
             worker_snapshot(
                 node_id="11111111-1111-4111-8111-111111111111",
@@ -66,10 +67,6 @@ def test_quotation_detach_task_writes_node_payload_without_internal_source_colum
         engine={"type": "local"},
         quotation_service_max_batch_size=100,
         quotation_service_timeout=30,
-        new_node_name="detached_quotation",
-        include_document_column=True,
-        selected_generated_columns=list(QUOTE_COLUMN_NAMES),
-        extra_column_names=["speaker_label"],
         progress_callback=lambda progress, message: progress_updates.append(
             (
                 progress,
@@ -79,13 +76,24 @@ def test_quotation_detach_task_writes_node_payload_without_internal_source_colum
     )
 
     assert result["state"] == "successful"
-    payload = result["result"]
-    data_file = tmp_path / Path(payload["parquet_path"])
+    source = result["source"]
+    assert source["node_id"] == "11111111-1111-4111-8111-111111111111"
+    assert source["document_column"] == "document"
+    assert source["metadata_columns"] == ["speaker_label"]
+    assert source["analysis_columns"] == [
+        QUOTE_EXTRACTION_COLUMN,
+        *QUOTE_COLUMN_NAMES,
+    ]
+    assert source["table"]["table_id"] == "quotation-run-all"
+    assert "data_block" not in source
+    data_file = tmp_path / source["table"]["artifact"]
     assert data_file.exists()
 
     restored = pl.scan_parquet(data_file)
     assert restored.collect_schema().names() == [
+        "__wordflow_source_row_id",
         "document",
+        "QUOTE_extraction",
         "speaker_label",
         "QUOTE_speaker",
         "QUOTE_speaker_start_idx",
@@ -102,26 +110,8 @@ def test_quotation_detach_task_writes_node_payload_without_internal_source_colum
         "QUOTE_quote_row_idx",
     ]
     assert "__quotation_source__" not in restored.collect_schema().names()
-
-    assert result["result"]["output_columns"] == [
-        "document",
-        "speaker_label",
-        "QUOTE_speaker",
-        "QUOTE_speaker_start_idx",
-        "QUOTE_speaker_end_idx",
-        "QUOTE_quote",
-        "QUOTE_quote_start_idx",
-        "QUOTE_quote_end_idx",
-        "QUOTE_verb",
-        "QUOTE_verb_start_idx",
-        "QUOTE_verb_end_idx",
-        "QUOTE_quote_type",
-        "QUOTE_quote_token_count",
-        "QUOTE_is_floating_quote",
-        "QUOTE_quote_row_idx",
-    ]
     assert progress_updates[0][1].startswith("Loading quotation")
     assert any(
         "Extracting quotations" in message for _progress, message in progress_updates
     )
-    assert progress_updates[-1] == (0.95, "Publishing quotation Data Block...")
+    assert progress_updates[-1] == (0.95, "Saving quotation Result...")

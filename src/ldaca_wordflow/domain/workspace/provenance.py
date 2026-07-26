@@ -257,18 +257,14 @@ class AnnotationDerivation(_StrictModel):
     model: str = Field(min_length=1, max_length=500)
 
 
-class ConcordanceDetachmentDerivation(_StrictModel):
-    kind: Literal["concordance_detachment"] = "concordance_detachment"
-
-
-class ConcordanceDispersionDetachmentDerivation(_StrictModel):
-    kind: Literal["concordance_dispersion_detachment"] = (
-        "concordance_dispersion_detachment"
+class ConcordanceResultPublicationDerivation(_StrictModel):
+    kind: Literal["concordance_result_publication"] = (
+        "concordance_result_publication"
     )
 
 
-class QuotationDetachmentDerivation(_StrictModel):
-    kind: Literal["quotation_detachment"] = "quotation_detachment"
+class QuotationResultPublicationDerivation(_StrictModel):
+    kind: Literal["quotation_result_publication"] = "quotation_result_publication"
 
 
 class TopicModelingDetachmentDerivation(_StrictModel):
@@ -287,9 +283,8 @@ DerivationOperation = Annotated[
     | CastDerivation
     | SqlDerivation
     | AnnotationDerivation
-    | ConcordanceDetachmentDerivation
-    | ConcordanceDispersionDetachmentDerivation
-    | QuotationDetachmentDerivation
+    | ConcordanceResultPublicationDerivation
+    | QuotationResultPublicationDerivation
     | TopicModelingDetachmentDerivation,
     Field(discriminator="kind"),
 ]
@@ -307,9 +302,8 @@ _DERIVATION_OPERATION_TYPES: dict[str, type[_StrictModel]] = {
         CastDerivation,
         SqlDerivation,
         AnnotationDerivation,
-        ConcordanceDetachmentDerivation,
-        ConcordanceDispersionDetachmentDerivation,
-        QuotationDetachmentDerivation,
+        ConcordanceResultPublicationDerivation,
+        QuotationResultPublicationDerivation,
         TopicModelingDetachmentDerivation,
     )
 }
@@ -492,9 +486,8 @@ def describe_provenance(
             else "expression",
             CastDerivation: "cast",
             AnnotationDerivation: "annotation",
-            ConcordanceDetachmentDerivation: "concordance detachment",
-            ConcordanceDispersionDetachmentDerivation: "concordance dispersion detachment",
-            QuotationDetachmentDerivation: "quotation detachment",
+            ConcordanceResultPublicationDerivation: "concordance Result Publication",
+            QuotationResultPublicationDerivation: "quotation Result Publication",
             TopicModelingDetachmentDerivation: "topic modeling detachment",
         }
         return f"{labels[type(operation)]} of {inputs[0]}"
@@ -511,8 +504,7 @@ __all__ = [
     "ColumnExpression",
     "ConcatDerivation",
     "ConcatStringExpression",
-    "ConcordanceDetachmentDerivation",
-    "ConcordanceDispersionDetachmentDerivation",
+    "ConcordanceResultPublicationDerivation",
     "DerivationInput",
     "DerivationOperation",
     "DerivationProvenance",
@@ -527,7 +519,7 @@ __all__ = [
     "LiteralExpression",
     "NodeProvenance",
     "NodeReference",
-    "QuotationDetachmentDerivation",
+    "QuotationResultPublicationDerivation",
     "TopicModelingDetachmentDerivation",
     "ReplaceDerivation",
     "RoundExpression",

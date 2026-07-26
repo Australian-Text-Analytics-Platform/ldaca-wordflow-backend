@@ -7,6 +7,7 @@ import shutil
 import time
 from io import BytesIO
 from pathlib import Path
+from typing import cast
 
 import polars as pl
 from fastapi.testclient import TestClient
@@ -76,13 +77,16 @@ def test_sequential_analysis_is_owned_by_its_tab_and_workspace(tmp_path: Path) -
         ).json()
 
         created = client.post(
-            f"/api/workspaces/{workspace_id}/tabs/{tab['id']}/analysis",
+            f"/api/workspaces/{workspace_id}/tabs/{tab['id']}/analyses",
             json={
-                "kind": "sequential",
-                "node_id": node["id"],
-                "time_column": "time",
-                "column_type": "numeric",
-                "numeric_interval": 1,
+                "execution_scope": "run_all",
+                "request": {
+                    "kind": "sequential",
+                    "node_id": node["id"],
+                    "time_column": "time",
+                    "column_type": "numeric",
+                    "numeric_interval": 1,
+                },
             },
             headers=unsafe,
         )
@@ -95,12 +99,9 @@ def test_sequential_analysis_is_owned_by_its_tab_and_workspace(tmp_path: Path) -
 
         detail_payload = _wait_analysis(client, workspace_id, analysis_id)
         assert detail_payload["state"] == "succeeded", detail_payload
-        assert (
-            client.get(
-                f"/api/workspaces/{workspace_id}/tabs/{tab['id']}/analysis"
-            ).json()
-            == detail_payload
-        )
+        assert client.get(
+            f"/api/workspaces/{workspace_id}/tabs/{tab['id']}/analyses"
+        ).json() == [detail_payload]
 
         listing = client.get(f"/api/workspaces/{workspace_id}/analyses")
         assert listing.status_code == 200
@@ -125,16 +126,16 @@ def test_sequential_analysis_is_owned_by_its_tab_and_workspace(tmp_path: Path) -
         assert queried.status_code == 422, queried.text
 
         cleared = client.delete(
-            f"/api/workspaces/{workspace_id}/tabs/{tab['id']}/analysis",
+            f"/api/workspaces/{workspace_id}/tabs/{tab['id']}/analyses",
             headers=unsafe,
         )
         assert cleared.status_code == 204
         assert cleared.content == b""
         assert (
             client.get(
-                f"/api/workspaces/{workspace_id}/tabs/{tab['id']}/analysis"
-            ).status_code
-            == 404
+                f"/api/workspaces/{workspace_id}/tabs/{tab['id']}/analyses"
+            ).json()
+            == []
         )
 
 
@@ -185,12 +186,15 @@ def test_analysis_artifacts_publish_under_the_analysis_directory(
             headers=unsafe,
         ).json()["id"]
         created = client.post(
-            f"/api/workspaces/{workspace_id}/tabs/{tab_id}/analysis",
+            f"/api/workspaces/{workspace_id}/tabs/{tab_id}/analyses",
             json={
-                "kind": "token_frequency",
-                "node_ids": [node_id],
-                "node_columns": {node_id: "text"},
-                "node_tokenizer_models": {node_id: "native:plain_words_en"},
+                "execution_scope": "run_all",
+                "request": {
+                    "kind": "token_frequency",
+                    "node_ids": [node_id],
+                    "node_columns": {node_id: "text"},
+                    "node_tokenizer_models": {node_id: "native:plain_words_en"},
+                },
             },
             headers=unsafe,
         )
@@ -309,12 +313,15 @@ def test_concordance_result_uses_the_completed_analysis_snapshot(
             headers=unsafe,
         ).json()["id"]
         created = client.post(
-            f"/api/workspaces/{workspace_id}/tabs/{tab_id}/analysis",
+            f"/api/workspaces/{workspace_id}/tabs/{tab_id}/analyses",
             json={
-                "kind": "concordance",
-                "node_ids": [node_id],
-                "node_columns": {node_id: "text"},
-                "search_word": "hello",
+                "execution_scope": "preview",
+                "request": {
+                    "kind": "concordance",
+                    "node_ids": [node_id],
+                    "node_columns": {node_id: "text"},
+                    "search_word": "hello",
+                },
             },
             headers=unsafe,
         )
@@ -322,8 +329,10 @@ def test_concordance_result_uses_the_completed_analysis_snapshot(
         analysis_id = created.json()["id"]
         assert _wait_analysis(client, workspace_id, analysis_id)["state"] == "succeeded"
 
-        before = client.get(
-            f"/api/workspaces/{workspace_id}/analyses/{analysis_id}/result"
+        before = client.post(
+            f"/api/workspaces/{workspace_id}/analyses/{analysis_id}/result/query",
+            json={"kind": "concordance", "page": 1, "page_size": 50},
+            headers=unsafe,
         )
         assert before.status_code == 200, before.text
         before_payload = before.json()
@@ -357,8 +366,10 @@ def test_concordance_result_uses_the_completed_analysis_snapshot(
             == 200
         )
 
-        after = client.get(
-            f"/api/workspaces/{workspace_id}/analyses/{analysis_id}/result"
+        after = client.post(
+            f"/api/workspaces/{workspace_id}/analyses/{analysis_id}/result/query",
+            json={"kind": "concordance", "page": 1, "page_size": 50},
+            headers=unsafe,
         )
         assert after.status_code == 200, after.text
         assert after.json() == before_payload
@@ -375,7 +386,8 @@ def test_concordance_result_uses_the_completed_analysis_snapshot(
             f"/api/workspaces/{workspace_id}/analyses/{analysis_id}/result"
         )
         assert stored.status_code == 200, stored.text
-        assert stored.json() == before_payload
+        assert stored.json()["ready"] is True
+        assert stored.json()["sources"] is None
 
         unavailable = client.post(
             f"/api/workspaces/{workspace_id}/analyses/{analysis_id}/result/query",
@@ -386,7 +398,9 @@ def test_concordance_result_uses_the_completed_analysis_snapshot(
         assert unavailable.json()["code"] == "analysis_result_unavailable"
 
 
-def test_child_analysis_publishes_an_independent_data_block(tmp_path: Path) -> None:
+def test_concordance_run_all_group_stores_results_without_publishing_nodes(
+    tmp_path: Path,
+) -> None:
     settings = Settings(
         data_root=tmp_path,
         multi_user=False,
@@ -420,9 +434,22 @@ def test_child_analysis_publishes_an_independent_data_block(tmp_path: Path) -> N
             ).status_code
             == 200
         )
-        node_id = client.post(
+        first_node_id = client.post(
             f"/api/workspaces/{workspace_id}/nodes",
-            json={"kind": "file", "file_path": "documents.csv"},
+            json={
+                "kind": "file",
+                "file_path": "documents.csv",
+                "name": "First source",
+            },
+            headers=unsafe,
+        ).json()["id"]
+        second_node_id = client.post(
+            f"/api/workspaces/{workspace_id}/nodes",
+            json={
+                "kind": "file",
+                "file_path": "documents.csv",
+                "name": "Second source",
+            },
             headers=unsafe,
         ).json()["id"]
         tab_id = client.post(
@@ -430,13 +457,20 @@ def test_child_analysis_publishes_an_independent_data_block(tmp_path: Path) -> N
             json={"kind": "concordance", "name": "Search"},
             headers=unsafe,
         ).json()["id"]
+        preview_request = {
+            "kind": "concordance",
+            "node_ids": [first_node_id, second_node_id],
+            "node_columns": {
+                first_node_id: "text",
+                second_node_id: "text",
+            },
+            "search_word": "hello",
+        }
         root = client.post(
-            f"/api/workspaces/{workspace_id}/tabs/{tab_id}/analysis",
+            f"/api/workspaces/{workspace_id}/tabs/{tab_id}/analyses",
             json={
-                "kind": "concordance",
-                "node_ids": [node_id],
-                "node_columns": {node_id: "text"},
-                "search_word": "hello",
+                "execution_scope": "preview",
+                "request": preview_request,
             },
             headers=unsafe,
         )
@@ -445,48 +479,171 @@ def test_child_analysis_publishes_an_independent_data_block(tmp_path: Path) -> N
         assert _wait_analysis(client, workspace_id, root_id)["state"] == "succeeded"
 
         created = client.post(
-            f"/api/workspaces/{workspace_id}/analyses/{root_id}/children",
+            f"/api/workspaces/{workspace_id}/tabs/{tab_id}/analyses",
             json={
-                "kind": "concordance_detachment",
-                "node_id": node_id,
-                "selected_columns": ["source", "CONC_matched_text"],
-                "name": "Hello matches",
+                "execution_scope": "run_all",
+                "request": {
+                    "kind": "concordance_run_all",
+                    "source": preview_request,
+                },
+                "supersedes_analysis_ids": [root_id],
             },
             headers=unsafe,
         )
         assert created.status_code == 201, created.text
-        child = created.json()
-        child_id = child["id"]
-        assert child["parent_analysis_id"] == root_id
+        group = created.json()
+        group_id = group["id"]
+        assert group["parent_analysis_id"] is None
         assert created.headers["location"] == (
-            f"/api/workspaces/{workspace_id}/analyses/{child_id}"
+            f"/api/workspaces/{workspace_id}/analyses/{group_id}"
         )
-        terminal = _wait_analysis(client, workspace_id, child_id)
+        terminal = _wait_analysis(client, workspace_id, group_id)
         assert terminal["state"] == "succeeded", terminal
+        assert terminal["output_node_ids"] == []
+        forest = client.get(
+            f"/api/workspaces/{workspace_id}/tabs/{tab_id}/analyses"
+        ).json()
+        assert len(forest) == 3
+        children = [item for item in forest if item["execution_scope"] == "supporting"]
+        assert len(children) == 2
+        assert all(item["parent_analysis_id"] == group_id for item in children)
 
-        result = client.get(
-            f"/api/workspaces/{workspace_id}/analyses/{child_id}/result"
+        root_result = client.get(
+            f"/api/workspaces/{workspace_id}/analyses/{group_id}/result"
         )
-        assert result.status_code == 200, result.text
-        payload = result.json()
-        assert payload["kind"] == "concordance_detachment"
-        assert payload["output_columns"] == ["source", "CONC_matched_text"]
-        assert len(payload["output_node_ids"]) == 1
-        output_node_id = payload["output_node_ids"][0]
-        output = client.get(f"/api/workspaces/{workspace_id}/nodes/{output_node_id}")
-        assert output.status_code == 200, output.text
-        assert output.json()["name"] == "Hello matches"
+        assert root_result.status_code == 200, root_result.text
+        assert root_result.json()["kind"] == "concordance_run_all"
+        assert root_result.json()["result_type"] == "group"
+        assert [
+            source["analysis_id"] for source in root_result.json()["sources"]
+        ] == [child["id"] for child in children]
 
+        for child in children:
+            result = client.get(
+                f"/api/workspaces/{workspace_id}/analyses/{child['id']}/result"
+            )
+            assert result.status_code == 200, result.text
+            payload = result.json()
+            assert payload["kind"] == "concordance_run_all"
+            assert payload["result_type"] == "source"
+            assert payload["source"]["document_column"] == "text"
+            assert payload["source"]["metadata_columns"] == ["source"]
+            assert "CONC_matched_text" in payload["source"]["analysis_columns"]
+            assert payload["source"]["table"]["delivery"] == "paged"
+            page = client.get(
+                payload["source"]["table"]["rows_url"],
+                params={"page": 1, "page_size": 20},
+            )
+            assert page.status_code == 200, page.text
+            assert child["output_node_ids"] == []
+            assert not (
+                tmp_path
+                / "workspaces"
+                / workspace_id
+                / "analyses"
+                / child["id"]
+                / "staged-output"
+            ).exists()
+
+        nodes = client.get(f"/api/workspaces/{workspace_id}/nodes")
+        assert nodes.status_code == 200, nodes.text
+        assert {node["id"] for node in nodes.json()} == {
+            first_node_id,
+            second_node_id,
+        }
+        invalid_publication = client.post(
+            f"/api/workspaces/{workspace_id}/tabs/{tab_id}/analyses",
+            json={
+                "execution_scope": "supporting",
+                "parent_analysis_id": group_id,
+                "request": {
+                    "kind": "concordance_result_publication",
+                    "sources": [
+                        {
+                            "source_node_id": first_node_id,
+                            "selected_columns": ["text", "CONC_matched_text"],
+                            "new_node_name": "Valid first output",
+                        },
+                        {
+                            "source_node_id": second_node_id,
+                            "selected_columns": ["text", "missing"],
+                            "new_node_name": "Invalid second output",
+                        },
+                    ],
+                },
+            },
+            headers=unsafe,
+        )
+        assert invalid_publication.status_code == 201, invalid_publication.text
+        invalid_terminal = _wait_analysis(
+            client,
+            workspace_id,
+            invalid_publication.json()["id"],
+        )
+        assert invalid_terminal["state"] == "failed"
+        unchanged_nodes = client.get(f"/api/workspaces/{workspace_id}/nodes")
+        assert {node["id"] for node in unchanged_nodes.json()} == {
+            first_node_id,
+            second_node_id,
+        }
+
+        publication = client.post(
+            f"/api/workspaces/{workspace_id}/tabs/{tab_id}/analyses",
+            json={
+                "execution_scope": "supporting",
+                "parent_analysis_id": group_id,
+                "request": {
+                    "kind": "concordance_result_publication",
+                    "sources": [
+                        {
+                            "source_node_id": first_node_id,
+                            "selected_columns": [
+                                "text",
+                                "source",
+                                "CONC_matched_text",
+                            ],
+                            "new_node_name": "First matches",
+                        },
+                        {
+                            "source_node_id": second_node_id,
+                            "selected_columns": ["text", "CONC_extraction"],
+                            "new_node_name": "Second matches",
+                        },
+                    ],
+                },
+            },
+            headers=unsafe,
+        )
+        assert publication.status_code == 201, publication.text
+        published = _wait_analysis(
+            client,
+            workspace_id,
+            publication.json()["id"],
+        )
+        assert published["state"] == "succeeded", published
+        output_node_ids = cast(list[str], published["output_node_ids"])
+        assert len(output_node_ids) == 2
+        published_nodes = [
+            client.get(
+                f"/api/workspaces/{workspace_id}/nodes/{node_id}"
+            ).json()
+            for node_id in output_node_ids
+        ]
+        assert [node["name"] for node in published_nodes] == [
+            "First matches",
+            "Second matches",
+        ]
         assert (
             client.delete(
-                f"/api/workspaces/{workspace_id}/tabs/{tab_id}/analysis",
+                f"/api/workspaces/{workspace_id}/tabs/{tab_id}/analyses",
                 headers=unsafe,
             ).status_code
             == 204
         )
-        assert (
-            client.get(
-                f"/api/workspaces/{workspace_id}/nodes/{output_node_id}"
-            ).status_code
-            == 200
-        )
+        for output_node_id in output_node_ids:
+            assert (
+                client.get(
+                    f"/api/workspaces/{workspace_id}/nodes/{output_node_id}"
+                ).status_code
+                == 200
+            )

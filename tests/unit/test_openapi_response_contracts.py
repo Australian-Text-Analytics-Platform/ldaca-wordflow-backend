@@ -46,7 +46,7 @@ def test_empty_deletions_are_real_204_responses() -> None:
         ("/api/workspaces/{workspace_id}", "delete"),
         ("/api/workspaces/{workspace_id}/nodes/{node_id}", "delete"),
         ("/api/workspaces/{workspace_id}/tabs/{tab_id}", "delete"),
-        ("/api/workspaces/{workspace_id}/tabs/{tab_id}/analysis", "delete"),
+        ("/api/workspaces/{workspace_id}/tabs/{tab_id}/analyses", "delete"),
     }
     for path, method in endpoints:
         responses = schema["paths"][path][method]["responses"]
@@ -59,7 +59,7 @@ def test_creation_background_and_oauth_status_codes_are_explicit() -> None:
     expected = {
         ("/api/workspaces", "post"): "201",
         ("/api/workspaces/{workspace_id}/tabs", "post"): "201",
-        ("/api/workspaces/{workspace_id}/tabs/{tab_id}/analysis", "post"): "201",
+        ("/api/workspaces/{workspace_id}/tabs/{tab_id}/analyses", "post"): "201",
         ("/api/user-files/uploads", "post"): "201",
         ("/api/user-files/folders", "post"): "201",
         ("/api/workspaces/{workspace_id}/nodes", "post"): "201",
@@ -99,9 +99,9 @@ def test_file_archive_artifact_and_sse_media_types_are_documented() -> None:
 
 def test_analysis_requests_results_and_queries_are_discriminated() -> None:
     paths = app.openapi()["paths"]
+    analysis_create = app.openapi()["components"]["schemas"]["AnalysisCreate"]
     definitions = (
-        paths["/api/workspaces/{workspace_id}/tabs/{tab_id}/analysis"]["post"]
-        ["requestBody"]["content"]["application/json"]["schema"],
+        analysis_create["properties"]["request"],
         paths[
             "/api/workspaces/{workspace_id}/analyses/{analysis_id}/result/query"
         ]["post"]["requestBody"]["content"]["application/json"]["schema"],
@@ -130,7 +130,6 @@ def test_annotation_requests_share_one_annotation_class_schema() -> None:
     for request_name in (
         "AnnotationAnalysisRequest",
         "AnnotationAnalysisSubmission",
-        "AnnotationPreviewRequest",
     ):
         assert schemas[request_name]["properties"]["classes"]["items"] == expected_ref
 
@@ -140,7 +139,10 @@ def test_workspace_owned_analysis_representation_is_exact() -> None:
     analysis = schema["components"]["schemas"]["Analysis"]
     assert set(analysis["properties"]) == {
         "id",
+        "tab_id",
         "parent_analysis_id",
+        "execution_scope",
+        "supersedes_analysis_ids",
         "request",
         "state",
         "progress",
@@ -150,9 +152,9 @@ def test_workspace_owned_analysis_representation_is_exact() -> None:
         "created_at",
         "started_at",
         "finished_at",
-            "revision",
-            "output_node_ids",
-        }
+        "revision",
+        "output_node_ids",
+    }
     assert set(analysis["required"]) == set(analysis["properties"])
 
 
@@ -171,12 +173,16 @@ def test_tab_resources_are_exact_and_the_collection_is_unpaginated() -> None:
         "id",
         "kind",
         "name",
-        "analysis_id",
+        "analysis_ids",
+        "annotation_correction_columns",
         "created_at",
         "modified_at",
         "revision",
     }
-    assert set(tab["required"]) == set(tab["properties"])
+    assert set(tab["required"]) == set(tab["properties"]) - {
+        "analysis_ids",
+        "annotation_correction_columns"
+    }
     collection = schema["paths"]["/api/workspaces/{workspace_id}/tabs"]["get"]
     assert [parameter["name"] for parameter in collection["parameters"]] == [
         "workspace_id"
@@ -199,7 +205,15 @@ def test_pagination_is_one_based_everywhere_it_is_exposed() -> None:
     ]
     assert paged
     for definition in paged:
-        assert definition["properties"]["page"].get("minimum") == 1
+        page = definition["properties"]["page"]
+        minimum = page.get("minimum")
+        if minimum is None:
+            minimum = next(
+                option.get("minimum")
+                for option in page.get("anyOf", [])
+                if option.get("type") == "integer"
+            )
+        assert minimum == 1
 
 
 def test_every_validation_response_uses_the_safe_api_error_contract() -> None:

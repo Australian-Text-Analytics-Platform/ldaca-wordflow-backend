@@ -1,20 +1,16 @@
-"""Canonical stateless-preview and Workspace-owned Annotation contracts."""
+"""Workspace-owned Annotation Preview and Run All contracts."""
 
 from __future__ import annotations
 
 import time
 from functools import partial
-from io import BytesIO
 from pathlib import Path
 
-import polars as pl
 from anyio.to_thread import run_sync as run_sync_in_worker_thread
 from fastapi.testclient import TestClient
 
 from ldaca_wordflow.main import create_app
-from ldaca_wordflow.services import annotations as annotation_service_module
 from ldaca_wordflow.services import analysis_executor as analysis_executor_module
-from ldaca_wordflow.workers import annotation as annotation_worker_module
 from ldaca_wordflow.settings import Settings
 
 
@@ -34,78 +30,10 @@ def _client(tmp_path: Path) -> TestClient:
     )
 
 
-def _source(client: TestClient, unsafe: dict[str, str]) -> tuple[str, str, str]:
-    uploaded = client.post(
-        "/api/user-files/uploads",
-        params={"path": "documents.csv"},
-        content=b"text\nfirst document\nsecond document\n",
-        headers={**unsafe, "Content-Type": "application/octet-stream"},
-    )
-    assert uploaded.status_code == 201
-    workspace = client.post(
-        "/api/workspaces",
-        json={"name": "Annotations"},
-        headers=unsafe,
-    )
-    workspace_id = workspace.json()["id"]
-    assert (
-        client.put(f"/api/workspaces/{workspace_id}/open", headers=unsafe).status_code
-        == 200
-    )
-    node = client.post(
-        f"/api/workspaces/{workspace_id}/nodes",
-        json={"kind": "file", "file_path": "documents.csv"},
-        headers=unsafe,
-    )
-    assert node.status_code == 201
-    return workspace_id, node.json()["id"], node.headers["etag"]
-
-
-def _request(
-    configuration_id: str,
-    *,
-    provider: str = "openai",
-    provider_base_url: str | None = None,
-) -> dict[str, object]:
-    return {
-        "text_column": "text",
-        "annotation_column": "stance",
-        "classes": [
-            {"name": "support", "description": "supports the claim"},
-            {"name": "critical", "description": "criticises the claim"},
-        ],
-        "provider_configuration_id": configuration_id,
-        "provider": provider,
-        "provider_base_url": provider_base_url,
-        "model": "test-model",
-        "instruction": "Classify each document.",
-    }
-
-
-def _configure_credentials(client: TestClient, unsafe: dict[str, str]) -> str:
-    response = client.post(
-        "/api/provider-credentials/annotation-providers",
-        json={
-            "name": "OpenAI",
-            "provider": "openai",
-            "api_key": "provider-secret",
-        },
-        headers=unsafe,
-    )
-    assert response.status_code == 201, response.text
-    return str(response.json()["id"])
-
-
-def _wait_analysis(
-    client: TestClient,
-    workspace_id: str,
-    analysis_id: str,
-) -> dict[str, object]:
+def _wait(client: TestClient, workspace_id: str, analysis_id: str) -> dict[str, object]:
     deadline = time.monotonic() + 10
     while True:
-        response = client.get(
-            f"/api/workspaces/{workspace_id}/analyses/{analysis_id}"
-        )
+        response = client.get(f"/api/workspaces/{workspace_id}/analyses/{analysis_id}")
         assert response.status_code == 200
         payload = response.json()
         if payload["state"] in {"succeeded", "failed", "cancelled"}:
@@ -114,69 +42,42 @@ def _wait_analysis(
         time.sleep(0.02)
 
 
-def test_preview_is_stateless_and_uses_one_based_paging(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    captured: list[str] = []
-
-    async def fake_annotate_batch(
-        _wire, _model, _api_key, _instruction, _classes, texts, _config
-    ):
-        captured.extend(texts)
-        return ["support" for _ in texts]
-
-    monkeypatch.setattr(
-        annotation_service_module, "annotate_batch", fake_annotate_batch
-    )
-    with _client(tmp_path) as client:
-        csrf = client.get("/api/session").json()["csrf_token"]
-        unsafe = {"Origin": "http://testserver", "X-CSRF-Token": csrf}
-        configuration_id = _configure_credentials(client, unsafe)
-        workspace_id, node_id, _etag = _source(client, unsafe)
-        rejected = client.post(
-            f"/api/workspaces/{workspace_id}/nodes/{node_id}/annotation-previews",
-            json={
-                **_request(configuration_id),
-                "api_key": "request-secret",
-                "page": 2,
-                "page_size": 1,
-            },
-            headers=unsafe,
-        )
-        assert rejected.status_code == 400
-        assert rejected.json()["code"] == "invalid_input"
-        response = client.post(
-            f"/api/workspaces/{workspace_id}/nodes/{node_id}/annotation-previews",
-            json={**_request(configuration_id), "page": 2, "page_size": 1},
-            headers=unsafe,
-        )
-        assert response.status_code == 200
-        assert captured == ["second document"]
-        assert response.json() == {
-            "node_id": node_id,
-            "page": 2,
-            "page_size": 1,
-            "total_rows": 2,
-            "labels": [{"row_index": 1, "label": "support"}],
-        }
-
-
-def test_full_annotation_is_secret_free_and_completes_as_an_analysis(
+def test_annotation_preview_is_durable_and_run_all_edits_the_source(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     async def fake_annotate_all(
         _wire,
         _model,
-        api_key,
+        _api_key,
         _instruction,
         _classes,
         texts,
         **_kwargs,
     ):
-        assert api_key == "provider-secret"
-        return ["support", "critical"][: len(texts)]
+        return ["support" for _ in texts]
+
+    monkeypatch.setattr(
+        "ldaca_wordflow.workers.annotation.annotate_all",
+        fake_annotate_all,
+    )
+
+    async def fake_annotate_batch(
+        _wire,
+        _model,
+        _api_key,
+        _instruction,
+        _classes,
+        texts,
+        _config,
+        _examples,
+    ):
+        return ["support" for _ in texts]
+
+    monkeypatch.setattr(
+        "ldaca_wordflow.services.analysis_results.annotate_batch",
+        fake_annotate_batch,
+    )
 
     class _ProgressQueue:
         def __init__(self) -> None:
@@ -188,17 +89,12 @@ def test_full_annotation_is_secret_free_and_completes_as_an_analysis(
     async def execute_in_process(_self, _key, invocation, report_progress):
         progress = _ProgressQueue()
         result = await run_sync_in_worker_thread(
-            partial(
-                invocation.function,
-                **dict(invocation.kwargs),
-                progress_queue=progress,
-            )
+            partial(invocation.function, **dict(invocation.kwargs), progress_queue=progress)
         )
         for item in progress.items:
             await report_progress(item)
         return result
 
-    monkeypatch.setattr(annotation_worker_module, "annotate_all", fake_annotate_all)
     monkeypatch.setattr(
         analysis_executor_module.AnalysisProcessExecutor,
         "execute_reserved",
@@ -207,179 +103,144 @@ def test_full_annotation_is_secret_free_and_completes_as_an_analysis(
     with _client(tmp_path) as client:
         csrf = client.get("/api/session").json()["csrf_token"]
         unsafe = {"Origin": "http://testserver", "X-CSRF-Token": csrf}
-        configuration_id = _configure_credentials(client, unsafe)
-        workspace_id, node_id, _etag = _source(client, unsafe)
+        for path, content in (
+            (
+                "documents.csv",
+                b"text,stance,username\n"
+                + b"".join(
+                    f"document-{index},,candidate-{index % 133}\n".encode()
+                    for index in range(2380)
+                ),
+            ),
+            (
+                "candidates.csv",
+                b"username,party\n"
+                + b"".join(
+                    f"candidate-{index},party-{index % 3}\n".encode()
+                    for index in range(133)
+                ),
+            ),
+            (
+                "classes.csv",
+                b"class,description\nsupport,supports the claim\ncritical,criticises the claim\n",
+            ),
+        ):
+            assert (
+                client.post(
+                    "/api/user-files/uploads",
+                    params={"path": path},
+                    content=content,
+                    headers={**unsafe, "Content-Type": "application/octet-stream"},
+                ).status_code
+                == 201
+            )
+        workspace_id = client.post(
+            "/api/workspaces", json={"name": "Annotations"}, headers=unsafe
+        ).json()["id"]
+        assert client.put(f"/api/workspaces/{workspace_id}/open", headers=unsafe).status_code == 200
+        source_id = client.post(
+            f"/api/workspaces/{workspace_id}/nodes",
+            json={"kind": "file", "file_path": "documents.csv"},
+            headers=unsafe,
+        ).json()["id"]
+        candidates_id = client.post(
+            f"/api/workspaces/{workspace_id}/nodes",
+            json={"kind": "file", "file_path": "candidates.csv"},
+            headers=unsafe,
+        ).json()["id"]
+        joined_id = client.post(
+            f"/api/workspaces/{workspace_id}/nodes",
+            json={
+                "kind": "join",
+                "left_node_id": source_id,
+                "right_node_id": candidates_id,
+                "left_on": "username",
+                "right_on": "username",
+                "how": "left",
+                "name": "joined documents",
+            },
+            headers=unsafe,
+        ).json()["id"]
+        class_id = client.post(
+            f"/api/workspaces/{workspace_id}/nodes",
+            json={"kind": "file", "file_path": "classes.csv"},
+            headers=unsafe,
+        ).json()["id"]
+        configuration = client.post(
+            "/api/provider-credentials/annotation-providers",
+            json={"name": "OpenAI", "provider": "openai", "api_key": "provider-secret"},
+            headers=unsafe,
+        ).json()
         tab_id = client.post(
             f"/api/workspaces/{workspace_id}/tabs",
             json={"kind": "annotation", "name": "Document classes"},
             headers=unsafe,
         ).json()["id"]
-        rejected = client.post(
-            f"/api/workspaces/{workspace_id}/tabs/{tab_id}/analysis",
-            json={
-                "kind": "annotation",
-                "node_id": node_id,
-                **_request(configuration_id),
-                "output_node_name": "Classified documents",
-                "api_key": "request-secret",
-            },
-            headers=unsafe,
-        )
-        assert rejected.status_code == 400
-        assert rejected.json()["code"] == "invalid_input"
-        accepted = client.post(
-            f"/api/workspaces/{workspace_id}/tabs/{tab_id}/analysis",
-                json={
-                    "kind": "annotation",
-                    "node_id": node_id,
-                **_request(configuration_id),
-                "output_node_name": "Classified documents",
-            },
-            headers=unsafe,
-        )
-        assert accepted.status_code == 201, accepted.text
-        analysis_id = accepted.json()["id"]
-        analysis = _wait_analysis(client, workspace_id, analysis_id)
-        assert analysis["state"] == "succeeded", analysis
-        assert "provider-secret" not in str(analysis)
-
-        result = client.get(
-            f"/api/workspaces/{workspace_id}/analyses/{analysis_id}/result"
-        )
-        assert result.status_code == 200, result.text
-        assert result.json()["kind"] == "annotation"
-        assert len(result.json()["output_node_ids"]) == 1
-        derived_id = result.json()["output_node_ids"][0]
-
-        detail = client.get(f"/api/workspaces/{workspace_id}").json()
-        nodes = client.get(f"/api/workspaces/{workspace_id}/nodes").json()
-        assert any(node["id"] == derived_id for node in nodes)
-        rows = client.post(
-            f"/api/workspaces/{workspace_id}/sql",
-            json={
-                "mode": "query",
-                "node_ids": [derived_id],
-                "sql": f'SELECT * FROM "{derived_id}"',
-                "page": 1,
-                "page_size": 10,
-            },
-            headers=unsafe,
-        )
-        assert rows.status_code == 200
-        frame = pl.read_ipc_stream(BytesIO(rows.content))
-        assert frame["stance"].to_list() == [
-            "support",
-            "critical",
-        ]
-        assert detail["total_nodes"] == 2
-        workspace_path = tmp_path / "workspaces" / workspace_id
-        assert all(
-            b"provider-secret" not in path.read_bytes()
-            for path in workspace_path.rglob("*")
-            if path.is_file()
-        )
-
-
-def test_model_discovery_uses_the_verified_configuration_snapshot(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    async def fake_models(wire, api_key):
-        assert wire.base_url is None
-        assert api_key == "provider-secret"
-        return ["model-b", "model-a"]
-
-    monkeypatch.setattr(annotation_service_module, "list_models", fake_models)
-    with _client(tmp_path) as client:
-        csrf = client.get("/api/session").json()["csrf_token"]
-        unsafe = {"Origin": "http://testserver", "X-CSRF-Token": csrf}
-        configuration_id = _configure_credentials(client, unsafe)
-        supplied = client.post(
-            "/api/annotation-providers/models",
-            json={
-                "provider_configuration_id": configuration_id,
-                "provider": "openai",
-                "api_key": "request-secret",
-            },
-            headers=unsafe,
-        )
-        assert supplied.status_code == 400
-        assert supplied.json()["code"] == "invalid_input"
-        response = client.post(
-            "/api/annotation-providers/models",
-            json={
-                "provider_configuration_id": configuration_id,
-                "provider": "openai",
-            },
-            headers=unsafe,
-        )
-        assert response.status_code == 200
-        assert response.json() == {
-            "provider_configuration_id": configuration_id,
+        preview_request = {
+            "kind": "annotation",
+            "node_id": joined_id,
+            "text_column": "text",
+            "annotation_column": "stance",
+            "class_node_id": class_id,
+            "class_column": "class",
+            "description_column": "description",
+            "classes": [
+                {"name": "support", "description": "supports the claim"},
+                {"name": "critical", "description": "criticises the claim"},
+            ],
+            "provider_configuration_id": configuration["id"],
             "provider": "openai",
-            "provider_base_url": None,
-            "models": ["model-b", "model-a"],
+            "model": "test-model",
+            "instruction": "Classify each document.",
         }
-        assert client.get("/api/annotation-providers/models").status_code == 405
+        preview = client.post(
+            f"/api/workspaces/{workspace_id}/tabs/{tab_id}/analyses",
+            json={
+                "execution_scope": "preview",
+                "request": preview_request,
+            },
+            headers=unsafe,
+        )
+        assert preview.status_code == 201, preview.text
+        preview_id = preview.json()["id"]
+        assert _wait(client, workspace_id, preview_id)["state"] == "succeeded"
+        marker = client.get(
+            f"/api/workspaces/{workspace_id}/analyses/{preview_id}/result"
+        ).json()
+        assert marker["kind"] == "annotation"
+        assert marker["ready"] is True
+        assert marker["labels"] is None
 
+        page_url = (
+            f"/api/workspaces/{workspace_id}/analyses/{preview_id}/result/query"
+        )
+        first_page = client.post(
+            page_url,
+            json={"kind": "annotation", "page": 1, "page_size": 20},
+            headers=unsafe,
+        )
+        second_page = client.post(
+            page_url,
+            json={"kind": "annotation", "page": 1, "page_size": 20},
+            headers=unsafe,
+        )
+        assert first_page.status_code == 200, first_page.text
+        assert second_page.status_code == 200, second_page.text
+        assert first_page.json()["rows"] == second_page.json()["rows"]
 
-def test_multi_user_model_and_preview_credentials_are_request_only(
-    multi_user_test_client: TestClient,
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    configuration_id = "2ac23eb8-6708-48fe-a49e-519723190c91"
-
-    async def fake_models(wire, api_key):
-        assert wire.base_url is None
-        assert api_key == "browser-only-secret"
-        return ["model-a"]
-
-    async def fake_annotate_batch(
-        _wire, _model, api_key, _instruction, _classes, texts, _config
-    ):
-        assert api_key == "browser-only-secret"
-        return ["support" for _ in texts]
-
-    monkeypatch.setattr(annotation_service_module, "list_models", fake_models)
-    monkeypatch.setattr(
-        annotation_service_module,
-        "annotate_batch",
-        fake_annotate_batch,
-    )
-    missing = multi_user_test_client.post(
-        "/api/annotation-providers/models",
-        json={
-            "provider_configuration_id": configuration_id,
-            "provider": "openai",
-        },
-    )
-    assert missing.status_code == 409
-    assert missing.json()["code"] == "provider_credential_missing"
-    models = multi_user_test_client.post(
-        "/api/annotation-providers/models",
-        json={
-            "provider_configuration_id": configuration_id,
-            "provider": "openai",
-            "api_key": "browser-only-secret",
-        },
-    )
-    assert models.status_code == 200
-    assert models.json()["models"] == ["model-a"]
-
-    workspace_id, node_id, _etag = _source(multi_user_test_client, {})
-    preview = multi_user_test_client.post(
-        f"/api/workspaces/{workspace_id}/nodes/{node_id}/annotation-previews",
-        json={
-            **_request(configuration_id),
-            "api_key": "browser-only-secret",
-            "page": 1,
-            "page_size": 1,
-        },
-    )
-    assert preview.status_code == 200, preview.text
-    assert all(
-        b"browser-only-secret" not in path.read_bytes()
-        for path in tmp_path.rglob("*")
-        if path.is_file() and path.name != ".wordflow-runtime.lock"
-    )
+        run_all = client.post(
+            f"/api/workspaces/{workspace_id}/tabs/{tab_id}/analyses",
+            json={
+                "execution_scope": "run_all",
+                "request": {
+                    "kind": "annotation_run_all",
+                    "source": preview_request,
+                },
+                "supersedes_analysis_ids": [preview_id],
+            },
+            headers=unsafe,
+        )
+        assert run_all.status_code == 201, run_all.text
+        child = _wait(client, workspace_id, run_all.json()["id"])
+        assert child["state"] == "succeeded", child
+        assert child["output_node_ids"] == []

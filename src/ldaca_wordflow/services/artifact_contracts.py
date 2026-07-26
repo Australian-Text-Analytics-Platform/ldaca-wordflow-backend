@@ -7,6 +7,8 @@ from collections.abc import Callable
 from pydantic import BaseModel
 
 from ..models.analysis_results import (
+    ConcordanceRunAllWorkerResult,
+    QuotationRunAllWorkerResult,
     SequentialWorkerResult,
     TokenFrequencyWorkerResult,
     TopicModelingWorkerResult,
@@ -64,12 +66,26 @@ def topic_modeling_artifacts(result: BaseModel) -> list[ArtifactProjection]:
     ]
 
 
+def concordance_run_all_artifacts(
+    result: BaseModel,
+) -> list[ArtifactProjection]:
+    value = ConcordanceRunAllWorkerResult.model_validate(result)
+    return [(("source", "table", "artifact"), value.source.table.artifact)]
+
+
+def quotation_run_all_artifacts(result: BaseModel) -> list[ArtifactProjection]:
+    value = QuotationRunAllWorkerResult.model_validate(result)
+    return [(("source", "table", "artifact"), value.source.table.artifact)]
+
+
 ANALYSIS_ARTIFACT_PROJECTORS: dict[str, ArtifactProjector] = {
     "token_frequency": token_frequency_artifacts,
     "topic_modeling": topic_modeling_artifacts,
     "concordance": no_artifacts,
     "quotation": no_artifacts,
     "sequential": sequential_artifacts,
+    "concordance_run_all": concordance_run_all_artifacts,
+    "quotation_run_all": quotation_run_all_artifacts,
 }
 
 

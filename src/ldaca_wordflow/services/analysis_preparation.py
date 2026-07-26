@@ -10,40 +10,40 @@ from pathlib import Path
 import anyio
 from anyio.to_thread import run_sync as run_sync_in_worker_thread
 
-from ..analysis.generated_columns import (
-    CONC_EXTRACTION_COLUMN,
-    DETACHABLE_CONCORDANCE_COLUMNS,
-    QUOTE_COLUMN_NAMES,
-    QUOTE_EXTRACTION_COLUMN,
-)
 from ..analysis.request_normalization import sanitize_stop_words
 from ..analysis.token_cache import tokens_cache_path
 from ..domain.workspace import (
     AnalysisRecord,
     AnnotationAnalysisRequest,
-    ConcordanceDetachmentAnalysisRequest,
-    ConcordanceDispersionDetachmentAnalysisRequest,
+    AnnotationRunAllAnalysisRequest,
     ConcordanceAnalysisRequest,
+    ConcordanceResultPublicationAnalysisRequest,
+    ConcordanceRunAllAnalysisRequest,
     QuotationAnalysisRequest,
-    QuotationDetachmentAnalysisRequest,
+    QuotationResultPublicationAnalysisRequest,
+    QuotationRunAllAnalysisRequest,
     SequentialAnalysisRequest,
     TokenFrequencyAnalysisRequest,
     TopicModelingAnalysisRequest,
     TopicModelingDetachmentAnalysisRequest,
     Workspace,
+    analysis_input_ids,
 )
 from ..infrastructure.storage.embedding_cache import embeddings_cache_path
 from ..models.quotation import QuotationEngineType, ResolvedQuotationEngine
-from ..models.analysis_results import TopicModelingStoredResult
+from ..models.analysis_results import (
+    ConcordanceRunAllStoredResult,
+    QuotationRunAllStoredResult,
+    TopicModelingStoredResult,
+)
 from ..settings import Settings
 from ..shared.errors import InvalidInputError
 from ..workers.entrypoints import (
     annotation_process,
-    concordance_process,
-    concordance_detachment_process,
-    concordance_dispersion_detachment_process,
-    quotation_process,
-    quotation_detachment_process,
+    concordance_run_all_process,
+    preview_ready_process,
+    quotation_run_all_process,
+    result_publication_process,
     sequential_process,
     token_frequency_process,
     topic_modeling_process,
@@ -80,7 +80,7 @@ class AnalysisExecutionPreparer:
 
         analysis_id = str(record.id)
         workspace = lease.workspace
-        node_ids = _request_node_ids(record)
+        node_ids = _request_node_ids(record, workspace)
         analysis_dir = lease.path / "analyses" / analysis_id
         execution_dir = analysis_dir / ".execution"
         snapshot_dir = execution_dir / "input"
@@ -154,16 +154,9 @@ class AnalysisExecutionPreparer:
             )
 
         if isinstance(request, AnnotationAnalysisRequest):
-            if credential is None and request.provider != "custom":
-                raise InvalidInputError("Annotation credential is unavailable")
             return owned(
-                annotation_process,
-                {
-                    "input_snapshot_dir": str(snapshot_dir),
-                    "output_dir": str(artifact_dir),
-                    "request_payload": request.model_dump(mode="json"),
-                    "api_key": credential,
-                },
+                preview_ready_process,
+                {},
             )
 
         if isinstance(request, TokenFrequencyAnalysisRequest):
@@ -219,33 +212,15 @@ class AnalysisExecutionPreparer:
             )
 
         if isinstance(request, ConcordanceAnalysisRequest):
-            payload = request.model_dump(mode="json", exclude={"kind"})
             return owned(
-                concordance_process,
-                {
-                    **common,
-                    "request_payload": payload,
-                    "token_cache_path": str(
-                        tokens_cache_path(self._cache_root(user_id))
-                    ),
-                },
+                preview_ready_process,
+                {},
             )
 
         if isinstance(request, QuotationAnalysisRequest):
-            payload = request.model_dump(mode="json", exclude={"kind", "node_id"})
-            payload["engine"] = resolve_analysis_quotation_engine(
-                request,
-                self._settings,
-            ).model_dump(mode="json")
             return owned(
-                quotation_process,
-                {
-                    **common,
-                    "node_id": str(request.node_id),
-                    "request_payload": payload,
-                    "quotation_service_max_batch_size": self._settings.quotation_service_max_batch_size,
-                    "quotation_service_timeout": self._settings.quotation_service_timeout,
-                },
+                preview_ready_process,
+                {},
             )
 
         if isinstance(request, SequentialAnalysisRequest):
@@ -303,67 +278,123 @@ class AnalysisExecutionPreparer:
                     ],
                 },
             )
-        if isinstance(request, ConcordanceDetachmentAnalysisRequest) and isinstance(
-            parent_request,
-            ConcordanceAnalysisRequest,
-        ):
-            source = parent_request
-            column = source.node_columns[request.node_id]
-            generated = [
-                item
-                for item in request.selected_columns
-                if item in DETACHABLE_CONCORDANCE_COLUMNS
-            ]
-            return owned(
-                concordance_detachment_process,
-                {
-                    "workspace_dir": str(artifact_dir),
-                    "input_snapshot_dir": str(snapshot_dir),
-                    "parent_node_id": str(request.node_id),
-                    "document_column": column,
-                    "search_word": source.search_word,
-                    "num_left_tokens": source.num_left_tokens,
-                    "num_right_tokens": source.num_right_tokens,
-                    "regex": source.regex,
-                    "whole_word": source.whole_word,
-                    "case_sensitive": source.case_sensitive,
-                    "search_mode": source.search_mode,
-                    "tokenizer_model": source.node_tokenizer_models.get(
-                        request.node_id
-                    ),
-                    "new_node_name": request.name
-                    or f"Concordance {str(request.node_id)[:8]}",
-                    "include_document_column": column in request.selected_columns,
-                    "include_extraction": (
-                        CONC_EXTRACTION_COLUMN in request.selected_columns
-                    ),
-                    "selected_generated_columns": generated,
-                    "extra_column_names": _metadata_columns(
-                        request.selected_columns,
-                        column,
-                        {*DETACHABLE_CONCORDANCE_COLUMNS, CONC_EXTRACTION_COLUMN},
-                    ),
-                    "token_cache_path": str(
-                        tokens_cache_path(self._cache_root(user_id))
-                    ),
-                },
-            )
-
         if isinstance(
             request,
-            ConcordanceDispersionDetachmentAnalysisRequest,
-        ) and isinstance(
-            parent_request,
-            ConcordanceAnalysisRequest,
+            (
+                ConcordanceResultPublicationAnalysisRequest,
+                QuotationResultPublicationAnalysisRequest,
+            ),
         ):
-            source = parent_request
-            column = source.node_columns[request.node_id]
+            if parent is None or parent.result_payload is None:
+                raise InvalidInputError("Run All Result is unavailable")
+            selections = (
+                request.sources
+                if isinstance(request, ConcordanceResultPublicationAnalysisRequest)
+                else [request.source]
+            )
+            result_paths: dict[str, str] = {}
+            document_columns: dict[str, str] = {}
+            if isinstance(request, ConcordanceResultPublicationAnalysisRequest):
+                if not isinstance(parent_request, ConcordanceRunAllAnalysisRequest):
+                    raise InvalidInputError(
+                        "Concordance Result Publication parent is invalid"
+                    )
+                group = ConcordanceRunAllStoredResult.model_validate(
+                    parent.result_payload
+                )
+                if group.result_type != "group" or group.sources is None:
+                    raise InvalidInputError("Concordance Run All Result is unavailable")
+                descriptors = {item.node_id: item for item in group.sources}
+                for selection in selections:
+                    descriptor = descriptors.get(selection.source_node_id)
+                    if descriptor is None:
+                        raise InvalidInputError(
+                            "Result Publication source is unavailable"
+                        )
+                    child = workspace.analyses.get(str(descriptor.analysis_id))
+                    if child is None or child.result_payload is None:
+                        raise InvalidInputError(
+                            "Concordance source Result is unavailable"
+                        )
+                    child_result = ConcordanceRunAllStoredResult.model_validate(
+                        child.result_payload
+                    )
+                    if child_result.source is None:
+                        raise InvalidInputError(
+                            "Concordance source Result is unavailable"
+                        )
+                    _validate_publication_columns(
+                        selection.selected_columns,
+                        child_result.source,
+                    )
+                    result_paths[str(selection.source_node_id)] = str(
+                        _analysis_artifact_path(
+                            workspace_path,
+                            child,
+                            child_result.source.table.artifact.name,
+                        )
+                    )
+                    document_columns[str(selection.source_node_id)] = (
+                        descriptor.document_column
+                    )
+            else:
+                if not isinstance(parent_request, QuotationRunAllAnalysisRequest):
+                    raise InvalidInputError(
+                        "Quotation Result Publication parent is invalid"
+                    )
+                stored = QuotationRunAllStoredResult.model_validate(
+                    parent.result_payload
+                )
+                selection = selections[0]
+                if selection.source_node_id != stored.source.node_id:
+                    raise InvalidInputError("Result Publication source is unavailable")
+                _validate_publication_columns(
+                    selection.selected_columns,
+                    stored.source,
+                )
+                result_paths[str(selection.source_node_id)] = str(
+                    _analysis_artifact_path(
+                        workspace_path,
+                        parent,
+                        stored.source.table.artifact.name,
+                    )
+                )
+                document_columns[str(selection.source_node_id)] = (
+                    stored.source.document_column
+                )
             return owned(
-                concordance_dispersion_detachment_process,
+                result_publication_process,
                 {
-                    "workspace_dir": str(artifact_dir),
+                    "artifact_dir": str(artifact_dir),
+                    "request_payload": request.model_dump(mode="json"),
+                    "result_paths": result_paths,
+                    "document_columns": document_columns,
+                    "source_colors": {
+                        str(selection.source_node_id): descriptors[
+                            selection.source_node_id
+                        ].color
+                        for selection in selections
+                    }
+                    if isinstance(request, ConcordanceResultPublicationAnalysisRequest)
+                    else {
+                        str(selections[0].source_node_id): stored.source.color
+                    },
+                },
+            )
+        if isinstance(request, ConcordanceRunAllAnalysisRequest):
+            source = request.source
+            if len(source.node_ids) != 1:
+                raise InvalidInputError(
+                    "A Concordance supporting Analysis requires one source"
+                )
+            node_id = source.node_ids[0]
+            column = source.node_columns[node_id]
+            return owned(
+                concordance_run_all_process,
+                {
+                    "artifact_dir": str(artifact_dir),
                     "input_snapshot_dir": str(snapshot_dir),
-                    "parent_node_id": str(request.node_id),
+                    "parent_node_id": str(node_id),
                     "document_column": column,
                     "search_word": source.search_word,
                     "num_left_tokens": source.num_left_tokens,
@@ -373,40 +404,22 @@ class AnalysisExecutionPreparer:
                     "case_sensitive": source.case_sensitive,
                     "search_mode": source.search_mode,
                     "tokenizer_model": source.node_tokenizer_models.get(
-                        request.node_id
+                        node_id
                     ),
-                    "new_node_name": request.name
-                    or f"Concordance dispersion {str(request.node_id)[:8]}",
-                    "include_document_column": column in request.selected_columns,
-                    "extra_column_names": _metadata_columns(
-                        request.selected_columns,
-                        column,
-                        {*DETACHABLE_CONCORDANCE_COLUMNS, CONC_EXTRACTION_COLUMN},
-                    ),
-                    "selected_bins": request.selected_bins,
-                    "total_bins": request.total_bins,
-                    "selected_matched_texts": request.selected_matched_texts,
-                    "match_case_insensitive": request.match_case_insensitive,
                     "token_cache_path": str(
                         tokens_cache_path(self._cache_root(user_id))
                     ),
                 },
             )
 
-        if isinstance(request, QuotationDetachmentAnalysisRequest) and isinstance(
-            parent_request,
-            QuotationAnalysisRequest,
-        ):
-            source = parent_request
-            generated = [
-                item for item in request.selected_columns if item in QUOTE_COLUMN_NAMES
-            ]
+        if isinstance(request, QuotationRunAllAnalysisRequest):
+            source = request.source
             return owned(
-                quotation_detachment_process,
+                quotation_run_all_process,
                 {
-                    "workspace_dir": str(artifact_dir),
+                    "artifact_dir": str(artifact_dir),
                     "input_snapshot_dir": str(snapshot_dir),
-                    "parent_node_id": str(request.node_id),
+                    "parent_node_id": str(source.node_id),
                     "document_column": source.column,
                     "engine": resolve_analysis_quotation_engine(
                         source,
@@ -418,50 +431,71 @@ class AnalysisExecutionPreparer:
                     "quotation_service_timeout": (
                         self._settings.quotation_service_timeout
                     ),
-                    "new_node_name": request.name
-                    or f"Quotations {str(request.node_id)[:8]}",
-                    "include_document_column": (
-                        source.column in request.selected_columns
-                    ),
-                    "include_extraction": (
-                        QUOTE_EXTRACTION_COLUMN in request.selected_columns
-                    ),
-                    "selected_generated_columns": generated,
-                    "extra_column_names": _metadata_columns(
-                        request.selected_columns,
-                        source.column,
-                        {*QUOTE_COLUMN_NAMES, QUOTE_EXTRACTION_COLUMN},
-                    ),
+                },
+            )
+        if isinstance(request, AnnotationRunAllAnalysisRequest):
+            source = request.source
+            if credential is None and source.provider != "custom":
+                raise InvalidInputError("Annotation credential is unavailable")
+            return owned(
+                annotation_process,
+                {
+                    "input_snapshot_dir": str(snapshot_dir),
+                    "output_dir": str(artifact_dir),
+                    "request_payload": source.model_dump(mode="json"),
+                    "api_key": credential,
+                    "correction_column": request.correction_column,
                 },
             )
         raise InvalidInputError("Analysis kind has no process implementation")
 
 
-def _request_node_ids(record: AnalysisRecord) -> list[str]:
+def _request_node_ids(record: AnalysisRecord, workspace: Workspace) -> list[str]:
     request = record.request
-    if isinstance(
-        request,
+    if isinstance(request, AnnotationRunAllAnalysisRequest):
+        return [
+            str(node_id)
+            for node_id in analysis_input_ids(request.source)
+            if node_id != request.source.class_node_id
+        ]
+    return [str(node_id) for node_id in analysis_input_ids(request)]
+
+
+def _analysis_artifact_path(
+    workspace_path: Path,
+    record: AnalysisRecord,
+    artifact_name: str,
+) -> Path:
+    reference = next(
         (
-            TokenFrequencyAnalysisRequest,
-            TopicModelingAnalysisRequest,
-            ConcordanceAnalysisRequest,
-            TopicModelingDetachmentAnalysisRequest,
+            item
+            for item in record.artifact_references
+            if item.name == artifact_name
         ),
-    ):
-        return [str(node_id) for node_id in request.node_ids]
-    return [str(request.node_id)]
+        None,
+    )
+    if reference is None:
+        raise InvalidInputError("Run All Result artifact is unavailable")
+    return (
+        workspace_path
+        / "analyses"
+        / str(record.id)
+        / reference.relative_path
+    ).resolve(strict=True)
 
 
-def _metadata_columns(
-    selected: list[str],
-    document_column: str,
-    generated: set[str],
-) -> list[str]:
-    return [
-        column
-        for column in selected
-        if column != document_column and column not in generated
-    ]
+def _validate_publication_columns(
+    selected_columns: list[str],
+    source: object,
+) -> None:
+    document_column = getattr(source, "document_column")
+    metadata_columns = getattr(source, "metadata_columns")
+    analysis_columns = getattr(source, "analysis_columns")
+    allowed = {document_column, *metadata_columns, *analysis_columns}
+    if document_column not in selected_columns:
+        raise InvalidInputError("Result Publication requires the document column")
+    if any(column not in allowed for column in selected_columns):
+        raise InvalidInputError("Result Publication column is unavailable")
 
 
 def _remove_execution_staging(path: Path) -> None:

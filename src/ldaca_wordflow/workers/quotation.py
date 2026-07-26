@@ -12,6 +12,7 @@ Flow: normalize source text, run local or remote quotation extraction, preserve
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any, Callable
 
 from ..analysis.generated_columns import (
@@ -19,12 +20,7 @@ from ..analysis.generated_columns import (
     QUOTE_EXTRACTION_COLUMN,
     QUOTE_QUOTE_COLUMN,
 )
-from ..domain.workspace import (
-    DerivationInput,
-    DerivationProvenance,
-    QuotationDetachmentDerivation,
-    node_reference,
-)
+from .concordance import SOURCE_ROW_ID_COLUMN
 from .utils import process_entrypoint
 
 logger = logging.getLogger(__name__)
@@ -37,7 +33,12 @@ def _collect_quotation_source_from_snapshot(
     document_column: str,
     extra_column_names: list[str] | None,
     include_all_metadata: bool = False,
-) -> tuple[list[str], dict[str, list] | None, dict[str, Any] | None]:
+) -> tuple[
+    list[str],
+    dict[str, list] | None,
+    dict[str, Any] | None,
+    list[int],
+]:
     """Collect quotation source rows inside the worker process.
 
     Used by:
@@ -56,6 +57,9 @@ def _collect_quotation_source_from_snapshot(
     snapshot_node = load_snapshot_node(input_snapshot_dir, node_id)
     node_data = snapshot_node.data
     schema_names = list(node_data.collect_schema().names())
+    if SOURCE_ROW_ID_COLUMN in schema_names:
+        raise ValueError(f"Source column name is reserved: {SOURCE_ROW_ID_COLUMN}")
+    node_data = node_data.with_row_index(SOURCE_ROW_ID_COLUMN)
     if include_all_metadata:
         metadata_columns = [
             column
@@ -67,7 +71,11 @@ def _collect_quotation_source_from_snapshot(
 
     corpus_df = (
         node_data.select(
-            [pl.col(document_column)] + [pl.col(c) for c in metadata_columns]
+            [
+                pl.col(SOURCE_ROW_ID_COLUMN),
+                pl.col(document_column),
+                *[pl.col(c) for c in metadata_columns],
+            ]
         )
         .filter(
             pl.col(document_column)
@@ -84,7 +92,15 @@ def _collect_quotation_source_from_snapshot(
         for value in corpus_df.get_column(document_column).to_list()
     ]
     if not metadata_columns:
-        return node_corpus, None, None
+        return (
+            node_corpus,
+            None,
+            None,
+            [
+                int(value)
+                for value in corpus_df.get_column(SOURCE_ROW_ID_COLUMN).to_list()
+            ],
+        )
 
     extra_columns_data: dict[str, list] = {}
     extra_columns_dtypes: dict[str, Any] = {}
@@ -92,96 +108,15 @@ def _collect_quotation_source_from_snapshot(
         series = corpus_df.get_column(column)
         extra_columns_data[column] = series.to_list()
         extra_columns_dtypes[column] = series.dtype
-    return node_corpus, extra_columns_data, extra_columns_dtypes
-
-
-@process_entrypoint
-def run_quotation_analysis(
-    user_id: str,
-    workspace_id: str,
-    input_snapshot_dir: str,
-    node_id: str,
-    request_payload: dict[str, Any],
-    quotation_service_max_batch_size: int,
-    quotation_service_timeout: float,
-    progress_callback: Callable[[float, str], None] | None = None,
-) -> dict[str, Any]:
-    """Execute the primary quotation analysis in a worker process.
-
-    Used by:
-    - canonical quotation Analysis execution because submission must not run
-      quotation extraction or page collection on the event loop.
-
-    Flow: load the snapshotted node plan, reuse
-    the quotation page builder, and return the persisted Analysis result payload.
-    """
-
-    try:
-        if progress_callback:
-            progress_callback(0.1, "Loading quotation input...")
-
-        import asyncio
-
-        from ..analysis.quotation_core import compute_quotation_page
-        from ..infrastructure.providers.quotation_client import (
-            QuotationProviderClient,
-            QuotationServiceError,
-        )
-        from ..models.quotation import QuotationEngineType, ResolvedQuotationEngine
-        from .input_snapshots import load_snapshot_node
-
-        snapshot_node = load_snapshot_node(input_snapshot_dir, node_id)
-        node = snapshot_node.to_node()
-        engine_payload = request_payload.get("engine") or {}
-        engine = ResolvedQuotationEngine.model_validate(engine_payload)
-
-        async def run() -> dict[str, Any]:
-            async def run_inline(function, *args):
-                return function(*args)
-
-            client = (
-                QuotationProviderClient(
-                    default_timeout=quotation_service_timeout,
-                )
-                if engine.type is QuotationEngineType.REMOTE
-                else None
-            )
-
-            async def extract_remote(*args, **kwargs):
-                if client is None:
-                    raise QuotationServiceError(
-                        "Remote extraction requested for a local Analysis"
-                    )
-                return await client.extract(*args, **kwargs)
-
-            try:
-                return await compute_quotation_page(
-                    node,
-                    str(request_payload["column"]),
-                    engine,
-                    page=int(request_payload.get("page") or 1),
-                    page_size=request_payload.get("page_size"),
-                    sort_by=request_payload.get("sort_by"),
-                    descending=bool(request_payload.get("descending", False)),
-                    quotation_service_max_batch_size=quotation_service_max_batch_size,
-                    quotation_service_timeout=quotation_service_timeout,
-                    extract_remote_fn=extract_remote,
-                    run_blocking=run_inline,
-                )
-            finally:
-                if client is not None:
-                    await client.close()
-
-        page_payload = asyncio.run(run())
-        return page_payload
-    except Exception:
-        logger.exception(
-            "Quotation Analysis failed for user=%s workspace=%s node=%s",
-            user_id,
-            workspace_id,
-            node_id,
-        )
-        raise
+    return (
+        node_corpus,
+        extra_columns_data,
+        extra_columns_dtypes,
+        [
+            int(value)
+            for value in corpus_df.get_column(SOURCE_ROW_ID_COLUMN).to_list()
+        ],
+    )
 
 
 def _build_quotation_occurrence_dataframe(
@@ -194,7 +129,7 @@ def _build_quotation_occurrence_dataframe(
     """Extract quotation occurrences from a corpus. Returns (df, output_columns).
 
     Called by:
-    - quotation detachment child Analyses that recompute a complete published
+    - Quotation Run All Analyses that recompute a complete published
       Data Block from their immutable request and snapshot.
 
     Flow: normalize source text, run local or remote quotation extraction, preserve
@@ -214,7 +149,7 @@ def _build_quotation_occurrence_dataframe(
     source_column_name = "__quotation_source__"
     data: dict[str, list] = {source_column_name: filtered_corpus}
     # `QUOTE_extraction` is the per-quote-row copy of the raw source document
-    # text — exposed under a canonical name so callers (table view, detach)
+    # text — exposed under a canonical name so callers (Preview and Run All)
     # can refer to it without needing to know the user's source column name.
     # Carry it through extraction so each quote retains its source text. The
     # child worker omits it from the published Data Block when not requested.
@@ -261,22 +196,17 @@ def _build_quotation_occurrence_dataframe(
 
 
 @process_entrypoint
-def run_quotation_detachment(
-    workspace_dir: str,
+def run_quotation_run_all(
+    artifact_dir: str,
     input_snapshot_dir: str,
     parent_node_id: str,
     document_column: str,
     engine: dict[str, Any],
     quotation_service_max_batch_size: int,
     quotation_service_timeout: float,
-    new_node_name: str,
-    include_document_column: bool = False,
-    include_extraction: bool = False,
-    selected_generated_columns: list[str] | None = None,
-    extra_column_names: list[str] | None = None,
     progress_callback: Callable[[float, str], None] | None = None,
 ) -> dict[str, Any]:
-    """Recompute a complete local or remote quotation selection."""
+    """Compute one complete immutable Quotation Result table."""
     try:
         if progress_callback:
             progress_callback(0.02, "Loading quotation extractor...")
@@ -294,26 +224,28 @@ def run_quotation_detachment(
             QuotationProviderClient,
             QuotationServiceError,
         )
-        from ..infrastructure.storage.node_store import write_detached_frame
         from ..models.quotation import QuotationEngineType, ResolvedQuotationEngine
         from .input_snapshots import load_snapshot_node
 
-        logger.info("[Worker %d] Starting quotation detachment", os.getpid())
+        logger.info("[Worker %d] Starting quotation Run All", os.getpid())
+        source_snapshot = load_snapshot_node(input_snapshot_dir, parent_node_id)
 
         if progress_callback:
             progress_callback(0.2, "Preparing text data...")
-        node_corpus, extra_columns_data, extra_columns_dtypes = (
+        node_corpus, extra_columns_data, extra_columns_dtypes, source_row_ids = (
             _collect_quotation_source_from_snapshot(
                 input_snapshot_dir=input_snapshot_dir,
                 node_id=parent_node_id,
                 document_column=document_column,
-                extra_column_names=extra_column_names,
+                extra_column_names=None,
+                include_all_metadata=True,
             )
         )
         if progress_callback:
             progress_callback(0.6, "Extracting quotations...")
 
         input_data: dict[str, list] = {
+            SOURCE_ROW_ID_COLUMN: source_row_ids,
             document_column: node_corpus,
             QUOTE_EXTRACTION_COLUMN: node_corpus,
         }
@@ -327,7 +259,7 @@ def run_quotation_detachment(
                     for column, dtype in extra_columns_dtypes.items()
                 ]
             )
-        snapshot_node = load_snapshot_node(input_snapshot_dir, parent_node_id).to_node()
+        snapshot_node = source_snapshot.to_node()
         engine_config = ResolvedQuotationEngine.model_validate(engine)
 
         async def extract() -> pl.DataFrame:
@@ -367,63 +299,51 @@ def run_quotation_detachment(
         quote_df = asyncio.run(extract())
         output_columns = list(quote_df.columns)
 
-        # Final projection honoring the user's column choice. Generated quote
-        # columns are kept only when ticked; QUOTE_extraction stays opt-in; the
-        # document column and metadata columns pass through.
-        generated_set = set(QUOTE_COLUMN_NAMES)
-        wanted_generated = set(selected_generated_columns or [])
-        keep_columns: list[str] = []
-        for col in output_columns:
-            if col in generated_set:
-                if col in wanted_generated:
-                    keep_columns.append(col)
-            elif col == QUOTE_EXTRACTION_COLUMN:
-                if include_extraction:
-                    keep_columns.append(col)
-            elif col == document_column:
-                if include_document_column:
-                    keep_columns.append(col)
-            else:
-                keep_columns.append(col)
-        if keep_columns and keep_columns != output_columns:
-            quote_df = quote_df.select(keep_columns)
-            output_columns = keep_columns
+        if progress_callback:
+            progress_callback(0.82, "Serializing quotation Result...")
+
+        result_path = Path(artifact_dir) / "quotation-run-all.parquet"
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        quote_df.write_parquet(result_path)
 
         if progress_callback:
-            progress_callback(0.82, "Serializing detached data block...")
-
-        node_payload = write_detached_frame(
-            quote_df,
-            base_dir=workspace_dir,
-            name=new_node_name,
-            provenance=DerivationProvenance(
-                operation=QuotationDetachmentDerivation(),
-                inputs=[
-                    DerivationInput(
-                        role="source",
-                        value=node_reference(parent_node_id),
-                    )
-                ],
-            ),
-            document=document_column,
-        )
-
-        if progress_callback:
-            progress_callback(0.95, "Publishing quotation Data Block...")
+            progress_callback(0.95, "Saving quotation Result...")
 
         logger.info(
-            "[Worker %d] Quotation detachment completed successfully", os.getpid()
+            "[Worker %d] Quotation Run All completed successfully", os.getpid()
         )
 
         return {
             "state": "successful",
-            "result": {
-                **node_payload,
-                "output_columns": output_columns,
+            "source": {
+                "node_id": parent_node_id,
+                "node_name": source_snapshot.name,
+                "color": source_snapshot.color,
+                "document_column": document_column,
+                "metadata_columns": [
+                    column
+                    for column in output_columns
+                    if column
+                    not in {
+                        SOURCE_ROW_ID_COLUMN,
+                        document_column,
+                        QUOTE_EXTRACTION_COLUMN,
+                        *QUOTE_COLUMN_NAMES,
+                    }
+                ],
+                "analysis_columns": [
+                    QUOTE_EXTRACTION_COLUMN,
+                    *QUOTE_COLUMN_NAMES,
+                ],
+                "internal_columns": [SOURCE_ROW_ID_COLUMN],
+                "table": {
+                    "table_id": "quotation-run-all",
+                    "artifact": str(result_path),
+                },
                 "record_count": int(quote_df.height),
             },
-            "message": "Quotation detach completed successfully",
+            "message": "Quotation Run All completed successfully",
         }
     except Exception:
-        logger.exception("Quotation detachment failed")
+        logger.exception("Quotation Run All failed")
         raise

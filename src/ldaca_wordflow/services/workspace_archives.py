@@ -790,12 +790,22 @@ def _compile_materialized_archive(
                 max_snapshot_bytes=workspace_store.max_snapshot_bytes,
             )
             shutil.rmtree(query_data_root)
-        for archived in manifest.analyses:
-            if archived.record.parent_analysis_id is None:
-                workspace.add_analysis(archived.record.model_copy(deep=True))
-        for archived in manifest.analyses:
-            if archived.record.parent_analysis_id is not None:
-                workspace.add_analysis(archived.record.model_copy(deep=True))
+        pending = [archived.record.model_copy(deep=True) for archived in manifest.analyses]
+        while pending:
+            next_pending = []
+            for record in pending:
+                if (
+                    record.parent_analysis_id is not None
+                    and str(record.parent_analysis_id) not in workspace.analyses
+                ):
+                    next_pending.append(record)
+                    continue
+                workspace.add_analysis(record)
+            if len(next_pending) == len(pending):
+                raise InvalidWorkspaceArchiveError(
+                    "Workspace Analysis forest is invalid"
+                )
+            pending = next_pending
         workspace_store.commit(staging, workspace, expected_revision=None)
     except InvalidWorkspaceArchiveError:
         raise
@@ -860,23 +870,29 @@ def _terminal_archive_analyses(workspace: Workspace) -> list[AnalysisRecord]:
         AnalysisState.CANCELLED,
     }
     live_ids = workspace.live_analysis_ids()
-    roots = [
-        record
+    terminal = {
+        analysis_id: record
         for analysis_id, record in workspace.analyses.items()
-        if analysis_id in live_ids
-        and record.parent_analysis_id is None
-        and record.state in terminal_states
-    ]
-    root_ids = {str(record.id) for record in roots}
-    children = [
-        record
-        for analysis_id, record in workspace.analyses.items()
-        if analysis_id in live_ids
-        and record.parent_analysis_id is not None
-        and str(record.parent_analysis_id) in root_ids
-        and record.state in terminal_states
-    ]
-    return [*roots, *children]
+        if analysis_id in live_ids and record.state in terminal_states
+    }
+    ordered: list[AnalysisRecord] = []
+    pending = list(terminal.values())
+    while pending:
+        next_pending = []
+        for record in pending:
+            if (
+                record.parent_analysis_id is not None
+                and str(record.parent_analysis_id) not in {
+                    str(item.id) for item in ordered
+                }
+            ):
+                next_pending.append(record)
+                continue
+            ordered.append(record)
+        if len(next_pending) == len(pending):
+            break
+        pending = next_pending
+    return ordered
 
 
 def _write_export_parquet(
@@ -1009,7 +1025,7 @@ def _create_workspace_export(
         manifest = WorkspaceArchiveManifest.model_validate(
             {
                 "format": "wordflow-materialized-workspace",
-                "version": 6,
+                "version": 9,
                 "workspace": {
                     "id": workspace.id,
                     "name": workspace.name,
@@ -1021,11 +1037,11 @@ def _create_workspace_export(
                 "tabs": [
                     tab.model_copy(
                         update={
-                            "analysis_id": (
-                                tab.analysis_id
-                                if str(tab.analysis_id) in archived_analysis_ids
-                                else None
-                            )
+                            "analysis_ids": [
+                                analysis_id
+                                for analysis_id in tab.analysis_ids
+                                if str(analysis_id) in archived_analysis_ids
+                            ]
                         }
                     ).model_dump(mode="json")
                     for tab in workspace.tabs.values()

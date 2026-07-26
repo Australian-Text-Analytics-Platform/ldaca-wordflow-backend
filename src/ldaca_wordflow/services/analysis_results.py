@@ -24,18 +24,32 @@ from ..analysis.generated_columns import TOPIC_DISTRIBUTION_COLUMN
 from ..domain.workspace import (
     AnalysisArtifactRecord,
     AnalysisRecord,
+    AnnotationAnalysisRequest,
     ConcordanceAnalysisRequest,
     QuotationAnalysisRequest,
 )
 from ..infrastructure.providers.quotation_client import QuotationProviderClient
+from ..infrastructure.providers.annotation_ai import (
+    AnnotationAiError,
+    AnnotationClassOption,
+    AnnotationExample,
+    InferenceConfig,
+    annotate_batch,
+    resolve_provider_wire,
+)
 from ..models.analysis_results import (
     ANALYSIS_STORED_RESULT_MODELS,
     AnalysisResultQuery,
+    AnnotationResultQuery,
+    AnnotationRunAllStoredResult,
     ConcordanceResultQuery,
     ConcordanceStoredResult,
-    DetachmentStoredResult,
+    ConcordanceRunAllStoredResult,
+    PublishedDataBlockStoredResult,
     QuotationResultQuery,
-    QuotationStoredResult,
+    QuotationRunAllStoredResult,
+    PreviewReadyStoredResult,
+    ResultPublicationStoredResult,
     SequentialStoredResult,
     PagedTableIdentity,
     StoredArtifactIdentity,
@@ -50,6 +64,7 @@ from ..shared.errors import (
     AnalysisResultUnavailableError,
     ArtifactGoneError,
     InvalidInputError,
+    BadGatewayError,
     NodeNotFoundError,
 )
 from ..shared.json_data import JsonData
@@ -67,6 +82,7 @@ from ..workers.input_snapshots import (
 from .analyses import AnalysisService
 from .analysis_artifacts import AnalysisArtifactService
 from .analysis_preparation import resolve_analysis_quotation_engine
+from .provider_credentials import ProviderCredentialStore
 from .response_snapshots import ResponseSnapshot
 from .storage_admission import StorageAdmissionService, StorageReservation
 from .workspace import WorkspaceLease
@@ -99,6 +115,7 @@ class AnalysisResultService:
         storage_admission: StorageAdmissionService,
         settings: Settings,
         quotation_client: QuotationProviderClient,
+        credentials: ProviderCredentialStore,
         *,
         query_root: Path,
         cache_root: Callable[[str], Path],
@@ -109,6 +126,7 @@ class AnalysisResultService:
         self._storage_admission = storage_admission
         self._settings = settings
         self._quotation_client = quotation_client
+        self._credentials = credentials
         self._query_root = query_root
         self._cache_root = cache_root
         self._limiter = limiter
@@ -285,7 +303,7 @@ class AnalysisResultService:
                     stored = stored_model.model_validate(record.result_payload)
                 except ValidationError as exc:
                     raise AnalysisCorruptError("Analysis data is corrupt") from exc
-                if isinstance(stored, DetachmentStoredResult):
+                if isinstance(stored, PublishedDataBlockStoredResult):
                     if query is not None:
                         raise AnalysisKindMismatchError(
                             "Child Analysis Results do not accept queries"
@@ -299,7 +317,9 @@ class AnalysisResultService:
                     return ResultMaterialization(payload=payload, stored=stored)
                 if isinstance(
                     stored,
-                    TokenFrequencyStoredResult | SequentialStoredResult,
+                    TokenFrequencyStoredResult
+                    | SequentialStoredResult
+                    | AnnotationRunAllStoredResult,
                 ):
                     if query is not None:
                         raise AnalysisKindMismatchError(
@@ -312,13 +332,31 @@ class AnalysisResultService:
                     )
                     payload["kind"] = kind
                     return ResultMaterialization(payload=payload, stored=stored)
-                if query is None and isinstance(
+                if isinstance(
                     stored,
-                    ConcordanceStoredResult | QuotationStoredResult,
+                    ConcordanceRunAllStoredResult
+                    | QuotationRunAllStoredResult
+                    | ResultPublicationStoredResult,
                 ):
+                    if query is not None:
+                        raise AnalysisKindMismatchError(
+                            "Run All Results do not accept Preview queries"
+                        )
                     await self._artifacts.ensure_available(lease, record)
+                    payload = cast(
+                        dict[str, JsonData],
+                        stored.model_dump(mode="json"),
+                    )
+                    payload["kind"] = kind
+                    return ResultMaterialization(payload=payload, stored=stored)
+                if query is None and isinstance(stored, PreviewReadyStoredResult):
+                    payload = cast(
+                        dict[str, JsonData],
+                        stored.model_dump(mode="json"),
+                    )
+                    payload["kind"] = kind
                     return ResultMaterialization(
-                        payload=_stored_initial_page(stored),
+                        payload=payload,
                         stored=stored,
                     )
                 effective_query = query or _default_query(kind)
@@ -331,7 +369,9 @@ class AnalysisResultService:
 
                 if isinstance(
                     effective_query,
-                    ConcordanceResultQuery | QuotationResultQuery,
+                    ConcordanceResultQuery
+                    | QuotationResultQuery
+                    | AnnotationResultQuery,
                 ):
                     input_snapshot = await self._create_query_snapshot(lease, record)
 
@@ -389,14 +429,29 @@ class AnalysisResultService:
                     extract_remote_fn=self._quotation_client.extract,
                     run_blocking=self._run_sync,
                 )
-                payload = cast(
-                    dict[str, JsonData],
-                    QuotationStoredResult.model_validate(page).model_dump(mode="json"),
-                )
+                payload = cast(dict[str, JsonData], dict(page))
+                payload["ready"] = True
                 payload["kind"] = "quotation"
                 payload["query"] = cast(
                     JsonData,
                     effective_query.model_dump(mode="json"),
+                )
+                return ResultMaterialization(payload=payload, stored=stored)
+            if isinstance(effective_query, AnnotationResultQuery) and isinstance(
+                request,
+                AnnotationAnalysisRequest,
+            ):
+                if input_snapshot is None:
+                    raise RuntimeError("Annotation query input was not prepared")
+                credential = await self._credentials.resolve_annotation_provider(
+                    request,
+                    supplied=effective_query.api_key,
+                )
+                payload = await _query_annotation_snapshot(
+                    input_snapshot.path,
+                    request,
+                    effective_query,
+                    credential,
                 )
                 return ResultMaterialization(payload=payload, stored=stored)
             raise AnalysisKindMismatchError(
@@ -469,39 +524,23 @@ def _default_query(kind: str) -> AnalysisResultQuery:
         return ConcordanceResultQuery()
     if kind == "quotation":
         return QuotationResultQuery()
+    if kind == "annotation":
+        return AnnotationResultQuery()
     raise AnalysisCorruptError("Analysis data is corrupt")
 
-
-def _stored_initial_page(
-    stored: ConcordanceStoredResult | QuotationStoredResult,
-) -> dict[str, JsonData]:
-    payload = cast(dict[str, JsonData], stored.model_dump(mode="json"))
-    if isinstance(stored, ConcordanceStoredResult):
-        page = stored.sources[0].result
-        kind = "concordance"
-        query: AnalysisResultQuery = ConcordanceResultQuery(
-            page=page.pagination.page,
-            page_size=page.pagination.page_size,
-            sort_by=page.sorting.sort_by,
-            descending=page.sorting.descending,
-        )
-    else:
-        kind = "quotation"
-        query = QuotationResultQuery(
-            page=stored.pagination.page,
-            page_size=stored.pagination.page_size,
-            sort_by=stored.sorting.sort_by,
-            descending=stored.sorting.descending,
-        )
-    payload["kind"] = kind
-    payload["query"] = cast(JsonData, query.model_dump(mode="json"))
-    return payload
 
 
 def _paged_table_artifact(
     stored: BaseModel,
     table_id: str,
 ) -> StoredArtifactIdentity:
+    if isinstance(
+        stored,
+        (ConcordanceRunAllStoredResult, QuotationRunAllStoredResult),
+    ):
+        source = stored.source
+        if source is not None and source.table.table_id == table_id:
+            return source.table.artifact
     if isinstance(stored, TopicModelingStoredResult):
         table = next(
             (
@@ -700,6 +739,90 @@ def _query_concordance_snapshot(
     payload["sources"] = sources
     payload["query"] = cast(JsonData, query.model_dump(mode="json"))
     return payload
+
+
+async def _query_annotation_snapshot(
+    snapshot_dir: Path,
+    request: AnnotationAnalysisRequest,
+    query: AnnotationResultQuery,
+    credential: str | None,
+) -> dict[str, JsonData]:
+    source = load_snapshot_node(snapshot_dir, str(request.node_id))
+    schema = source.data.collect_schema()
+    for column in (request.text_column, request.annotation_column):
+        if column not in schema:
+            raise InvalidInputError("Annotation Preview column does not exist")
+    start = (query.page - 1) * query.page_size
+    total_rows = int(source.data.select(pl.len()).collect().item())
+    page = (
+        source.data.select(request.text_column, request.annotation_column)
+        .slice(start, query.page_size)
+        .collect()
+    )
+    texts = [
+        str(value) if value is not None else ""
+        for value in page.get_column(request.text_column).to_list()
+    ]
+    examples: list[AnnotationExample] = []
+    if request.example_node_id is not None:
+        assert request.example_text_column is not None
+        assert request.example_annotation_column is not None
+        example = load_snapshot_node(snapshot_dir, str(request.example_node_id))
+        example_frame = example.data.select(
+            request.example_text_column,
+            request.example_annotation_column,
+        ).collect()
+        for text, label in example_frame.iter_rows():
+            normalized_text = str(text).strip() if text is not None else ""
+            normalized_label = str(label).strip() if label is not None else ""
+            if normalized_text and normalized_label:
+                examples.append(
+                    AnnotationExample(
+                        text=normalized_text,
+                        label=normalized_label,
+                    )
+                )
+    try:
+        labels = await annotate_batch(
+            resolve_provider_wire(request.provider, request.provider_base_url),
+            request.model,
+            credential,
+            request.instruction,
+            [
+                AnnotationClassOption(
+                    name=item.name,
+                    description=item.description,
+                )
+                for item in request.classes
+            ],
+            texts,
+            InferenceConfig(
+                temperature=request.temperature,
+                reasoning_enabled=request.reasoning_enabled,
+                reasoning_effort=request.reasoning_effort,
+            ),
+            examples,
+        )
+    except AnnotationAiError as exc:
+        raise BadGatewayError("Annotation provider request failed") from exc
+    rows = cast(list[dict[str, JsonData]], page.to_dicts())
+    return cast(
+        dict[str, JsonData],
+        {
+            "kind": "annotation",
+            "ready": True,
+            "node_id": str(request.node_id),
+            "page": query.page,
+            "page_size": query.page_size,
+            "total_rows": total_rows,
+            "rows": rows,
+            "labels": [
+                {"row_index": start + offset, "label": label}
+                for offset, label in enumerate(labels)
+            ],
+            "query": query.model_dump(mode="json", exclude={"api_key"}),
+        },
+    )
 
 
 def _remove_query_root(root: Path) -> None:

@@ -95,11 +95,6 @@ EXPECTED_OPERATIONS = {
     ),
     (
         "POST",
-        "/api/workspaces/{workspace_id}/analyses/{analysis_id}/children",
-        "submit_child_analysis",
-    ),
-    (
-        "POST",
         "/api/workspaces/{workspace_id}/analyses/{analysis_id}/cancel",
         "cancel_analysis",
     ),
@@ -163,30 +158,25 @@ EXPECTED_OPERATIONS = {
         "/api/workspaces/{workspace_id}/nodes/{node_id}/redo",
         "redo_node",
     ),
-    (
-        "POST",
-        "/api/workspaces/{workspace_id}/nodes/{node_id}/annotation-previews",
-        "preview_annotation",
-    ),
     ("GET", "/api/workspaces/{workspace_id}/nodes/{node_id}/schema", "get_node_schema"),
     ("GET", "/api/workspaces/{workspace_id}/tabs", "list_tabs"),
     ("POST", "/api/workspaces/{workspace_id}/tabs", "create_tab"),
     ("GET", "/api/workspaces/{workspace_id}/tabs/{tab_id}", "get_tab"),
-    ("PATCH", "/api/workspaces/{workspace_id}/tabs/{tab_id}", "rename_tab"),
+    ("PATCH", "/api/workspaces/{workspace_id}/tabs/{tab_id}", "update_tab"),
     ("DELETE", "/api/workspaces/{workspace_id}/tabs/{tab_id}", "delete_tab"),
     (
         "GET",
-        "/api/workspaces/{workspace_id}/tabs/{tab_id}/analysis",
-        "get_tab_analysis",
+        "/api/workspaces/{workspace_id}/tabs/{tab_id}/analyses",
+        "list_tab_analyses",
     ),
     (
         "POST",
-        "/api/workspaces/{workspace_id}/tabs/{tab_id}/analysis",
+        "/api/workspaces/{workspace_id}/tabs/{tab_id}/analyses",
         "submit_tab_analysis",
     ),
     (
         "DELETE",
-        "/api/workspaces/{workspace_id}/tabs/{tab_id}/analysis",
+        "/api/workspaces/{workspace_id}/tabs/{tab_id}/analyses",
         "clear_tab_analysis",
     ),
     ("GET", "/health", "health_check"),
@@ -251,8 +241,8 @@ def test_transient_provider_secrets_are_write_only_and_absent_from_resources() -
 
     for schema_name, field_name in (
         ("AnnotationModelsRequest", "api_key"),
-        ("AnnotationPreviewRequest", "api_key"),
         ("AnnotationAnalysisSubmission", "api_key"),
+        ("AnnotationRunAllSubmission", "api_key"),
         ("DataPortalFeaturedRequest", "api_token"),
         ("DataPortalSearchRequest", "api_token"),
         ("DataPortalImportSubmitRequest", "api_token"),

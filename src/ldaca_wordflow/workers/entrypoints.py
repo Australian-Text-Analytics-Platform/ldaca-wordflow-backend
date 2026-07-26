@@ -19,6 +19,14 @@ def _progress_callback(progress_queue: Queue[Any]) -> Callable[[float, str], Non
     return report
 
 
+def preview_ready_process(
+    *, progress_queue: Queue[Any], **_kwargs: Any
+) -> dict[str, Any]:
+    """Finish a root Preview after its immutable input snapshot is captured."""
+
+    return {"ready": True}
+
+
 def token_frequency_process(
     *, progress_queue: Queue[Any], **kwargs: Any
 ) -> dict[str, Any]:
@@ -52,23 +60,6 @@ def topic_modeling_detachment_process(
     )
 
 
-def concordance_process(*, progress_queue: Queue[Any], **kwargs: Any) -> dict[str, Any]:
-    from .concordance import run_concordance_analysis
-
-    return run_concordance_analysis(
-        progress_callback=_progress_callback(progress_queue),
-        **kwargs,
-    )
-
-
-def quotation_process(*, progress_queue: Queue[Any], **kwargs: Any) -> dict[str, Any]:
-    from .quotation import run_quotation_analysis
-
-    return run_quotation_analysis(
-        progress_callback=_progress_callback(progress_queue),
-        **kwargs,
-    )
-
 
 def sequential_process(*, progress_queue: Queue[Any], **kwargs: Any) -> dict[str, Any]:
     from .sequential import run_sequential_analysis
@@ -88,36 +79,34 @@ def annotation_process(*, progress_queue: Queue[Any], **kwargs: Any) -> dict[str
     )
 
 
-def concordance_detachment_process(
+def concordance_run_all_process(
     *, progress_queue: Queue[Any], **kwargs: Any
 ) -> dict[str, Any]:
-    from .concordance import run_concordance_detachment
+    from .concordance import run_concordance_run_all
 
-    return run_concordance_detachment(
+    return run_concordance_run_all(
         progress_callback=_progress_callback(progress_queue),
         **kwargs,
     )
 
 
-def concordance_dispersion_detachment_process(
+def quotation_run_all_process(
     *, progress_queue: Queue[Any], **kwargs: Any
 ) -> dict[str, Any]:
-    from .concordance import (
-        run_concordance_dispersion_detachment,
-    )
+    from .quotation import run_quotation_run_all
 
-    return run_concordance_dispersion_detachment(
+    return run_quotation_run_all(
         progress_callback=_progress_callback(progress_queue),
         **kwargs,
     )
 
 
-def quotation_detachment_process(
+def result_publication_process(
     *, progress_queue: Queue[Any], **kwargs: Any
 ) -> dict[str, Any]:
-    from .quotation import run_quotation_detachment
+    from .result_publication import run_result_publication
 
-    return run_quotation_detachment(
+    return run_result_publication(
         progress_callback=_progress_callback(progress_queue),
         **kwargs,
     )

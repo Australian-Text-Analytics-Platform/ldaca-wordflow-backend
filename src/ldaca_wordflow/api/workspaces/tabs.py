@@ -8,7 +8,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Request, Response, Security, status
 
 from ...domain.workspace import Tab
-from ...models.tabs import TabCreate, TabRename
+from ...models.tabs import TabCreate, TabUpdate
 from ...runtime import Runtime, get_runtime
 from ...services.sessions import SessionPrincipal
 from ..responses import api_errors, route_path
@@ -94,16 +94,16 @@ async def get_tab(
     response_model=Tab,
     responses=api_errors(403, 404, 409, 422, 500, 507),
 )
-async def rename_tab(
+async def update_tab(
     workspace_id: uuid.UUID,
     tab_id: uuid.UUID,
-    body: TabRename,
+    body: TabUpdate,
     principal: Annotated[SessionPrincipal, Security(get_current_session)],
     runtime: Runtime = Depends(get_runtime),
 ) -> Tab:
-    """Rename one Tab without changing its immutable function kind."""
+    """Update one Tab without changing its immutable function kind."""
 
-    return await runtime.workspace_service.rename_tab(
+    return await runtime.workspace_service.update_tab(
         principal.user.id,
         str(workspace_id),
         str(tab_id),

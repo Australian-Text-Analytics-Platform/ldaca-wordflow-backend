@@ -36,6 +36,12 @@ NonEmptyText = Annotated[
 AnalysisState = BackgroundState
 
 
+class AnalysisExecutionScope(StrEnum):
+    PREVIEW = "preview"
+    RUN_ALL = "run_all"
+    SUPPORTING = "supporting"
+
+
 class ValidAnalysisIntegrity(_StrictModel):
     status: Literal["valid"] = "valid"
 
@@ -209,19 +215,33 @@ class _AnnotationFields(AnnotationProviderSnapshot):
     node_id: uuid.UUID
     text_column: NonEmptyText = Field(max_length=500)
     annotation_column: NonEmptyText = Field(max_length=500)
+    class_node_id: uuid.UUID
+    class_column: NonEmptyText = Field(max_length=500)
+    description_column: NonEmptyText = Field(max_length=500)
+    example_node_id: uuid.UUID | None = None
+    example_text_column: NonEmptyText | None = Field(default=None, max_length=500)
+    example_annotation_column: NonEmptyText | None = Field(default=None, max_length=500)
     classes: list[AnnotationClass] = Field(min_length=1, max_length=200)
     model: NonEmptyText = Field(max_length=500)
     instruction: NonEmptyText = Field(max_length=20_000)
     temperature: float = Field(default=0.0, ge=0.0, le=2.0, allow_inf_nan=False)
     reasoning_enabled: bool = False
     reasoning_effort: Literal["low", "medium", "high"] = "medium"
-    output_node_name: NonEmptyText = Field(max_length=500)
 
     @model_validator(mode="after")
     def unique_classes(self) -> "_AnnotationFields":
         normalized = [item.name.casefold() for item in self.classes]
         if len(normalized) != len(set(normalized)):
             raise ValueError("Annotation class names must be unique")
+        example_fields = (
+            self.example_node_id,
+            self.example_text_column,
+            self.example_annotation_column,
+        )
+        if any(value is not None for value in example_fields) and any(
+            value is None for value in example_fields
+        ):
+            raise ValueError("Example Data Block fields must be provided together")
         return self
 
 
@@ -245,7 +265,7 @@ class AnnotationAnalysisSubmission(_AnnotationFields):
         )
 
 
-RootAnalysisRequest = Annotated[
+PreviewAnalysisRequest = Annotated[
     TokenFrequencyAnalysisRequest
     | TopicModelingAnalysisRequest
     | ConcordanceAnalysisRequest
@@ -255,7 +275,7 @@ RootAnalysisRequest = Annotated[
     Field(discriminator="kind"),
 ]
 
-AnalysisSubmission = Annotated[
+PreviewAnalysisSubmission = Annotated[
     TokenFrequencyAnalysisRequest
     | TopicModelingAnalysisRequest
     | ConcordanceAnalysisRequest
@@ -266,31 +286,72 @@ AnalysisSubmission = Annotated[
 ]
 
 
-class ConcordanceDetachmentAnalysisRequest(_StrictModel):
-    kind: Literal["concordance_detachment"] = "concordance_detachment"
-    node_id: uuid.UUID
+class ConcordanceRunAllAnalysisRequest(_StrictModel):
+    kind: Literal["concordance_run_all"] = "concordance_run_all"
+    source: ConcordanceAnalysisRequest
+
+
+
+class QuotationRunAllAnalysisRequest(_StrictModel):
+    kind: Literal["quotation_run_all"] = "quotation_run_all"
+    source: QuotationAnalysisRequest
+
+
+class ResultPublicationSource(_StrictModel):
+    """One immutable selection for publishing a successful Analysis Result."""
+
+    source_node_id: uuid.UUID
     selected_columns: list[NonEmptyText] = Field(min_length=1)
-    name: NonEmptyText | None = Field(default=None, max_length=500)
+    new_node_name: NonEmptyText = Field(max_length=500)
+
+    @model_validator(mode="after")
+    def validate_columns(self) -> "ResultPublicationSource":
+        if len(self.selected_columns) != len(set(self.selected_columns)):
+            raise ValueError("Result Publication columns must be unique")
+        return self
 
 
-class ConcordanceDispersionDetachmentAnalysisRequest(_StrictModel):
-    kind: Literal["concordance_dispersion_detachment"] = (
-        "concordance_dispersion_detachment"
+class ConcordanceResultPublicationAnalysisRequest(_StrictModel):
+    kind: Literal["concordance_result_publication"] = (
+        "concordance_result_publication"
     )
-    node_id: uuid.UUID
-    selected_columns: list[NonEmptyText] = Field(min_length=1)
-    selected_bins: list[int] | None = None
-    total_bins: int | None = Field(default=None, ge=1)
-    selected_matched_texts: list[str] | None = None
-    match_case_insensitive: bool = False
-    name: NonEmptyText | None = Field(default=None, max_length=500)
+    sources: list[ResultPublicationSource] = Field(min_length=1, max_length=2)
+
+    @model_validator(mode="after")
+    def validate_sources(self) -> "ConcordanceResultPublicationAnalysisRequest":
+        source_ids = [source.source_node_id for source in self.sources]
+        if len(source_ids) != len(set(source_ids)):
+            raise ValueError("Result Publication source IDs must be unique")
+        return self
 
 
-class QuotationDetachmentAnalysisRequest(_StrictModel):
-    kind: Literal["quotation_detachment"] = "quotation_detachment"
-    node_id: uuid.UUID
-    selected_columns: list[NonEmptyText] = Field(min_length=1)
-    name: NonEmptyText | None = Field(default=None, max_length=500)
+class QuotationResultPublicationAnalysisRequest(_StrictModel):
+    kind: Literal["quotation_result_publication"] = "quotation_result_publication"
+    source: ResultPublicationSource
+
+
+class AnnotationRunAllAnalysisRequest(_StrictModel):
+    kind: Literal["annotation_run_all"] = "annotation_run_all"
+    source: AnnotationAnalysisRequest
+    correction_column: NonEmptyText | None = Field(default=None, max_length=500)
+
+
+class AnnotationRunAllSubmission(_StrictModel):
+    kind: Literal["annotation_run_all"] = "annotation_run_all"
+    source: AnnotationAnalysisRequest
+    correction_column: NonEmptyText | None = Field(default=None, max_length=500)
+    api_key: SecretStr | None = Field(
+        default=None,
+        min_length=1,
+        max_length=4_000,
+        json_schema_extra={"writeOnly": True},
+    )
+
+    def persisted_request(self) -> AnnotationRunAllAnalysisRequest:
+        return AnnotationRunAllAnalysisRequest(
+            source=self.source,
+            correction_column=self.correction_column,
+        )
 
 
 class TopicMeaningOverride(_StrictModel):
@@ -323,24 +384,67 @@ class TopicModelingDetachmentAnalysisRequest(_StrictModel):
         return self
 
 
-ChildAnalysisRequest = Annotated[
-    ConcordanceDetachmentAnalysisRequest
-    | ConcordanceDispersionDetachmentAnalysisRequest
-    | QuotationDetachmentAnalysisRequest
+SupportingAnalysisRequest = Annotated[
+    ConcordanceRunAllAnalysisRequest
+    | QuotationRunAllAnalysisRequest
+    | ConcordanceResultPublicationAnalysisRequest
+    | QuotationResultPublicationAnalysisRequest
+    | AnnotationRunAllAnalysisRequest
     | TopicModelingDetachmentAnalysisRequest,
     Field(discriminator="kind"),
 ]
 
-AnalysisRequest = RootAnalysisRequest | ChildAnalysisRequest
+AnalysisRequest = PreviewAnalysisRequest | SupportingAnalysisRequest
+
+AnalysisSubmission = Annotated[
+    TokenFrequencyAnalysisRequest
+    | TopicModelingAnalysisRequest
+    | ConcordanceAnalysisRequest
+    | QuotationAnalysisRequest
+    | SequentialAnalysisRequest
+    | AnnotationAnalysisSubmission
+    | ConcordanceRunAllAnalysisRequest
+    | QuotationRunAllAnalysisRequest
+    | ConcordanceResultPublicationAnalysisRequest
+    | QuotationResultPublicationAnalysisRequest
+    | AnnotationRunAllSubmission
+    | TopicModelingDetachmentAnalysisRequest,
+    Field(discriminator="kind"),
+]
+
+SupportingAnalysisSubmission = Annotated[
+    ConcordanceRunAllAnalysisRequest
+    | QuotationRunAllAnalysisRequest
+    | ConcordanceResultPublicationAnalysisRequest
+    | QuotationResultPublicationAnalysisRequest
+    | AnnotationRunAllSubmission
+    | TopicModelingDetachmentAnalysisRequest,
+    Field(discriminator="kind"),
+]
 
 
-def persisted_submission(submission: AnalysisSubmission) -> RootAnalysisRequest:
+def persisted_submission(submission: AnalysisSubmission) -> AnalysisRequest:
     if isinstance(submission, AnnotationAnalysisSubmission):
+        return submission.persisted_request()
+    if isinstance(submission, AnnotationRunAllSubmission):
         return submission.persisted_request()
     return submission
 
 
 def analysis_input_ids(request: AnalysisRequest) -> tuple[uuid.UUID, ...]:
+    if isinstance(
+        request,
+        (
+            ConcordanceRunAllAnalysisRequest,
+            QuotationRunAllAnalysisRequest,
+            AnnotationRunAllAnalysisRequest,
+        ),
+    ):
+        return analysis_input_ids(request.source)
+    if isinstance(request, ConcordanceResultPublicationAnalysisRequest):
+        return tuple(source.source_node_id for source in request.sources)
+    if isinstance(request, QuotationResultPublicationAnalysisRequest):
+        return (request.source.source_node_id,)
     if isinstance(
         request,
         (
@@ -351,7 +455,12 @@ def analysis_input_ids(request: AnalysisRequest) -> tuple[uuid.UUID, ...]:
         ),
     ):
         return tuple(request.node_ids)
-    return (request.node_id,)
+    ids = [request.node_id]
+    if isinstance(request, AnnotationAnalysisRequest):
+        ids.append(request.class_node_id)
+        if request.example_node_id is not None:
+            ids.append(request.example_node_id)
+    return tuple(dict.fromkeys(ids))
 
 
 class AnalysisArtifactRecord(_StrictModel):
@@ -370,7 +479,10 @@ class AnalysisQuerySnapshotRecord(_StrictModel):
 
 class _AnalysisLifecycle(_StrictModel):
     id: uuid.UUID
+    tab_id: uuid.UUID
     parent_analysis_id: uuid.UUID | None
+    execution_scope: AnalysisExecutionScope
+    supersedes_analysis_ids: list[uuid.UUID]
     request: AnalysisRequest
     state: AnalysisState
     progress: Progress
@@ -384,17 +496,14 @@ class _AnalysisLifecycle(_StrictModel):
 
     @model_validator(mode="after")
     def validate_lifecycle(self) -> "_AnalysisLifecycle":
-        is_child = isinstance(
-            self.request,
-            (
-                ConcordanceDetachmentAnalysisRequest,
-                ConcordanceDispersionDetachmentAnalysisRequest,
-                QuotationDetachmentAnalysisRequest,
-                TopicModelingDetachmentAnalysisRequest,
-            ),
-        )
-        if is_child != (self.parent_analysis_id is not None):
-            raise ValueError("Only child Analysis requests require a parent")
+        if self.parent_analysis_id == self.id:
+            raise ValueError("An Analysis cannot parent itself")
+        if (
+            self.id in self.supersedes_analysis_ids
+            or len(self.supersedes_analysis_ids)
+            != len(set(self.supersedes_analysis_ids))
+        ):
+            raise ValueError("Superseded Analysis IDs must be distinct")
         terminal = self.state in {
             AnalysisState.SUCCEEDED,
             AnalysisState.FAILED,
@@ -450,7 +559,7 @@ class AnalysisRecord(_AnalysisLifecycle):
             raise ValueError("Only a successful Analysis owns a query snapshot")
         if self.query_snapshot is not None:
             expected = f"analyses/{self.id}/query-input"
-            if self.request.kind not in {"concordance", "quotation"}:
+            if self.request.kind not in {"annotation", "concordance", "quotation"}:
                 raise ValueError("Analysis kind does not support a query snapshot")
             if self.query_snapshot.relative_path != expected:
                 raise ValueError("Analysis query snapshot path is invalid")
@@ -553,13 +662,19 @@ class AnalysisRecord(_AnalysisLifecycle):
         cls,
         request: AnalysisRequest,
         *,
+        tab_id: uuid.UUID,
+        execution_scope: AnalysisExecutionScope,
         timestamp: datetime,
         parent_analysis_id: uuid.UUID | None = None,
+        supersedes_analysis_ids: list[uuid.UUID] | None = None,
         analysis_id: uuid.UUID | None = None,
     ) -> "AnalysisRecord":
         return cls(
             id=analysis_id or uuid.uuid4(),
+            tab_id=tab_id,
             parent_analysis_id=parent_analysis_id,
+            execution_scope=execution_scope,
+            supersedes_analysis_ids=supersedes_analysis_ids or [],
             request=request,
             state=AnalysisState.QUEUED,
             progress=Progress(fraction=0.0, message="Queued"),
@@ -614,16 +729,18 @@ __all__ = [
     "AnalysisArtifactRecord",
     "AnalysisQuerySnapshotRecord",
     "AnalysisIntegrity",
+    "AnalysisExecutionScope",
     "AnalysisRecord",
     "AnalysisRequest",
     "AnalysisState",
     "AnalysisSubmission",
     "AnnotationAnalysisRequest",
     "AnnotationAnalysisSubmission",
-    "ChildAnalysisRequest",
+    "AnnotationRunAllAnalysisRequest",
+    "AnnotationRunAllSubmission",
     "ConcordanceAnalysisRequest",
-    "ConcordanceDetachmentAnalysisRequest",
-    "ConcordanceDispersionDetachmentAnalysisRequest",
+    "ConcordanceResultPublicationAnalysisRequest",
+    "ConcordanceRunAllAnalysisRequest",
     "CorruptAnalysis",
     "Failure",
     "InvalidAnalysisIntegrity",
@@ -631,15 +748,20 @@ __all__ = [
     "QuotationAnalysisRequest",
     "QuotationEngineSelection",
     "QuotationEngineType",
-    "QuotationDetachmentAnalysisRequest",
-    "RootAnalysisRequest",
+    "QuotationRunAllAnalysisRequest",
+    "QuotationResultPublicationAnalysisRequest",
+    "PreviewAnalysisRequest",
+    "PreviewAnalysisSubmission",
     "SequentialAnalysisRequest",
+    "ResultPublicationSource",
     "TokenFrequencyAnalysisRequest",
     "TopicModelingAnalysisRequest",
     "TopicModelingDetachmentAnalysisRequest",
     "TopicMeaningOverride",
     "ValidAnalysisIntegrity",
     "analysis_input_ids",
+    "SupportingAnalysisRequest",
+    "SupportingAnalysisSubmission",
     "persisted_submission",
     "public_analysis",
 ]

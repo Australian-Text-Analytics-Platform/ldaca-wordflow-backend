@@ -86,10 +86,15 @@ class Workspace:
         tab_id = str(tab.id)
         if tab_id in self.tabs:
             raise ValueError(f"Workspace already contains tab {tab_id}")
-        if tab.analysis_id is not None and any(
-            existing.analysis_id == tab.analysis_id for existing in self.tabs.values()
-        ):
-            raise ValueError("A root analysis may belong to only one tab")
+        if len(tab.analysis_ids) != len(set(tab.analysis_ids)):
+            raise ValueError("A Tab cannot contain duplicate Analysis IDs")
+        claimed_ids = {
+            analysis_id
+            for existing in self.tabs.values()
+            for analysis_id in existing.analysis_ids
+        }
+        if claimed_ids.intersection(tab.analysis_ids):
+            raise ValueError("An Analysis may belong to only one Tab")
         self.tabs[tab_id] = tab
         return tab
 
@@ -98,18 +103,28 @@ class Workspace:
 
     # Analysis management --------------------------------------------
 
-    def add_analysis(self, analysis: AnalysisRecord) -> AnalysisRecord:
+    def add_analysis(
+        self,
+        analysis: AnalysisRecord,
+        *,
+        link_to_tab: bool = True,
+    ) -> AnalysisRecord:
         analysis_id = str(analysis.id)
         if (
             analysis_id in self.analyses
             or analysis_id in self._corrupt_analysis_records
         ):
             raise ValueError(f"Workspace already contains analysis {analysis_id}")
+        tab = self.tabs.get(str(analysis.tab_id))
         if analysis.parent_analysis_id is not None:
             parent = self.analyses.get(str(analysis.parent_analysis_id))
-            if parent is None or parent.parent_analysis_id is not None:
-                raise ValueError("A child Analysis requires an existing root parent")
+            if parent is None or parent.tab_id != analysis.tab_id:
+                raise ValueError("A Sub-Analysis requires a parent in the same Tab")
         self.analyses[analysis_id] = analysis
+        if link_to_tab and tab is None:
+            raise ValueError("A live Analysis requires an existing Tab")
+        if link_to_tab and tab is not None and analysis.id not in tab.analysis_ids:
+            tab.analysis_ids.append(analysis.id)
         return analysis
 
     def add_corrupt_analysis(self, analysis_id: str, content: bytes) -> None:
@@ -131,18 +146,27 @@ class Workspace:
         return self._corrupt_analysis_records[analysis_id]
 
     def remove_analysis(self, analysis_id: str) -> AnalysisRecord | bytes | None:
-        analysis = self.analyses.pop(analysis_id, None)
-        if analysis is not None:
-            if analysis.parent_analysis_id is None:
-                children = [
-                    child_id
-                    for child_id, child in self.analyses.items()
-                    if str(child.parent_analysis_id) == analysis_id
-                ]
-                for child_id in children:
-                    self.analyses.pop(child_id)
-            return analysis
-        return self._corrupt_analysis_records.pop(analysis_id, None)
+        analysis = self.analyses.get(analysis_id)
+        if analysis is None:
+            corrupt = self._corrupt_analysis_records.pop(analysis_id, None)
+            if corrupt is not None:
+                self._unlink_analysis_id(analysis_id)
+            return corrupt
+
+        descendants = self.analysis_descendants(analysis_id)
+        for record in reversed(descendants):
+            child_id = str(record.id)
+            self.analyses.pop(child_id, None)
+            self._unlink_analysis_id(child_id)
+        removed = self.analyses.pop(analysis_id)
+        self._unlink_analysis_id(analysis_id)
+        return removed
+
+    def _unlink_analysis_id(self, analysis_id: str) -> None:
+        parsed = uuid.UUID(analysis_id)
+        for tab in self.tabs.values():
+            if parsed in tab.analysis_ids:
+                tab.analysis_ids.remove(parsed)
 
     def replace_analysis(self, analysis: AnalysisRecord) -> AnalysisRecord:
         """Replace one valid lifecycle record without changing its identity."""
@@ -158,38 +182,36 @@ class Workspace:
         self.analyses[analysis_id] = analysis
         return analysis
 
-    def analysis_children(self, root_analysis_id: str) -> list[AnalysisRecord]:
+    def analysis_children(self, analysis_id: str) -> list[AnalysisRecord]:
         return [
             analysis
             for analysis in self.analyses.values()
-            if str(analysis.parent_analysis_id) == root_analysis_id
+            if str(analysis.parent_analysis_id) == analysis_id
         ]
 
+    def analysis_descendants(self, analysis_id: str) -> list[AnalysisRecord]:
+        descendants: list[AnalysisRecord] = []
+        pending = list(self.analysis_children(analysis_id))
+        while pending:
+            child = pending.pop(0)
+            descendants.append(child)
+            pending[0:0] = self.analysis_children(str(child.id))
+        return descendants
+
     def live_analysis_ids(self) -> set[str]:
-        """Return Analyses reachable through the current Tab collection.
+        """Return Analyses owned by the current Tab collection."""
 
-        Detached records remain aggregate-owned while cancellation and cleanup
-        finish, but they are not addressable through the public Analysis API.
-        """
-
-        root_ids = {
-            str(tab.analysis_id)
+        return {
+            str(analysis_id)
             for tab in self.tabs.values()
-            if tab.analysis_id is not None
+            for analysis_id in tab.analysis_ids
         }
-        child_ids = {
-            analysis_id
-            for analysis_id, analysis in self.analyses.items()
-            if analysis.parent_analysis_id is not None
-            and str(analysis.parent_analysis_id) in root_ids
-        }
-        return root_ids | child_ids
 
-    def analysis_tab_id(self, root_analysis_id: str) -> str | None:
-        """Return the sole Tab currently referencing a root Analysis."""
+    def analysis_tab_id(self, analysis_id: str) -> str | None:
+        """Return the sole Tab owning an Analysis."""
 
         for tab_id, tab in self.tabs.items():
-            if str(tab.analysis_id) == root_analysis_id:
+            if any(str(item) == analysis_id for item in tab.analysis_ids):
                 return tab_id
         return None
 

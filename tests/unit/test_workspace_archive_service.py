@@ -18,6 +18,7 @@ import anyio
 import polars as pl
 import pytest
 from ldaca_wordflow.domain.workspace import (
+    AnalysisExecutionScope,
     AnalysisArtifactRecord,
     AnalysisKind,
     AnalysisQuerySnapshotRecord,
@@ -183,7 +184,7 @@ def _valid_archive(
     name: str = "Imported",
     tabs: list[dict[str, Any]] | None = None,
     analyses: list[dict[str, Any]] | None = None,
-    version: int = 6,
+    version: int = 9,
 ) -> bytes:
     node_id = str(uuid.uuid4())
     manifest = {
@@ -305,6 +306,12 @@ async def test_archive_round_trip_preserves_terminal_analysis_result_and_tab(
         )
     )
     timestamp = datetime.now(UTC)
+    tab = Tab.create(
+        kind=AnalysisKind.TOKEN_FREQUENCY,
+        name="Frequency",
+        timestamp=timestamp,
+    )
+    source.add_tab(tab)
     analysis = AnalysisRecord.create(
         TokenFrequencyAnalysisRequest(
             node_ids=[uuid.UUID(node.id)],
@@ -313,6 +320,8 @@ async def test_archive_round_trip_preserves_terminal_analysis_result_and_tab(
                 uuid.UUID(node.id): "native:plain_words_en"
             },
         ),
+        tab_id=tab.id,
+        execution_scope=AnalysisExecutionScope.RUN_ALL,
         timestamp=timestamp,
     ).start(timestamp)
     analysis = analysis.succeed(
@@ -320,18 +329,11 @@ async def test_archive_round_trip_preserves_terminal_analysis_result_and_tab(
         result_payload={"node_results": [{"node_id": node.id, "tokens": []}]},
     )
     source.add_analysis(analysis)
-    tab = Tab.create(
-        kind=AnalysisKind.TOKEN_FREQUENCY,
-        name="Frequency",
-        timestamp=timestamp,
-    )
-    tab.analysis_id = analysis.id
-    source.add_tab(tab)
     exported = tmp_path / "analysis.zip"
     _create_workspace_export(source, tmp_path, exported, 1024 * 1024)
     with zipfile.ZipFile(exported) as archive:
         manifest = json.loads(archive.read("workspace/workspace.json"))
-    assert manifest["version"] == 6
+    assert manifest["version"] == 9
     assert len(manifest["analyses"]) == 1
 
     storage = FakeWorkspaceStorage(tmp_path / "installed")
@@ -346,7 +348,7 @@ async def test_archive_round_trip_preserves_terminal_analysis_result_and_tab(
         max_snapshot_bytes=1024 * 1024 * 1024,
     ).load(installed).workspace
 
-    assert loaded.tabs[str(tab.id)].analysis_id == analysis.id
+    assert loaded.tabs[str(tab.id)].analysis_ids == [analysis.id]
     assert loaded.nodes[node.id].tokenizer_model == "native:plain_words_en"
     restored = loaded.analyses[str(analysis.id)]
     assert restored.request == analysis.request
@@ -368,12 +370,20 @@ async def test_archive_round_trip_preserves_artifact_and_query_snapshot(
         )
     )
     timestamp = datetime.now(UTC)
+    tab = Tab.create(
+        kind=AnalysisKind.CONCORDANCE,
+        name="Concordance",
+        timestamp=timestamp,
+    )
+    source.add_tab(tab)
     analysis = AnalysisRecord.create(
         ConcordanceAnalysisRequest(
             node_ids=[uuid.UUID(node.id)],
             node_columns={uuid.UUID(node.id): "text"},
             search_word="one",
         ),
+        tab_id=tab.id,
+        execution_scope=AnalysisExecutionScope.PREVIEW,
         timestamp=timestamp,
     ).start(timestamp)
     query_relative = f"analyses/{analysis.id}/query-input"
@@ -402,13 +412,6 @@ async def test_archive_round_trip_preserves_artifact_and_query_snapshot(
         query_snapshot=AnalysisQuerySnapshotRecord(relative_path=query_relative),
     )
     source.add_analysis(analysis)
-    tab = Tab.create(
-        kind=AnalysisKind.CONCORDANCE,
-        name="Concordance",
-        timestamp=timestamp,
-    )
-    tab.analysis_id = analysis.id
-    source.add_tab(tab)
     exported = tmp_path / "query-analysis.zip"
     _create_workspace_export(source, source_root, exported, 1024 * 1024)
 
@@ -446,7 +449,7 @@ async def test_archive_rejects_previous_manifest_version(tmp_path: Path) -> None
         await _service(storage).import_upload(
             "alice",
             "workspace.zip",
-            ByteSource(_valid_archive(version=5)),
+            ByteSource(_valid_archive(version=8)),
         )
 
     assert list((tmp_path / ".staging").iterdir()) == []

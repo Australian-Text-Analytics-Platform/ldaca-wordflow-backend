@@ -530,8 +530,6 @@ async def runtime_context(settings: Settings) -> AsyncIterator[Runtime]:
         task_group_owner.register_admission_stopper(analysis_service.stop_accepting)
         task_group_owner.register_execution_shutdown(analysis_execution.close)
         annotation_service = AnnotationService(
-            workspace_service,
-            limiter=io_limiter,
             credentials=provider_credential_store,
         )
         sample_data_service = SampleDataService(
@@ -581,6 +579,7 @@ async def runtime_context(settings: Settings) -> AsyncIterator[Runtime]:
             storage_admission,
             settings,
             quotation_client,
+            provider_credential_store,
             query_root=(
                 settings.get_data_root() / ".analysis-result-queries" / "resources"
             ),

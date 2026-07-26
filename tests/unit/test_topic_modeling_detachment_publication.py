@@ -9,6 +9,8 @@ import polars as pl
 import pytest
 
 from ldaca_wordflow.domain.workspace import (
+    AnalysisExecutionScope,
+    AnalysisKind,
     AnalysisRecord,
     DerivationInput,
     DerivationProvenance,
@@ -17,11 +19,12 @@ from ldaca_wordflow.domain.workspace import (
     TopicModelingAnalysisRequest,
     TopicModelingDetachmentAnalysisRequest,
     TopicModelingDetachmentDerivation,
+    Tab,
     Workspace,
     node_reference,
 )
 from ldaca_wordflow.models.analysis_results import (
-    DetachedDataBlockMetadata,
+    PublishedDataBlockMetadata,
     TopicModelingDetachmentWorkerOutput,
     TopicModelingDetachmentWorkerResult,
 )
@@ -50,11 +53,20 @@ def _publication_fixture(
         )
     )
     created = datetime.now(UTC)
+    tab = workspace.add_tab(
+        Tab.create(
+            kind=AnalysisKind.TOPIC_MODELING,
+            name="Topic Modeling",
+            timestamp=created,
+        )
+    )
     root = AnalysisRecord.create(
         TopicModelingAnalysisRequest(
             node_ids=[source_id],
             node_columns={source_id: "text"},
         ),
+        tab_id=tab.id,
+        execution_scope=AnalysisExecutionScope.RUN_ALL,
         timestamp=created,
     ).start(created + timedelta(seconds=1)).succeed(
         created + timedelta(seconds=2),
@@ -68,6 +80,8 @@ def _publication_fixture(
     )
     child = AnalysisRecord.create(
         request,
+        tab_id=tab.id,
+        execution_scope=AnalysisExecutionScope.SUPPORTING,
         timestamp=created + timedelta(seconds=3),
         parent_analysis_id=root.id,
     ).start(created + timedelta(seconds=4))
@@ -120,7 +134,7 @@ def _publication_fixture(
             TopicModelingDetachmentWorkerOutput(
                 source_node_id=source_id,
                 topic_data={
-                    "data_block": DetachedDataBlockMetadata(
+                    "data_block": PublishedDataBlockMetadata(
                         id=topic_data_id,
                         name="Detached topics",
                         provenance=topic_provenance,
@@ -136,7 +150,7 @@ def _publication_fixture(
                     "record_count": 1,
                 },
                 topic_meanings={
-                    "data_block": DetachedDataBlockMetadata(
+                    "data_block": PublishedDataBlockMetadata(
                         id=meanings_id,
                         name="Detached topics topic meanings",
                         provenance=meanings_provenance,

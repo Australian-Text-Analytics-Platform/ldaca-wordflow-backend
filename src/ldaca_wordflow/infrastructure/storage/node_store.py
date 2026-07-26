@@ -72,7 +72,7 @@ def to_dict(
     }
 
 
-def write_detached_frame(
+def write_published_frame(
     data: pl.DataFrame,
     *,
     base_dir: str | Path,
@@ -103,5 +103,5 @@ __all__ = [
     "NODE_DATA_DIR",
     "NodePlanCapacityError",
     "to_dict",
-    "write_detached_frame",
+    "write_published_frame",
 ]

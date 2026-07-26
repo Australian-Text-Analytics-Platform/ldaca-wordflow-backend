@@ -99,7 +99,7 @@ class WorkspaceUpdateRequest(_StrictModel):
 
 
 class WorkspaceArchiveMetadata(_StrictModel):
-    """Safe portable workspace metadata stored in archive manifest version 6."""
+    """Safe portable workspace metadata stored in archive manifest version 7."""
 
     id: uuid.UUID
     name: str = Field(min_length=1, max_length=500)
@@ -175,7 +175,7 @@ class WorkspaceArchiveManifest(_StrictModel):
     """Only accepted client workspace archive manifest."""
 
     format: Literal["wordflow-materialized-workspace"]
-    version: Literal[6]
+    version: Literal[9]
     workspace: WorkspaceArchiveMetadata
     nodes: list[WorkspaceArchiveNode]
     tabs: list[Tab]
@@ -197,30 +197,26 @@ class WorkspaceArchiveManifest(_StrictModel):
             for record in by_id.values()
         ):
             raise ValueError("Workspace archives contain only terminal Analyses")
-        root_ids = {
-            analysis_id
-            for analysis_id, record in by_id.items()
-            if record.parent_analysis_id is None
-        }
         tab_analysis_ids = [
-            str(tab.analysis_id) for tab in self.tabs if tab.analysis_id is not None
+            str(analysis_id)
+            for tab in self.tabs
+            for analysis_id in tab.analysis_ids
         ]
         if len(tab_analysis_ids) != len(set(tab_analysis_ids)):
-            raise ValueError("A root Analysis may belong to only one archived Tab")
-        if set(tab_analysis_ids) != root_ids:
-            raise ValueError("Archived root Analyses must belong to exactly one Tab")
+            raise ValueError("An Analysis may belong to only one archived Tab")
+        if set(tab_analysis_ids) != set(by_id):
+            raise ValueError("Archived Analyses must belong to exactly one Tab")
         for tab in self.tabs:
-            if tab.analysis_id is None:
-                continue
-            record = by_id[str(tab.analysis_id)]
-            if record.parent_analysis_id is not None or record.request.kind != tab.kind:
-                raise ValueError("Archived Tab and Analysis ownership is invalid")
+            for analysis_id in tab.analysis_ids:
+                record = by_id[str(analysis_id)]
+                if record.tab_id != tab.id:
+                    raise ValueError("Archived Tab and Analysis ownership is invalid")
         for record in by_id.values():
             if record.parent_analysis_id is None:
                 continue
             parent = by_id.get(str(record.parent_analysis_id))
-            if parent is None or parent.parent_analysis_id is not None:
-                raise ValueError("Archived child Analysis parent is invalid")
+            if parent is None or parent.tab_id != record.tab_id:
+                raise ValueError("Archived Sub-Analysis parent is invalid")
         return self
 
 

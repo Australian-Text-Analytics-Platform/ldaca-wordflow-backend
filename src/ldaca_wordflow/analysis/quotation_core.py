@@ -376,7 +376,7 @@ def flatten_grouped_quotation_dataframe(result_df: pl.DataFrame) -> pl.DataFrame
 
 
 
-    Used by the quotation detachment worker.
+    Used by Quotation Run All.
     """
     if result_df.height == 0:
         return _empty_flattened_quotation_dataframe(result_df)

@@ -52,13 +52,15 @@ def test_tokens_builder_emits_same_core_columns_as_regex_builder() -> None:
         num_right_tokens=2,
         case_sensitive=False,
         include_document_column=True,
+        source_row_ids=[0, 1],
         extra_columns_data=extras,
         extra_columns_dtypes=extras_dtypes,
     )
 
-    # Expected order: [document_column, *extras, *CORE_CONCORDANCE_COLUMNS,
-    # CONC_extraction] — identical to regex builder.
+    # Expected order: [source-row identity, document column, *extras,
+    # *CORE_CONCORDANCE_COLUMNS, CONC_extraction] — identical to regex builder.
     assert tokens_cols == [
+        "__wordflow_source_row_id",
         "text",
         "doc_id",
         *CORE_CONCORDANCE_COLUMNS,
@@ -78,6 +80,7 @@ def test_tokens_builder_finds_exact_token_matches() -> None:
         num_right_tokens=2,
         case_sensitive=False,
         include_document_column=True,
+        source_row_ids=[0, 1],
         extra_columns_data=None,
         extra_columns_dtypes=None,
     )
@@ -102,6 +105,7 @@ def test_tokens_builder_handles_empty_corpus_gracefully() -> None:
         num_right_tokens=2,
         case_sensitive=False,
         include_document_column=True,
+        source_row_ids=[0],
         extra_columns_data=None,
         extra_columns_dtypes=None,
     )
@@ -149,6 +153,7 @@ def test_regex_and_tokens_builders_agree_on_english_word_boundary_case() -> None
         whole_word=True,
         case_sensitive=False,
         include_document_column=True,
+        source_row_ids=[0, 1],
         extra_columns_data=None,
         extra_columns_dtypes=None,
     )
@@ -161,6 +166,7 @@ def test_regex_and_tokens_builders_agree_on_english_word_boundary_case() -> None
         num_right_tokens=2,
         case_sensitive=False,
         include_document_column=True,
+        source_row_ids=[0, 1],
         extra_columns_data=None,
         extra_columns_dtypes=None,
     )

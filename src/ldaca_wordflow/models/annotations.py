@@ -1,83 +1,18 @@
-"""Strict contracts for stateless annotation previews and provider discovery."""
+"""Strict contracts for Annotation provider discovery."""
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Annotated
 
 from pydantic import (
-    BaseModel,
-    ConfigDict,
     Field,
     SecretStr,
     StringConstraints,
-    model_validator,
 )
 
-from ..domain.annotation import (
-    AnnotationClass,
-    AnnotationProvider,
-    AnnotationProviderSnapshot,
-)
+from ..domain.annotation import AnnotationProvider, AnnotationProviderSnapshot
 
 NonEmptyText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
-
-
-class AnnotationConfig(AnnotationProviderSnapshot):
-    """Persistable provider-independent annotation configuration."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    text_column: NonEmptyText = Field(max_length=500)
-    annotation_column: NonEmptyText = Field(max_length=500)
-    classes: list[AnnotationClass] = Field(min_length=1, max_length=200)
-    model: NonEmptyText = Field(max_length=500)
-    instruction: NonEmptyText = Field(max_length=20_000)
-    temperature: float = Field(default=0.0, ge=0.0, le=2.0)
-    reasoning_enabled: bool = False
-    reasoning_effort: Literal["low", "medium", "high"] = "medium"
-
-    @model_validator(mode="after")
-    def unique_classes(self) -> "AnnotationConfig":
-        """Reject ambiguous labels before any provider request is made."""
-
-        normalized = [item.name.casefold() for item in self.classes]
-        if len(normalized) != len(set(normalized)):
-            raise ValueError("annotation class names must be unique")
-        return self
-
-
-class AnnotationPreviewRequest(AnnotationConfig):
-    """One stateless, one-based page preview with a request-only credential."""
-
-    api_key: SecretStr | None = Field(
-        default=None,
-        min_length=1,
-        max_length=4_000,
-        json_schema_extra={"writeOnly": True},
-    )
-    page: int = Field(default=1, ge=1)
-    page_size: int = Field(default=20, ge=1, le=200)
-
-
-class AnnotationPreviewLabel(BaseModel):
-    """A provider label paired with its stable zero-based source row index."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    row_index: int = Field(ge=0)
-    label: str | None
-
-
-class AnnotationPreviewResource(BaseModel):
-    """Direct stateless preview result for one source-node page."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    node_id: str
-    page: int = Field(ge=1)
-    page_size: int = Field(ge=1)
-    total_rows: int = Field(ge=0)
-    labels: list[AnnotationPreviewLabel]
 
 
 class AnnotationModelsRequest(AnnotationProviderSnapshot):
@@ -98,10 +33,7 @@ class AnnotationModelsResource(AnnotationProviderSnapshot):
 
 
 __all__ = [
-    "AnnotationClass",
     "AnnotationModelsRequest",
     "AnnotationModelsResource",
-    "AnnotationPreviewRequest",
-    "AnnotationPreviewResource",
     "AnnotationProvider",
 ]

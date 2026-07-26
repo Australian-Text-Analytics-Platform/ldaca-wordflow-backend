@@ -27,7 +27,7 @@ from typing import Any, Literal, TypeVar, cast
 
 import anyio
 from anyio.to_thread import run_sync as run_sync_in_worker_thread
-from ..domain.workspace import Tab, Workspace
+from ..domain.workspace import AnalysisKind, Tab, Workspace
 from ..domain.workspace.node import PlanHistorySnapshot
 from ..domain.events import EventResourceType
 from ..domain.background import BackgroundState, Progress
@@ -65,7 +65,7 @@ from ..models.workspace import (
     WorkspaceNodeReorderRequest,
     WorkspaceUpdateRequest,
 )
-from ..models.tabs import TabCreate, TabRename
+from ..models.tabs import TabCreate, TabUpdate
 from ..infrastructure.storage.layout import (
     NODE_SOURCE_STAGING_PREFIX,
     NODE_SOURCE_STAGING_SUFFIX,
@@ -130,6 +130,7 @@ class WorkspaceLease:
     commit_requested: bool = True
     rollback_paths: list[Path] = field(default_factory=list)
     rollback_analysis_directories: list[Path] = field(default_factory=list)
+    commit_cleanup_analysis_directories: list[Path] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,12 +206,12 @@ def _remove_rollback_analysis_directories(
             relative = path.resolve(strict=True).relative_to(resolved_root)
             analysis_id = str(uuid.UUID(relative.parts[1]))
             metadata = path.lstat()
-        except (FileNotFoundError, OSError, ValueError, IndexError):
+        except FileNotFoundError, OSError, ValueError, IndexError:
             continue
         if (
             len(relative.parts) != 3
             or relative.parts[:2] != ("analyses", analysis_id)
-            or relative.parts[2] not in {"artifacts", "query-input"}
+            or relative.parts[2] not in {"artifacts", "query-input", "staged-output"}
             or not stat.S_ISDIR(metadata.st_mode)
             or path.is_symlink()
         ):
@@ -653,9 +654,7 @@ class WorkspaceService:
                 revision=revision,
             )
         except WorkspaceCapacityError as exc:
-            raise ResourceTooLargeError(
-                "Workspace snapshot exceeds its limit"
-            ) from exc
+            raise ResourceTooLargeError("Workspace snapshot exceeds its limit") from exc
         except WorkspaceSerializationError as exc:
             raise WorkspaceCorruptError(
                 "Workspace data could not be persisted",
@@ -837,9 +836,7 @@ class WorkspaceService:
                 state=record.state,
                 progress=record.progress,
             )
-        removed_analyses = (
-            before_analyses.keys() | before_corrupt
-        ) - after_live
+        removed_analyses = (before_analyses.keys() | before_corrupt) - after_live
         for analysis_id in sorted(removed_analyses):
             await self._publish_removed(
                 user_id,
@@ -919,8 +916,7 @@ class WorkspaceService:
             )
         except Exception:
             logger.exception(
-                "Could not publish Workspace runtime event workspace_id=%s "
-                "user_id=%s",
+                "Could not publish Workspace runtime event workspace_id=%s user_id=%s",
                 workspace_id,
                 user_id,
             )
@@ -1069,25 +1065,49 @@ class WorkspaceService:
             resource = tab.model_copy(deep=True)
         return resource
 
-    async def rename_tab(
+    async def update_tab(
         self,
         user_id: str,
         workspace_id: str,
         tab_id: str,
-        request: TabRename,
+        request: TabUpdate,
     ) -> Tab:
-        """Rename a Tab, leaving both Revisions untouched for a normalized no-op."""
+        """Update mutable Tab presentation state."""
 
         async with self.mutation_context(user_id, workspace_id) as lease:
             tab = lease.workspace.tabs.get(tab_id)
             if tab is None:
                 raise TabNotFoundError("Tab not found")
-            if tab.name == request.name:
-                lease.commit_requested = False
-            else:
+            changed = False
+            if request.name is not None and tab.name != request.name:
                 tab.name = request.name
+                changed = True
+            if (
+                request.annotation_correction_columns is not None
+                and tab.annotation_correction_columns
+                != request.annotation_correction_columns
+            ):
+                if tab.kind is not AnalysisKind.ANNOTATION:
+                    raise InvalidInputError(
+                        "Correction columns belong only to Annotation Tabs"
+                    )
+                for node_id, column in request.annotation_correction_columns.items():
+                    node = lease.workspace.nodes.get(str(node_id))
+                    if node is None or column not in await self._run_io(
+                        node.data.collect_schema
+                    ):
+                        raise InvalidInputError(
+                            "Annotation correction column is unavailable"
+                        )
+                tab.annotation_correction_columns = (
+                    request.annotation_correction_columns
+                )
+                changed = True
+            if changed:
                 tab.modified_at = datetime.now(UTC)
                 tab.revision += 1
+            else:
+                lease.commit_requested = False
             resource = tab.model_copy(deep=True)
         return resource
 
@@ -1209,8 +1229,7 @@ class WorkspaceService:
                 allow_closing=internal,
             )
             before_tabs = {
-                tab_id: tab.revision
-                for tab_id, tab in lease.workspace.tabs.items()
+                tab_id: tab.revision for tab_id, tab in lease.workspace.tabs.items()
             }
             before_live = lease.workspace.live_analysis_ids()
             before_analyses = {
@@ -1253,6 +1272,18 @@ class WorkspaceService:
                         before_analyses=before_analyses,
                         before_corrupt=before_corrupt,
                     )
+                if lease.commit_cleanup_analysis_directories:
+                    try:
+                        await self._run_io(
+                            _remove_rollback_analysis_directories,
+                            lease.commit_cleanup_analysis_directories,
+                            lease.path,
+                        )
+                    except OSError:
+                        logger.exception(
+                            "Could not remove committed Workspace staging directories"
+                        )
+                    lease.commit_cleanup_analysis_directories.clear()
 
     async def _restore_slot(
         self,

@@ -21,7 +21,7 @@ from ldaca_wordflow.domain.workspace import (
     QuotationEngineType,
 )
 from ldaca_wordflow.models.quotation import ResolvedQuotationEngine
-from ldaca_wordflow.models.analysis_results import QuotationWorkerResult
+from ldaca_wordflow.models.analysis_results import QuotationResult
 from ldaca_wordflow.infrastructure.providers.quotation_engines import (
     resolve_quotation_engine,
 )
@@ -171,8 +171,9 @@ async def test_quotation_page_serializes_temporal_metadata_for_worker_result() -
         run_blocking=_run_inline,
     )
 
-    result = QuotationWorkerResult.model_validate(payload)
+    result = QuotationResult.model_validate(payload)
 
+    assert result.data is not None
     assert result.data[0][0]["created_at"] == "2020-10-16T22:02:13Z"
 
 

@@ -11,10 +11,16 @@ verify the OpenAI path always sends ``stream=False`` so the non-streaming SDK
 path cannot receive an SSE response unexpectedly.
 """
 
+import asyncio
+
+import pytest
+
 from ldaca_wordflow.infrastructure.providers.annotation_ai import (
+    AnnotationContextLimitError,
     DEFAULT_REASONING_EFFORT,
     InferenceConfig,
     _complete_openai,
+    annotate_all,
     _reasoning_budget_tokens,
     list_models,
     resolve_provider_wire,
@@ -146,6 +152,32 @@ async def test_complete_openai_always_disables_streaming(monkeypatch):
     assert create_kwargs["stream"] is False
 
 
+async def test_complete_openai_classifies_context_limit_errors(monkeypatch):
+    class _ContextLimitedCompletions:
+        async def create(self, **_kwargs):
+            raise RuntimeError("maximum context length exceeded")
+
+    class _FakeChat:
+        def __init__(self) -> None:
+            self.completions = _ContextLimitedCompletions()
+
+    class _FakeAsyncOpenAI:
+        def __init__(self, **_kwargs) -> None:
+            self.chat = _FakeChat()
+
+    monkeypatch.setattr("openai.AsyncOpenAI", _FakeAsyncOpenAI)
+
+    with pytest.raises(AnnotationContextLimitError):
+        await _complete_openai(
+            resolve_provider_wire("openai"),
+            "some-model",
+            "key",
+            "system",
+            "user",
+            InferenceConfig(),
+        )
+
+
 async def test_custom_model_discovery_uses_its_base_url_and_allows_no_key(
     monkeypatch,
 ):
@@ -201,3 +233,87 @@ async def test_custom_chat_completion_uses_its_base_url_and_allows_no_key(
     assert constructor_kwargs["base_url"] == "http://localhost:8080/v1"
     assert constructor_kwargs["api_key"] == "no-key-required"
     assert create_kwargs["model"] == "local-model"
+
+
+async def test_annotate_all_uses_one_hundred_row_batches_with_ten_in_flight(
+    monkeypatch,
+):
+    active = 0
+    max_active = 0
+    chunk_sizes: list[int] = []
+
+    async def fake_annotate_batch(
+        _wire,
+        _model,
+        _api_key,
+        _instruction,
+        _classes,
+        texts,
+        _config,
+        _examples,
+    ):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        chunk_sizes.append(len(texts))
+        await asyncio.sleep(0.01)
+        active -= 1
+        return list(texts)
+
+    monkeypatch.setattr(
+        "ldaca_wordflow.infrastructure.providers.annotation_ai.annotate_batch",
+        fake_annotate_batch,
+    )
+
+    texts = [str(index) for index in range(1001)]
+    labels = await annotate_all(
+        resolve_provider_wire("openai"),
+        "some-model",
+        "key",
+        "instruction",
+        [],
+        texts,
+    )
+
+    assert labels == texts
+    assert sorted(chunk_sizes) == [1, *([100] * 10)]
+    assert max_active == 10
+
+
+async def test_annotate_all_splits_only_batches_rejected_by_the_context_limit(
+    monkeypatch,
+):
+    attempted_sizes: list[int] = []
+
+    async def fake_annotate_batch(
+        _wire,
+        _model,
+        _api_key,
+        _instruction,
+        _classes,
+        texts,
+        _config,
+        _examples,
+    ):
+        attempted_sizes.append(len(texts))
+        if len(texts) > 25:
+            raise AnnotationContextLimitError("maximum context length exceeded")
+        return list(texts)
+
+    monkeypatch.setattr(
+        "ldaca_wordflow.infrastructure.providers.annotation_ai.annotate_batch",
+        fake_annotate_batch,
+    )
+
+    texts = [str(index) for index in range(100)]
+    labels = await annotate_all(
+        resolve_provider_wire("openai"),
+        "some-model",
+        "key",
+        "instruction",
+        [],
+        texts,
+    )
+
+    assert labels == texts
+    assert sorted(attempted_sizes) == [25, 25, 25, 25, 50, 50, 100]

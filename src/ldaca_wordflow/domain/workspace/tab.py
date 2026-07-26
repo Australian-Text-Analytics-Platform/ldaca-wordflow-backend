@@ -51,7 +51,10 @@ class Tab(BaseModel):
     id: uuid.UUID
     kind: AnalysisKind
     name: TabName
-    analysis_id: uuid.UUID | None
+    analysis_ids: list[uuid.UUID] = Field(default_factory=list)
+    annotation_correction_columns: dict[uuid.UUID, TabName] = Field(
+        default_factory=dict
+    )
     created_at: AwareDatetime
     modified_at: AwareDatetime
     revision: int = Field(ge=1)
@@ -68,7 +71,8 @@ class Tab(BaseModel):
             id=uuid.uuid4(),
             kind=kind,
             name=name,
-            analysis_id=None,
+            analysis_ids=[],
+            annotation_correction_columns={},
             created_at=timestamp,
             modified_at=timestamp,
             revision=1,

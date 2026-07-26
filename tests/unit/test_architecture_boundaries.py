@@ -111,18 +111,11 @@ def test_curated_vendor_surface_is_exact() -> None:
 def test_persisted_analysis_workers_accept_only_snapshot_inputs() -> None:
     expected = {
         "concordance.py": (
-            (
-                "run_concordance_analysis",
-                "run_concordance_detachment",
-                "run_concordance_dispersion_detachment",
-            ),
+            ("run_concordance_run_all",),
             {"node_corpus", "node_tokens", "extra_columns_data"},
         ),
         "quotation.py": (
-            (
-                "run_quotation_analysis",
-                "run_quotation_detachment",
-            ),
+            ("run_quotation_run_all",),
             {"node_corpus", "extra_columns_data", "engine_config"},
         ),
         "sequential.py": (("run_sequential_analysis",), set()),

@@ -19,19 +19,14 @@ from ..domain.workspace import (
     AnalysisArtifactRecord,
     AnalysisQuerySnapshotRecord,
     AnalysisRecord,
-    AnnotationAnalysisRequest,
-    AnnotationDerivation,
-    ConcordanceAnalysisRequest,
-    ConcordanceDetachmentAnalysisRequest,
-    ConcordanceDetachmentDerivation,
-    ConcordanceDispersionDetachmentAnalysisRequest,
-    ConcordanceDispersionDetachmentDerivation,
+    AnnotationRunAllAnalysisRequest,
+    ConcordanceResultPublicationAnalysisRequest,
+    ConcordanceResultPublicationDerivation,
     DerivationInput,
     DerivationProvenance,
     Node,
-    QuotationAnalysisRequest,
-    QuotationDetachmentAnalysisRequest,
-    QuotationDetachmentDerivation,
+    QuotationResultPublicationAnalysisRequest,
+    QuotationResultPublicationDerivation,
     TopicModelingAnalysisRequest,
     TopicModelingDetachmentAnalysisRequest,
     TopicModelingDetachmentDerivation,
@@ -47,10 +42,17 @@ from ..infrastructure.storage.durable_fs import (
 from ..models.analysis_results import (
     ANALYSIS_STORED_RESULT_MODELS,
     ANALYSIS_WORKER_RESULT_MODELS,
-    AnnotationStoredResult,
-    DetachedDataBlockMetadata,
-    DetachmentStoredResult,
-    DetachmentWorkerResult,
+    AnnotationRunAllStoredResult,
+    AnnotationRunAllWorkerResult,
+    ConcordanceRunAllStoredResult,
+    PublishedDataBlockMetadata,
+    PublishedDataBlockStoredResult,
+    PublishedDataBlockWorkerResult,
+    PreviewReadyStoredResult,
+    QuotationRunAllStoredResult,
+    ResultPublicationOutput,
+    ResultPublicationStoredResult,
+    ResultPublicationWorkerResult,
     TopicModelingDetachedOutput,
     TopicModelingDetachmentStoredResult,
     TopicModelingDetachmentWorkerResult,
@@ -64,9 +66,6 @@ from .node_projection import canonical_node_info
 from .response_snapshots import ResponseSnapshot, ResponseSnapshotService
 from .workspace import WorkspaceLease
 from ..workers.input_snapshots import clone_worker_input_snapshot
-
-
-_QUERY_SNAPSHOT_KINDS = frozenset({"concordance", "quotation"})
 
 
 class AnalysisArtifactService:
@@ -99,6 +98,52 @@ class AnalysisArtifactService:
         if worker_model is None or stored_model is None:
             raise ValueError("Analysis kind has no Result contract")
         result = worker_model.model_validate(raw_result)
+        if isinstance(result, PreviewReadyStoredResult):
+            query_snapshot = lease.path / "analyses" / str(record.id) / "query-input"
+            await run_sync_in_worker_thread(
+                partial(
+                    clone_worker_input_snapshot,
+                    lease.path / "analyses" / str(record.id) / ".execution" / "input",
+                    query_snapshot,
+                    max_snapshot_bytes=self._max_snapshot_bytes,
+                ),
+                abandon_on_cancel=False,
+                limiter=self._limiter,
+            )
+            lease.rollback_analysis_directories.append(query_snapshot)
+            return PublishedAnalysisResult(
+                payload={"ready": True},
+                artifacts=[],
+                output_node_ids=[],
+                query_snapshot=AnalysisQuerySnapshotRecord(
+                    relative_path=(
+                        Path("analyses") / str(record.id) / "query-input"
+                    ).as_posix()
+                ),
+            )
+        if isinstance(result, AnnotationRunAllWorkerResult):
+            lease.rollback_paths.append(
+                lease.path / "data" / f"annotation-{record.id}.parquet"
+            )
+            stored = await run_sync_in_worker_thread(
+                partial(
+                    _publish_annotation_run_all,
+                    lease.path / "analyses" / str(record.id),
+                    lease.workspace,
+                    lease.path,
+                    record,
+                    result,
+                    self._max_node_bytes,
+                    lease.revision + 1,
+                ),
+                abandon_on_cancel=False,
+                limiter=self._limiter,
+            )
+            return PublishedAnalysisResult(
+                payload=cast(dict[str, JsonData], stored.model_dump(mode="json")),
+                artifacts=[],
+                output_node_ids=[],
+            )
         if isinstance(result, TopicModelingDetachmentWorkerResult):
             stored = await run_sync_in_worker_thread(
                 partial(
@@ -122,7 +167,30 @@ class AnalysisArtifactService:
                 artifacts=[],
                 output_node_ids=stored.output_node_ids,
             )
-        if isinstance(result, DetachmentWorkerResult):
+        if isinstance(result, ResultPublicationWorkerResult):
+            stored = await run_sync_in_worker_thread(
+                partial(
+                    _publish_result_publication_data_blocks,
+                    lease.path / "analyses" / str(record.id),
+                    lease.workspace,
+                    lease.path,
+                    record,
+                    result,
+                    self._max_node_bytes,
+                ),
+                abandon_on_cancel=False,
+                limiter=self._limiter,
+            )
+            lease.rollback_paths.extend(
+                lease.path / "data" / f"{node_id}.parquet"
+                for node_id in stored.output_node_ids
+            )
+            return PublishedAnalysisResult(
+                payload=cast(dict[str, JsonData], stored.model_dump(mode="json")),
+                artifacts=[],
+                output_node_ids=stored.output_node_ids,
+            )
+        if isinstance(result, PublishedDataBlockWorkerResult):
             stored = await run_sync_in_worker_thread(
                 partial(
                     _publish_analysis_data_block,
@@ -167,30 +235,11 @@ class AnalysisArtifactService:
             lease.rollback_analysis_directories.append(
                 lease.path / "analyses" / str(record.id) / "artifacts"
             )
-        query_snapshot_record = None
-        if kind in _QUERY_SNAPSHOT_KINDS:
-            query_snapshot = lease.path / "analyses" / str(record.id) / "query-input"
-            await run_sync_in_worker_thread(
-                partial(
-                    clone_worker_input_snapshot,
-                    lease.path / "analyses" / str(record.id) / ".execution" / "input",
-                    query_snapshot,
-                    max_snapshot_bytes=self._max_snapshot_bytes,
-                ),
-                abandon_on_cancel=False,
-                limiter=self._limiter,
-            )
-            lease.rollback_analysis_directories.append(query_snapshot)
-            query_snapshot_record = AnalysisQuerySnapshotRecord(
-                relative_path=(
-                    Path("analyses") / str(record.id) / "query-input"
-                ).as_posix()
-            )
         return PublishedAnalysisResult(
             payload=cast(dict[str, JsonData], stored.model_dump(mode="json")),
             artifacts=publication.artifacts,
             output_node_ids=[],
-            query_snapshot=query_snapshot_record,
+            query_snapshot=None,
         )
 
     async def response_snapshot(
@@ -251,15 +300,72 @@ class _FilesystemPublication:
     published: bool
 
 
+def _publish_annotation_run_all(
+    analysis_dir: Path,
+    workspace: Workspace,
+    workspace_path: Path,
+    record: AnalysisRecord,
+    result: AnnotationRunAllWorkerResult,
+    max_node_bytes: int,
+    committed_workspace_revision: int,
+) -> AnnotationRunAllStoredResult:
+    request = record.request
+    if not isinstance(request, AnnotationRunAllAnalysisRequest):
+        raise ValueError("Annotation Run All request is invalid")
+    source_request = request.source
+    node = workspace.nodes.get(str(source_request.node_id))
+    if node is None:
+        raise ValueError("Annotation Run All source Data Block is unavailable")
+
+    output_dir = analysis_dir / ".execution" / "output"
+    source, _relative = _resolve_output_file(
+        output_dir,
+        result.result.parquet_path,
+    )
+    if _owned_regular_files(output_dir) != {source}:
+        raise ValueError("Annotation Run All output contains undeclared files")
+    if source.stat().st_size > max_node_bytes:
+        raise ValueError("Annotation Run All output exceeds its storage budget")
+
+    data_dir = workspace_path / "data"
+    mkdir_durable(data_dir)
+    destination = data_dir / f"annotation-{record.id}.parquet"
+    os.link(source, destination, follow_symlinks=False)
+    fsync_directory(data_dir)
+    lazyframe = pl.scan_parquet(destination.resolve(strict=True))
+    columns = lazyframe.collect_schema().names()
+    if columns != result.result.output_columns:
+        raise ValueError("Annotation Run All columns do not match its Result")
+    count = int(lazyframe.select(pl.len()).collect().item())
+    if count != result.result.record_count:
+        raise ValueError("Annotation Run All count does not match its Result")
+    if source_request.annotation_column not in columns:
+        raise ValueError("Annotation Run All output column is unavailable")
+    node.data = lazyframe
+    annotated_count = int(
+        lazyframe.select(pl.col(source_request.annotation_column).is_not_null().sum())
+        .collect()
+        .item()
+    )
+    canonical_node_info(node)
+    return AnnotationRunAllStoredResult(
+        affected_node_id=source_request.node_id,
+        annotation_column=source_request.annotation_column,
+        committed_workspace_revision=committed_workspace_revision,
+        record_count=count,
+        annotated_count=annotated_count,
+    )
+
+
 def _publish_analysis_data_block(
     analysis_dir: Path,
     workspace: Workspace,
     workspace_path: Path,
     record: AnalysisRecord,
-    result: DetachmentWorkerResult,
+    result: PublishedDataBlockWorkerResult,
     max_node_bytes: int,
     expected_output_files: set[Path] | None = None,
-) -> DetachmentStoredResult:
+) -> PublishedDataBlockStoredResult:
     """Validate and transfer one Analysis output into independent graph ownership."""
 
     metadata = result.result.data_block
@@ -311,12 +417,7 @@ def _publish_analysis_data_block(
         "output_columns": result.result.output_columns,
         "record_count": result.result.record_count,
     }
-    if isinstance(record.request, AnnotationAnalysisRequest):
-        return AnnotationStoredResult(
-            **payload,
-            annotation_column=record.request.annotation_column,
-        )
-    return DetachmentStoredResult(**payload)
+    return PublishedDataBlockStoredResult(**payload)
 
 
 def _publish_topic_modeling_data_blocks(
@@ -344,7 +445,7 @@ def _publish_topic_modeling_data_blocks(
                 workspace,
                 workspace_path,
                 record,
-                DetachmentWorkerResult(
+                PublishedDataBlockWorkerResult(
                     state="successful",
                     result=output.topic_data,
                     message=result.message,
@@ -358,7 +459,7 @@ def _publish_topic_modeling_data_blocks(
                 workspace,
                 workspace_path,
                 record,
-                DetachmentWorkerResult(
+                PublishedDataBlockWorkerResult(
                     state="successful",
                     result=output.topic_meanings,
                     message=result.message,
@@ -391,70 +492,97 @@ def _publish_topic_modeling_data_blocks(
     )
 
 
+def _publish_result_publication_data_blocks(
+    analysis_dir: Path,
+    workspace: Workspace,
+    workspace_path: Path,
+    record: AnalysisRecord,
+    result: ResultPublicationWorkerResult,
+    max_node_bytes: int,
+) -> ResultPublicationStoredResult:
+    output_dir = analysis_dir / ".execution" / "output"
+    declared_files = {
+        _resolve_output_file(output_dir, output.data.parquet_path)[0]
+        for output in result.outputs
+    }
+    if len(declared_files) != len(result.outputs):
+        raise ValueError("Result Publication output files must be unique")
+    created_ids: list[uuid.UUID] = []
+    stored_outputs: list[ResultPublicationOutput] = []
+    try:
+        for output in result.outputs:
+            published = _publish_analysis_data_block(
+                analysis_dir,
+                workspace,
+                workspace_path,
+                record,
+                PublishedDataBlockWorkerResult(
+                    state="successful",
+                    result=output.data,
+                    message=result.message,
+                ),
+                max_node_bytes,
+                declared_files,
+            )
+            output_id = published.output_node_ids[0]
+            created_ids.append(output_id)
+            stored_outputs.append(
+                ResultPublicationOutput(
+                    source_node_id=output.source_node_id,
+                    output_node_id=output_id,
+                    output_columns=published.output_columns,
+                    record_count=published.record_count,
+                )
+            )
+    except BaseException:
+        data_dir = workspace_path / "data"
+        for node_id in reversed(created_ids):
+            workspace.remove_node(str(node_id))
+            (data_dir / f"{node_id}.parquet").unlink(missing_ok=True)
+        if created_ids:
+            fsync_directory(data_dir)
+        raise
+    return ResultPublicationStoredResult(
+        output_node_ids=created_ids,
+        outputs=stored_outputs,
+    )
+
+
 def _validate_published_data_block_identity(
     workspace: Workspace,
     record: AnalysisRecord,
-    metadata: DetachedDataBlockMetadata,
+    metadata: PublishedDataBlockMetadata,
 ) -> None:
     """Reject any published Data Block that diverges from its immutable request."""
 
     request = record.request
-    if isinstance(request, AnnotationAnalysisRequest):
-        if record.parent_analysis_id is not None:
-            raise ValueError("Annotation is a root Analysis")
-        source = workspace.nodes.get(str(request.node_id))
-        if source is None:
-            raise ValueError("Annotation source Data Block is unavailable")
-        expected_provenance = DerivationProvenance(
-            operation=AnnotationDerivation(
-                annotation_column=request.annotation_column,
-                provider=request.provider,
-                model=request.model,
-            ),
-            inputs=[
-                DerivationInput(
-                    role="source",
-                    value=node_reference(str(request.node_id)),
-                )
-            ],
-        )
-        if (
-            metadata.name != request.output_node_name
-            or metadata.provenance != expected_provenance
-            or metadata.document != source.document
-            or metadata.color != source.color
-            or str(metadata.id) in workspace.nodes
-        ):
-            raise ValueError("Annotation Data Block metadata is invalid")
-        return
-
-    if record.parent_analysis_id is None:
-        raise ValueError("Analysis kind cannot publish a Data Block")
     parent = workspace.analyses.get(str(record.parent_analysis_id))
     parent_request = parent.request if parent is not None else None
-    if isinstance(request, ConcordanceDetachmentAnalysisRequest) and isinstance(
-        parent_request, ConcordanceAnalysisRequest
-    ):
-        operation = ConcordanceDetachmentDerivation()
-        default_name = f"Concordance {str(request.node_id)[:8]}"
-        document = parent_request.node_columns[request.node_id]
-    elif isinstance(
-        request,
-        ConcordanceDispersionDetachmentAnalysisRequest,
-    ) and isinstance(
-        parent_request,
-        ConcordanceAnalysisRequest,
-    ):
-        operation = ConcordanceDispersionDetachmentDerivation()
-        default_name = f"Concordance dispersion {str(request.node_id)[:8]}"
-        document = parent_request.node_columns[request.node_id]
-    elif isinstance(request, QuotationDetachmentAnalysisRequest) and isinstance(
-        parent_request,
-        QuotationAnalysisRequest,
-    ):
-        operation = QuotationDetachmentDerivation()
-        default_name = f"Quotations {str(request.node_id)[:8]}"
-        document = parent_request.column
+    if isinstance(request, ConcordanceResultPublicationAnalysisRequest):
+        selection = next(
+            (
+                item
+                for item in request.sources
+                if item.source_node_id in {
+                    uuid.UUID(node_id)
+                    for node_id in referenced_node_ids(metadata.provenance)
+                }
+            ),
+            None,
+        )
+        if selection is None:
+            raise ValueError("Concordance Result Publication source is invalid")
+        source_node_id = selection.source_node_id
+        operation = ConcordanceResultPublicationDerivation()
+        document = metadata.document
+        requested_name = selection.new_node_name
+        selected_columns = selection.selected_columns
+    elif isinstance(request, QuotationResultPublicationAnalysisRequest):
+        source_node_id = request.source.source_node_id
+        operation = QuotationResultPublicationDerivation()
+        document = metadata.document
+        requested_name = request.source.new_node_name
+        selected_columns = request.source.selected_columns
     elif isinstance(request, TopicModelingDetachmentAnalysisRequest) and isinstance(
         parent_request,
         TopicModelingAnalysisRequest,
@@ -463,9 +591,8 @@ def _validate_published_data_block_identity(
             raise ValueError("Topic Modeling detachment provenance is invalid")
         references = referenced_node_ids(metadata.provenance)
         operation_value = metadata.provenance.operation
-        if (
-            len(references) != 1
-            or not isinstance(operation_value, TopicModelingDetachmentDerivation)
+        if len(references) != 1 or not isinstance(
+            operation_value, TopicModelingDetachmentDerivation
         ):
             raise ValueError("Topic Modeling detachment provenance is invalid")
         source_id = references[0]
@@ -501,18 +628,46 @@ def _validate_published_data_block_identity(
         inputs=[
             DerivationInput(
                 role="source",
-                value=node_reference(str(request.node_id)),
+                value=node_reference(str(source_node_id)),
             )
         ],
     )
     if (
-        metadata.name != (request.name or default_name)
+        document is None
+        or document not in selected_columns
+        or metadata.name != requested_name
         or metadata.provenance != expected_provenance
         or metadata.document != document
-        or metadata.color is not None
+        or metadata.color
+        != _result_publication_source_color(workspace, record, source_node_id)
         or str(metadata.id) in workspace.nodes
     ):
         raise ValueError("Child Analysis Data Block metadata is invalid")
+
+
+def _result_publication_source_color(
+    workspace: Workspace,
+    record: AnalysisRecord,
+    source_node_id: uuid.UUID,
+) -> str | None:
+    parent = workspace.analyses.get(str(record.parent_analysis_id))
+    if parent is None or parent.result_payload is None:
+        raise ValueError("Result Publication parent is unavailable")
+    if isinstance(record.request, ConcordanceResultPublicationAnalysisRequest):
+        group = ConcordanceRunAllStoredResult.model_validate(parent.result_payload)
+        if group.sources is None:
+            raise ValueError("Concordance Result Publication parent is invalid")
+        descriptor = next(
+            (item for item in group.sources if item.node_id == source_node_id),
+            None,
+        )
+        if descriptor is None:
+            raise ValueError("Concordance Result Publication source is unavailable")
+        return descriptor.color
+    if isinstance(record.request, QuotationResultPublicationAnalysisRequest):
+        result = QuotationRunAllStoredResult.model_validate(parent.result_payload)
+        return result.source.color
+    raise ValueError("Analysis is not a Result Publication")
 
 
 def _publish_result(

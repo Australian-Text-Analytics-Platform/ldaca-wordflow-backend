@@ -82,14 +82,16 @@ def test_tabs_are_open_workspace_children_with_exact_resources(tmp_path: Path) -
             "id",
             "kind",
             "name",
-            "analysis_id",
+            "analysis_ids",
+            "annotation_correction_columns",
             "created_at",
             "modified_at",
             "revision",
         }
         assert tab["kind"] == "concordance"
         assert tab["name"] == "Shared name"
-        assert tab["analysis_id"] is None
+        assert tab["analysis_ids"] == []
+        assert tab["annotation_correction_columns"] == {}
         assert tab["created_at"] == tab["modified_at"]
         assert tab["revision"] == 1
         assert first.headers["Location"] == (
@@ -229,7 +231,8 @@ def test_workspace_archive_round_trip_preserves_tabs(tmp_path: Path) -> None:
                 "id": original["id"],
                 "kind": "quotation",
                 "name": "Portable tab",
-                "analysis_id": None,
+                "analysis_ids": [],
+                "annotation_correction_columns": {},
                 "created_at": original["created_at"],
                 "modified_at": original["modified_at"],
                 "revision": 1,

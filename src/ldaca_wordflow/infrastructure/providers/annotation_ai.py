@@ -1,8 +1,8 @@
 """External AI provider adapter for annotation inference.
 
-Used by ``services.annotations`` for stateless page previews, model discovery,
-and canonical full-column annotation tasks. This module is the single place
-that knows how to speak each supported provider's wire format.
+Used by Analysis result queries for fresh Preview pages and by Annotation
+Run All for full-column annotation. This module is the single place that knows
+how to speak each supported provider's wire format.
 
 Why it exists:
 - Centralising calls here bounds timeouts/retries, fans batches out with bounded
@@ -36,13 +36,24 @@ REQUEST_TIMEOUT_SECONDS = 90.0
 # One transient retry inside the SDK (429/5xx/timeout). Kept low so a persistently
 # failing provider fails fast rather than multiplying the timeout by the retry count.
 MAX_RETRIES = 1
-# Rows per provider request. 20 keeps per-request token cost/latency reasonable
-# while still classifying a meaningful chunk in one round trip.
-DEFAULT_BATCH_SIZE = 20
-# Ceiling on batches in flight at once for annotate-all. Bounded so a large table
+# Maximum rows per provider request. Context-window rejections split an affected
+# chunk until it fits, so ordinary short texts use the full 100-row ceiling
+# without letting unusually long rows fail the whole Analysis.
+MAX_BATCH_SIZE = 100
+# Ceiling on batches in flight at once for Run All. Bounded so a large table
 # fans out concurrently (not one batch after another) without hammering the
 # provider into rate limits.
-MAX_CONCURRENCY = 6
+MAX_CONCURRENCY = 10
+
+_CONTEXT_LIMIT_ERROR_MARKERS = (
+    "context_length_exceeded",
+    "maximum context length",
+    "context window",
+    "prompt is too long",
+    "input token count",
+    "too many input tokens",
+    "exceeds the maximum number of tokens",
+)
 
 AnnotationChatStyle = Literal["openai", "anthropic", "google"]
 
@@ -53,6 +64,26 @@ class AnnotationAiError(Exception):
     ``AnnotationService`` translates this into one safe ``BadGatewayError``
     instead of leaking SDK-specific exception types to the API surface.
     """
+
+
+class AnnotationContextLimitError(AnnotationAiError):
+    """A provider rejected one prompt because it exceeded the model context."""
+
+
+def _completion_error(error: Exception, fallback: str) -> AnnotationAiError:
+    """Classify provider context-window failures without provider-specific state."""
+
+    message = str(error) or fallback
+    details = " ".join(
+        (
+            message,
+            str(getattr(error, "code", "")),
+            str(getattr(error, "body", "")),
+        )
+    ).casefold()
+    if any(marker in details for marker in _CONTEXT_LIMIT_ERROR_MARKERS):
+        return AnnotationContextLimitError(message)
+    return AnnotationAiError(message)
 
 
 @dataclass(frozen=True)
@@ -126,9 +157,8 @@ class InferenceConfig:
     - ``annotate_batch`` / ``annotate_all`` (threaded into every ``_complete_*``
       dispatcher) because the Annotation tab's collapsible "Model Configuration"
       section lets the user pick a sampling temperature and optionally enable
-      reasoning with a thinking effort. The value travels from the preview and
-      annotate-all request bodies so the same knobs apply whether one page or the
-      whole column is classified.
+      reasoning with a thinking effort. The immutable Analysis request supplies
+      the same knobs for independent Preview and Run All Analyses.
 
     Why it exists:
     - Temperature and reasoning are the two knobs that differ per provider SDK
@@ -155,11 +185,10 @@ class InferenceConfig:
     ) -> InferenceConfig:
         """Build a config from raw request fields, clamped to safe ranges.
 
-        Called by the ``/annotation/ai/preview`` and ``/annotation/ai/annotate-all``
-        endpoints so an out-of-range temperature or unknown effort from the wire can
-        never reach a provider SDK: temperature is clamped to ``[0, 2]`` (the range
-        every supported provider accepts) and the effort falls back to the default
-        when it is not a recognised level.
+        Called at the Analysis request boundary so an out-of-range temperature or
+        unknown effort can never reach a provider SDK: temperature is clamped to
+        ``[0, 2]`` (the range every supported provider accepts) and the effort falls
+        back to the default when it is not a recognised level.
         """
         clamped = min(2.0, max(0.0, temperature))
         effort = reasoning_effort.strip().lower()
@@ -197,8 +226,16 @@ class AnnotationClassOption:
     description: str = ""
 
 
+@dataclass(frozen=True)
+class AnnotationExample:
+    text: str
+    label: str
+
+
 def build_annotation_system_prompt(
-    instruction: str, classes: list[AnnotationClassOption]
+    instruction: str,
+    classes: list[AnnotationClassOption],
+    examples: list[AnnotationExample] | None = None,
 ) -> str:
     """Assemble the system message: instruction + labelled classes + JSON contract.
 
@@ -214,8 +251,7 @@ def build_annotation_system_prompt(
         else f"- {option.name}"
         for option in classes
     )
-    return "\n".join(
-        [
+    parts = [
             instruction.strip(),
             "",
             "Classify each input text into exactly one of these classes:",
@@ -227,7 +263,21 @@ def build_annotation_system_prompt(
             '- Respond with ONLY a JSON object of the form {"labels": [...]} containing one',
             "  entry per input text, in the same order. No prose, no markdown.",
         ]
-    )
+    if examples:
+        parts.extend(
+            [
+                "",
+                "Examples (labels are authoritative and may extend the class list):",
+                json.dumps(
+                    [
+                        {"text": example.text, "label": example.label}
+                        for example in examples
+                    ],
+                    ensure_ascii=False,
+                ),
+            ]
+        )
+    return "\n".join(parts)
 
 
 def build_annotation_user_prompt(texts: list[str]) -> str:
@@ -381,7 +431,7 @@ async def _complete_openai(
                 stream=False,
             )
     except Exception as error:  # noqa: BLE001 - normalise every SDK failure shape
-        raise AnnotationAiError(str(error) or "OpenAI request failed") from error
+        raise _completion_error(error, "OpenAI request failed") from error
     return completion.choices[0].message.content or ""
 
 
@@ -427,7 +477,7 @@ async def _complete_anthropic(
             thinking=thinking,
         )
     except Exception as error:  # noqa: BLE001 - normalise every SDK failure shape
-        raise AnnotationAiError(str(error) or "Anthropic request failed") from error
+        raise _completion_error(error, "Anthropic request failed") from error
     return "".join(
         block.text for block in message.content if isinstance(block, TextBlock)
     )
@@ -469,7 +519,7 @@ async def _complete_google(
             ),
         )
     except Exception as error:  # noqa: BLE001 - normalise every SDK failure shape
-        raise AnnotationAiError(str(error) or "Google request failed") from error
+        raise _completion_error(error, "Google request failed") from error
     return response.text or ""
 
 
@@ -481,14 +531,14 @@ async def annotate_batch(
     classes: list[AnnotationClassOption],
     texts: list[str],
     config: InferenceConfig = InferenceConfig(),
+    examples: list[AnnotationExample] | None = None,
 ) -> list[str | None]:
     """Classify one batch of texts in a single provider request.
 
-    Called by:
-    - The ``/annotation/ai/preview`` endpoint (one page of texts) and by
-      ``annotate_all`` (once per batch). Builds the shared prompt, dispatches to
-      the matching native SDK by ``wire.chat_style``, then coerces the reply to one
-      known-class-or-null label per text, aligned to input order.
+    Used for a fresh Preview page and by ``annotate_all`` once per Run All
+    batch. Builds the shared prompt, dispatches to the matching native SDK by
+    ``wire.chat_style``, then coerces the reply to one known-label-or-null value
+    per text, aligned to input order.
 
     ``config`` carries the temperature/reasoning knobs; it defaults to
     deterministic sampling with reasoning off so callers that do not care (and the
@@ -496,7 +546,7 @@ async def annotate_batch(
     """
     if not texts:
         return []
-    system = build_annotation_system_prompt(instruction, classes)
+    system = build_annotation_system_prompt(instruction, classes, examples)
     user = build_annotation_user_prompt(texts)
     if wire.chat_style == "anthropic":
         if api_key is None:
@@ -508,7 +558,10 @@ async def annotate_batch(
         content = await _complete_google(model, api_key, system, user, config)
     else:
         content = await _complete_openai(wire, model, api_key, system, user, config)
-    return align_labels(content, len(texts), [option.name for option in classes])
+    known_labels = [option.name for option in classes]
+    if examples is not None:
+        known_labels.extend(example.label for example in examples)
+    return align_labels(content, len(texts), known_labels)
 
 
 async def annotate_all(
@@ -518,36 +571,47 @@ async def annotate_all(
     instruction: str,
     classes: list[AnnotationClassOption],
     texts: list[str],
-    batch_size: int = DEFAULT_BATCH_SIZE,
+    batch_size: int = MAX_BATCH_SIZE,
     concurrency: int = MAX_CONCURRENCY,
     config: InferenceConfig = InferenceConfig(),
+    examples: list[AnnotationExample] | None = None,
 ) -> list[str | None]:
     """Classify every text by fanning batches out concurrently, order preserved.
 
-    Called by:
-    - The ``/annotation/ai/annotate-all`` endpoint because a full-column run must
-      dispatch its batches concurrently (not one after another) yet return labels
-      in the original row order so the whole column can be written in one go.
+    Run All dispatches its batches concurrently yet receives labels in the
+    original row order so the whole column can be committed atomically.
 
     Flow:
-    - Split ``texts`` into ``batch_size`` chunks.
+    - Split ``texts`` into chunks of at most 100 rows.
     - Run them through ``annotate_batch`` (with the shared ``config``) under an
       ``asyncio.Semaphore`` cap so at most ``concurrency`` requests are in flight
       (avoids provider rate limits).
+    - When a provider rejects a chunk for exceeding its model context window,
+      recursively split only that chunk and retry the smaller halves.
     - ``asyncio.gather`` preserves submission order, so flattening the per-batch
       results reproduces the input order exactly.
     """
     if not texts:
         return []
-    size = max(1, batch_size)
+    size = min(MAX_BATCH_SIZE, max(1, batch_size))
     chunks = [texts[start : start + size] for start in range(0, len(texts), size)]
-    semaphore = asyncio.Semaphore(max(1, concurrency))
+    semaphore = asyncio.Semaphore(min(MAX_CONCURRENCY, max(1, concurrency)))
 
     async def run(chunk: list[str]) -> list[str | None]:
-        async with semaphore:
-            return await annotate_batch(
-                wire, model, api_key, instruction, classes, chunk, config
+        try:
+            async with semaphore:
+                return await annotate_batch(
+                    wire, model, api_key, instruction, classes, chunk, config, examples
+                )
+        except AnnotationContextLimitError:
+            if len(chunk) == 1:
+                raise
+            midpoint = len(chunk) // 2
+            left, right = await asyncio.gather(
+                run(chunk[:midpoint]),
+                run(chunk[midpoint:]),
             )
+            return [*left, *right]
 
     batches = await asyncio.gather(*(run(chunk) for chunk in chunks))
     return [label for batch in batches for label in batch]

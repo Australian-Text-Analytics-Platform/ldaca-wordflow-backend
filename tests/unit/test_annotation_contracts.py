@@ -14,10 +14,7 @@ from ldaca_wordflow.domain.workspace import (
     persisted_submission,
 )
 from ldaca_wordflow.models.annotations import (
-    AnnotationClass as PreviewAnnotationClass,
-    AnnotationConfig,
     AnnotationModelsRequest,
-    AnnotationPreviewRequest,
 )
 
 
@@ -29,8 +26,6 @@ def _classes() -> list[DomainAnnotationClass]:
 
 
 def test_annotation_class_is_one_shared_strict_value_contract() -> None:
-    assert PreviewAnnotationClass is DomainAnnotationClass
-
     annotation_class = DomainAnnotationClass(name="  Relevant  ")
     assert annotation_class.name == "Relevant"
     assert annotation_class.description == ""
@@ -41,29 +36,20 @@ def test_annotation_class_is_one_shared_strict_value_contract() -> None:
         setattr(annotation_class, "name", "Changed")
 
 
-def test_preview_and_analysis_requests_reject_duplicate_class_names() -> None:
-    with pytest.raises(ValidationError, match="class names must be unique"):
-        AnnotationConfig(
-            text_column="text",
-            annotation_column="class",
-            classes=_classes(),
-            provider_configuration_id=uuid.uuid4(),
-            provider="openai",
-            model="model",
-            instruction="Classify the text",
-        )
-
+def test_analysis_request_rejects_duplicate_class_names() -> None:
     with pytest.raises(ValidationError, match="class names must be unique"):
         AnnotationAnalysisRequest(
             node_id=uuid.uuid4(),
             text_column="text",
             annotation_column="class",
+            class_node_id=uuid.uuid4(),
+            class_column="class",
+            description_column="description",
             classes=_classes(),
             provider_configuration_id=uuid.uuid4(),
             provider="openai",
             model="model",
             instruction="Classify the text",
-            output_node_name="Annotated",
         )
 
 
@@ -73,13 +59,15 @@ def test_annotation_submission_persists_only_the_safe_provider_snapshot() -> Non
         node_id=uuid.UUID("830961ae-6712-4cd9-872c-258f5255177f"),
         text_column="text",
         annotation_column="class",
+        class_node_id=uuid.uuid4(),
+        class_column="class",
+        description_column="description",
         classes=[DomainAnnotationClass(name="Relevant")],
         provider_configuration_id=configuration_id,
         provider="custom",
         provider_base_url="http://localhost:8080/v1/",
         model="local-model",
         instruction="Classify the text",
-        output_node_name="Annotated",
         api_key="request-secret",
     )
 
@@ -92,17 +80,20 @@ def test_annotation_submission_persists_only_the_safe_provider_snapshot() -> Non
     assert "request-secret" not in persisted.model_dump_json()
 
 
-def test_preview_and_discovery_share_the_safe_provider_snapshot_contract() -> None:
+def test_analysis_and_discovery_share_the_safe_provider_snapshot_contract() -> None:
     configuration_id = uuid.UUID("1fe3bfd6-cb0f-4108-a954-24cad5deae20")
-    preview = AnnotationPreviewRequest(
+    analysis = AnnotationAnalysisRequest(
+        node_id=uuid.uuid4(),
         text_column="text",
         annotation_column="class",
+        class_node_id=uuid.uuid4(),
+        class_column="class",
+        description_column="description",
         classes=[DomainAnnotationClass(name="Relevant")],
         provider_configuration_id=configuration_id,
         provider="openrouter",
         model="model",
         instruction="Classify the text",
-        api_key="browser-secret",
     )
     discovery = AnnotationModelsRequest(
         provider_configuration_id=configuration_id,
@@ -110,6 +101,6 @@ def test_preview_and_discovery_share_the_safe_provider_snapshot_contract() -> No
         provider_base_url="http://localhost:8080/v1/",
     )
 
-    assert preview.provider_configuration_id == configuration_id
+    assert analysis.provider_configuration_id == configuration_id
     assert discovery.provider_base_url == "http://localhost:8080/v1"
     assert discovery.api_key is None

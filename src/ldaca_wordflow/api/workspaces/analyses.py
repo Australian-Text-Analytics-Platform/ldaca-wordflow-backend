@@ -1,4 +1,4 @@
-"""Workspace-owned Analysis singleton, collection, and lifecycle routes."""
+"""Workspace-owned Analysis forest, collection, and lifecycle routes."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, TypeAdapter
 from starlette.background import BackgroundTask
 
-from ...domain.workspace import Analysis, AnalysisSubmission, ChildAnalysisRequest
+from ...domain.workspace import Analysis, CorruptAnalysis
 from ...models.analysis_results import (
     AnalysisResult,
     AnalysisResultQuery,
@@ -20,7 +20,7 @@ from ...models.analysis_results import (
     StoredArtifactIdentity,
 )
 from ...models.tables import CompleteTableResource, PagedTableResource
-from ...models.analyses import AnalysisPage
+from ...models.analyses import AnalysisCreate, AnalysisPage
 from ...runtime import Runtime, get_runtime
 from ...services.analysis_results import ResultMaterialization
 from ...services.sessions import SessionPrincipal
@@ -135,14 +135,21 @@ def _present_result(
         analysis_id,
     )
     if isinstance(stored, dict):
-        for key in ("artifacts", "tables", "table"):
+        for key in (
+            "artifacts",
+            "tables",
+            "table",
+            "result_type",
+            "source",
+            "sources",
+        ):
             if key in stored:
                 payload[key] = stored[key]
     return _RESULT_ADAPTER.validate_python(payload)
 
 
 @router.post(
-    "/tabs/{tab_id}/analysis",
+    "/tabs/{tab_id}/analyses",
     response_model=Analysis,
     status_code=status.HTTP_201_CREATED,
     responses=api_errors(403, 404, 409, 422, 500, 507),
@@ -150,15 +157,15 @@ def _present_result(
 async def submit_tab_analysis(
     workspace_id: uuid.UUID,
     tab_id: uuid.UUID,
-    body: AnalysisSubmission,
+    body: AnalysisCreate,
     request: Request,
     response: Response,
     principal: Annotated[SessionPrincipal, Security(get_current_session)],
     runtime: Runtime = Depends(get_runtime),
 ) -> Analysis:
-    """Create one queued Analysis and atomically assign it to an empty Tab."""
+    """Create one complete immutable Analysis in a Tab-owned forest."""
 
-    analysis = await runtime.analysis_service.submit_root(
+    analysis = await runtime.analysis_service.submit(
         principal.user.id,
         str(workspace_id),
         str(tab_id),
@@ -174,19 +181,19 @@ async def submit_tab_analysis(
 
 
 @router.get(
-    "/tabs/{tab_id}/analysis",
-    response_model=Analysis,
-    responses=api_errors(403, 404, 409, 422, 500),
+    "/tabs/{tab_id}/analyses",
+    response_model=list[Analysis | CorruptAnalysis],
+    responses=api_errors(403, 404, 422, 500),
 )
-async def get_tab_analysis(
+async def list_tab_analyses(
     workspace_id: uuid.UUID,
     tab_id: uuid.UUID,
     principal: Annotated[SessionPrincipal, Security(get_current_session)],
     runtime: Runtime = Depends(get_runtime),
-) -> Analysis:
-    """Return the root Analysis currently assigned to one Tab."""
+) -> list[Analysis | CorruptAnalysis]:
+    """Return a Tab's complete Analysis forest in creation order."""
 
-    return await runtime.analysis_service.current_for_tab(
+    return await runtime.analysis_service.for_tab(
         principal.user.id,
         str(workspace_id),
         str(tab_id),
@@ -194,7 +201,7 @@ async def get_tab_analysis(
 
 
 @router.delete(
-    "/tabs/{tab_id}/analysis",
+    "/tabs/{tab_id}/analyses",
     status_code=status.HTTP_204_NO_CONTENT,
     responses=api_errors(403, 404, 409, 422, 500, 507),
 )
@@ -204,7 +211,7 @@ async def clear_tab_analysis(
     principal: Annotated[SessionPrincipal, Security(get_current_session)],
     runtime: Runtime = Depends(get_runtime),
 ) -> Response:
-    """Detach the current Analysis and make the Tab immediately reusable."""
+    """Clear the Tab's complete Analysis forest."""
 
     await runtime.analysis_service.clear_tab(
         principal.user.id,
@@ -254,38 +261,6 @@ async def get_analysis(
         str(workspace_id),
         str(analysis_id),
     )
-
-
-@router.post(
-    "/analyses/{analysis_id}/children",
-    response_model=Analysis,
-    status_code=status.HTTP_201_CREATED,
-    responses=api_errors(403, 404, 409, 422, 500, 507),
-)
-async def submit_child_analysis(
-    workspace_id: uuid.UUID,
-    analysis_id: uuid.UUID,
-    body: ChildAnalysisRequest,
-    request: Request,
-    response: Response,
-    principal: Annotated[SessionPrincipal, Security(get_current_session)],
-    runtime: Runtime = Depends(get_runtime),
-) -> Analysis:
-    """Create one recomputed child Analysis beneath a successful root."""
-
-    child = await runtime.analysis_service.submit_child(
-        principal.user.id,
-        str(workspace_id),
-        str(analysis_id),
-        body,
-    )
-    response.headers["Location"] = route_path(
-        request,
-        "get_analysis",
-        workspace_id=workspace_id,
-        analysis_id=child.id,
-    )
-    return child
 
 
 @router.post(

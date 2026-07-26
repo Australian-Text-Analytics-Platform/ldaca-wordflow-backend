@@ -32,6 +32,7 @@ from .node_store import NODE_DATA_DIR, NodePlanCapacityError
 from .node_store import to_dict as node_to_dict
 from ...domain.workspace import (
     AnalysisRecord,
+    AnalysisExecutionScope,
     AnalysisState,
     Node,
     NodeProvenance,
@@ -41,7 +42,7 @@ from ...domain.workspace import (
 )
 
 logger = logging.getLogger(__name__)
-WORKSPACE_SCHEMA_VERSION = 7
+WORKSPACE_SCHEMA_VERSION = 10
 _WORKSPACE_ENVELOPE_FIELDS = {"workspace_metadata", "nodes", "tabs", "analyses"}
 _WORKSPACE_METADATA_FIELDS = {
     "id",
@@ -275,10 +276,11 @@ def _read_tabs(
             tab = Tab.model_validate(payload)
             if str(tab.id) != tab_id:
                 raise ValueError("Workspace Tab identity does not match its reference")
-            if tab.analysis_id is not None:
-                if tab.analysis_id in analysis_ids:
-                    raise ValueError("A root Analysis cannot belong to multiple Tabs")
-                analysis_ids.add(tab.analysis_id)
+            if len(tab.analysis_ids) != len(set(tab.analysis_ids)):
+                raise ValueError("A Tab cannot contain duplicate Analysis IDs")
+            if analysis_ids.intersection(tab.analysis_ids):
+                raise ValueError("An Analysis cannot belong to multiple Tabs")
+            analysis_ids.update(tab.analysis_ids)
         except (OSError, UnicodeError, ValueError) as exc:
             raise TabSnapshotInvalidError(tab_id) from exc
         total_bytes += record_size
@@ -393,7 +395,7 @@ def _analysis_private_owner_ids(
     *,
     max_bytes: int,
 ) -> tuple[set[str], set[str], set[str]]:
-    """Derive which strict records may retain execution and Artifact storage."""
+    """Derive which strict records may retain private Analysis storage."""
 
     records, corrupt, _total_bytes = _read_analysis_records(
         root,
@@ -405,6 +407,23 @@ def _analysis_private_owner_ids(
         str(record.id)
         for record, _content in records
         if record.state in {AnalysisState.QUEUED, AnalysisState.RUNNING}
+        or (
+            record.execution_scope is AnalysisExecutionScope.SUPPORTING
+            and record.state is AnalysisState.SUCCEEDED
+            and record.parent_analysis_id is not None
+            and (
+                parent := next(
+                    (
+                        candidate
+                        for candidate, _raw in records
+                        if candidate.id == record.parent_analysis_id
+                    ),
+                    None,
+                )
+            )
+            is not None
+            and parent.state in {AnalysisState.QUEUED, AnalysisState.RUNNING}
+        )
     } | corrupt_ids
     artifact_owner_ids = {
         str(record.id)
@@ -414,8 +433,7 @@ def _analysis_private_owner_ids(
     query_snapshot_owner_ids = {
         str(record.id)
         for record, _content in records
-        if record.state is AnalysisState.SUCCEEDED
-        and record.query_snapshot is not None
+        if record.state is AnalysisState.SUCCEEDED and record.query_snapshot is not None
     } | corrupt_ids
     return execution_owner_ids, artifact_owner_ids, query_snapshot_owner_ids
 
@@ -432,39 +450,48 @@ def _add_workspace_analyses(
     Tab reachability.
     """
 
-    tab_root_ids = {
-        str(tab.analysis_id)
+    tab_analysis_ids = {
+        str(analysis_id)
         for tab in workspace.tabs.values()
-        if tab.analysis_id is not None
+        for analysis_id in tab.analysis_ids
     }
     by_id = {str(record.id): (record, content) for record, content in records}
-    for record, _content in records:
-        if record.parent_analysis_id is None:
-            workspace.add_analysis(record)
+    pending = list(records)
+    while pending:
+        next_pending: list[tuple[AnalysisRecord, bytes]] = []
+        progressed = False
+        for record, content in pending:
+            analysis_id = str(record.id)
+            parent_id = (
+                str(record.parent_analysis_id)
+                if record.parent_analysis_id is not None
+                else None
+            )
+            if parent_id is not None and parent_id not in workspace.analyses:
+                next_pending.append((record, content))
+                continue
+            tab = workspace.tabs.get(str(record.tab_id))
+            linked = analysis_id in tab_analysis_ids
+            if linked and (tab is None or record.id not in tab.analysis_ids):
+                corrupt[analysis_id] = content
+                progressed = True
+                continue
+            try:
+                workspace.add_analysis(record, link_to_tab=linked)
+            except ValueError:
+                corrupt[analysis_id] = content
+            progressed = True
+        if not progressed:
+            for record, content in next_pending:
+                corrupt[str(record.id)] = content
+            break
+        pending = next_pending
 
-    for record, content in records:
-        if record.parent_analysis_id is None:
+    for analysis_id in sorted(tab_analysis_ids):
+        if analysis_id in workspace.analyses:
             continue
-        analysis_id = str(record.id)
-        if analysis_id in tab_root_ids:
-            continue
-        parent_id = str(record.parent_analysis_id)
-        if parent_id not in workspace.analyses:
-            continue
-        try:
-            workspace.add_analysis(record)
-        except ValueError:
-            if analysis_id in tab_root_ids:
-                workspace.add_corrupt_analysis(analysis_id, content)
-
-    for root_id in sorted(tab_root_ids):
-        record = workspace.analyses.get(root_id)
-        if record is not None and record.parent_analysis_id is None:
-            continue
-        if record is not None:
-            workspace.analyses.pop(root_id)
-        content = corrupt.get(root_id, by_id.get(root_id, (None, b""))[1])
-        workspace.add_corrupt_analysis(root_id, content)
+        content = corrupt.get(analysis_id, by_id.get(analysis_id, (None, b""))[1])
+        workspace.add_corrupt_analysis(analysis_id, content)
 
 
 def _garbage_collect_workspace_analyses(
@@ -496,6 +523,18 @@ def _garbage_collect_workspace_analyses(
             if candidate in expected:
                 continue
             if candidate.name == ".execution":
+                if (
+                    analysis_directory.name in execution_owner_ids
+                    and candidate.is_dir()
+                    and not candidate.is_symlink()
+                ):
+                    continue
+                if candidate.is_dir() and not candidate.is_symlink():
+                    shutil.rmtree(candidate, ignore_errors=True)
+                else:
+                    candidate.unlink(missing_ok=True)
+                continue
+            if candidate.name == "staged-output":
                 if (
                     analysis_directory.name in execution_owner_ids
                     and candidate.is_dir()
@@ -709,6 +748,18 @@ def _write_workspace(
                 analysis_id
                 for analysis_id, analysis in workspace.analyses.items()
                 if analysis.state in {AnalysisState.QUEUED, AnalysisState.RUNNING}
+                or (
+                    analysis.execution_scope is AnalysisExecutionScope.SUPPORTING
+                    and analysis.state is AnalysisState.SUCCEEDED
+                    and analysis.parent_analysis_id is not None
+                    and (
+                        parent := workspace.analyses.get(
+                            str(analysis.parent_analysis_id)
+                        )
+                    )
+                    is not None
+                    and parent.state in {AnalysisState.QUEUED, AnalysisState.RUNNING}
+                )
             }
             | workspace.corrupt_analysis_ids,
             artifact_owner_ids={
@@ -1006,7 +1057,7 @@ def _rebase_workspace_sources(
 
 
 class WorkspaceStore:
-    """Own the complete schema-5 workspace snapshot persistence contract.
+    """Own the complete schema-9 workspace snapshot persistence contract.
 
     Used by ``WorkspaceService`` for live user workspaces and by archive/worker
     adapters only for private staging copies. Revision comparison, capacity

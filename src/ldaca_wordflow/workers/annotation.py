@@ -5,24 +5,20 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import polars as pl
 
-from ..domain.workspace import (
-    AnnotationAnalysisRequest,
-    AnnotationDerivation,
-    DerivationInput,
-    DerivationProvenance,
-    node_reference,
-)
+from ..domain.workspace import AnnotationAnalysisRequest
 from ..infrastructure.providers.annotation_ai import (
     AnnotationClassOption,
+    AnnotationExample,
     InferenceConfig,
     annotate_all,
     resolve_provider_wire,
 )
-from ..infrastructure.storage.node_store import write_detached_frame
+from ..infrastructure.storage.durable_fs import atomic_output_path
 from .input_snapshots import load_snapshot_node
 from .utils import process_entrypoint
 
@@ -36,6 +32,7 @@ def run_annotation_analysis(
     output_dir: str,
     request_payload: dict[str, Any],
     api_key: str | None,
+    correction_column: str | None = None,
     progress_callback: Callable[[float, str], None] | None = None,
 ) -> dict[str, Any]:
     """Classify one immutable Data Block snapshot and publish one private output."""
@@ -46,8 +43,10 @@ def run_annotation_analysis(
         schema = source.data.collect_schema()
         if request.text_column not in schema:
             raise ValueError("Annotation text column does not exist")
-        if request.annotation_column in schema:
-            raise ValueError("Annotation column already exists")
+        if request.annotation_column not in schema:
+            raise ValueError("Annotation column does not exist")
+        if correction_column is not None and correction_column not in schema:
+            raise ValueError("Annotation correction column does not exist")
 
         if progress_callback:
             progress_callback(0.05, "Reading annotation input")
@@ -81,42 +80,36 @@ def run_annotation_analysis(
                     reasoning_enabled=request.reasoning_enabled,
                     reasoning_effort=request.reasoning_effort,
                 ),
+                examples=_load_examples(request, input_snapshot_dir),
             )
         )
         if len(labels) != frame.height:
             raise ValueError("Annotation provider returned a misaligned result")
+        if correction_column is not None:
+            corrections = frame.get_column(correction_column).to_list()
+            labels = [
+                (
+                    str(correction).strip()
+                    if correction is not None and str(correction).strip()
+                    else predicted
+                )
+                for predicted, correction in zip(labels, corrections, strict=True)
+            ]
         result = frame.with_columns(
             pl.Series(name=request.annotation_column, values=labels)
         )
 
         if progress_callback:
             progress_callback(0.85, "Serializing annotated Data Block")
-        payload = write_detached_frame(
-            result,
-            base_dir=output_dir,
-            name=request.output_node_name,
-            provenance=DerivationProvenance(
-                operation=AnnotationDerivation(
-                    annotation_column=request.annotation_column,
-                    provider=request.provider,
-                    model=request.model,
-                ),
-                inputs=[
-                    DerivationInput(
-                        role="source",
-                        value=node_reference(str(request.node_id)),
-                    )
-                ],
-            ),
-            document=source.document,
-            color=source.color,
-        )
+        relative_path = "annotation-run-all.parquet"
+        with atomic_output_path(Path(output_dir) / relative_path) as temporary:
+            result.write_parquet(temporary)
         if progress_callback:
             progress_callback(0.95, "Publishing annotated Data Block")
         return {
             "state": "successful",
             "result": {
-                **payload,
+                "parquet_path": relative_path,
                 "output_columns": list(result.columns),
                 "record_count": result.height,
             },
@@ -125,6 +118,30 @@ def run_annotation_analysis(
     except Exception:
         logger.exception("Annotation Analysis failed")
         raise
+
+
+def _load_examples(
+    request: AnnotationAnalysisRequest,
+    input_snapshot_dir: str,
+) -> list[AnnotationExample]:
+    if request.example_node_id is None:
+        return []
+    assert request.example_text_column is not None
+    assert request.example_annotation_column is not None
+    example = load_snapshot_node(input_snapshot_dir, str(request.example_node_id))
+    frame = example.data.select(
+        request.example_text_column,
+        request.example_annotation_column,
+    ).collect(engine="streaming")
+    pairs: list[AnnotationExample] = []
+    for text, label in frame.iter_rows():
+        normalized_text = str(text).strip() if text is not None else ""
+        normalized_label = str(label).strip() if label is not None else ""
+        if normalized_text and normalized_label:
+            pairs.append(
+                AnnotationExample(text=normalized_text, label=normalized_label)
+            )
+    return pairs
 
 
 __all__ = ["run_annotation_analysis"]

@@ -11,13 +11,15 @@ from pydantic import TypeAdapter, ValidationError
 from ldaca_wordflow.domain.workspace import (
     AnalysisQuerySnapshotRecord,
     AnalysisRecord,
+    AnalysisExecutionScope,
     AnalysisRequest,
     AnalysisState,
     AnalysisKind,
     AnnotationAnalysisRequest,
     AnnotationAnalysisSubmission,
     ConcordanceAnalysisRequest,
-    ConcordanceDetachmentAnalysisRequest,
+    ConcordanceResultPublicationAnalysisRequest,
+    ConcordanceRunAllAnalysisRequest,
     Failure,
     Progress,
     Tab,
@@ -25,6 +27,9 @@ from ldaca_wordflow.domain.workspace import (
     ValidAnalysisIntegrity,
     Workspace,
     TopicModelingDetachmentAnalysisRequest,
+    QuotationAnalysisRequest,
+    QuotationResultPublicationAnalysisRequest,
+    ResultPublicationSource,
     persisted_submission,
     public_analysis,
 )
@@ -36,6 +41,23 @@ def _concordance() -> ConcordanceAnalysisRequest:
         node_ids=[node_id],
         node_columns={node_id: "text"},
         search_word="word",
+    )
+
+
+def _analysis(
+    request: AnalysisRequest,
+    *,
+    timestamp: datetime,
+    tab_id: uuid.UUID | None = None,
+    execution_scope: AnalysisExecutionScope = AnalysisExecutionScope.PREVIEW,
+    parent_analysis_id: uuid.UUID | None = None,
+) -> AnalysisRecord:
+    return AnalysisRecord.create(
+        request,
+        tab_id=tab_id or uuid.uuid4(),
+        execution_scope=execution_scope,
+        timestamp=timestamp,
+        parent_analysis_id=parent_analysis_id,
     )
 
 
@@ -136,17 +158,76 @@ def test_topic_modeling_detachment_request_preserves_ordered_sources() -> None:
         )
 
 
+def test_run_all_and_result_publication_have_distinct_strict_requests() -> None:
+    first = uuid.uuid4()
+    second = uuid.uuid4()
+    source = ConcordanceAnalysisRequest(
+        node_ids=[first, second],
+        node_columns={first: "text", second: "body"},
+        search_word="word",
+    )
+
+    run_all = ConcordanceRunAllAnalysisRequest(source=source)
+    assert TypeAdapter(AnalysisRequest).validate_python(
+        run_all.model_dump(mode="json")
+    ) == run_all
+    with pytest.raises(ValidationError):
+        ConcordanceRunAllAnalysisRequest.model_validate(
+            {
+                **run_all.model_dump(mode="json"),
+                "metadata_columns": ["author"],
+            }
+        )
+
+    publication = ConcordanceResultPublicationAnalysisRequest(
+        sources=[
+            ResultPublicationSource(
+                source_node_id=first,
+                selected_columns=["text", "CONC_matched_text"],
+                new_node_name="First concordance",
+            ),
+            ResultPublicationSource(
+                source_node_id=second,
+                selected_columns=["body"],
+                new_node_name="Second concordance",
+            ),
+        ]
+    )
+    restored = TypeAdapter(AnalysisRequest).validate_python(
+        publication.model_dump(mode="json")
+    )
+    assert restored == publication
+    with pytest.raises(ValidationError, match="unique"):
+        ConcordanceResultPublicationAnalysisRequest(
+            sources=[publication.sources[0], publication.sources[0]]
+        )
+
+    quotation_source = QuotationAnalysisRequest(node_id=first, column="text")
+    quotation_run_all = QuotationResultPublicationAnalysisRequest(
+        source=ResultPublicationSource(
+            source_node_id=quotation_source.node_id,
+            selected_columns=["text", "QUOTE_quote"],
+            new_node_name="Quotations",
+        )
+    )
+    assert TypeAdapter(AnalysisRequest).validate_python(
+        quotation_run_all.model_dump(mode="json")
+    ) == quotation_run_all
+
+
 def test_annotation_submission_strips_transient_secret_before_persistence() -> None:
     submission = AnnotationAnalysisSubmission(
         node_id=uuid.uuid4(),
         text_column="text",
         annotation_column="class",
+        class_node_id=uuid.uuid4(),
+        class_column="class",
+        description_column="description",
         classes=[{"name": "Relevant", "description": ""}],
         provider_configuration_id=uuid.uuid4(),
         provider="openai",
         model="model",
         instruction="Classify the text",
-        output_node_name="Annotated",
         api_key="transient-secret",
     )
 
@@ -180,12 +261,15 @@ def test_progress_rejects_normalization_and_unsafe_values(
 
 def test_analysis_lifecycle_and_public_shape_are_exact() -> None:
     created_at = datetime.now(UTC)
-    record = AnalysisRecord.create(_concordance(), timestamp=created_at)
+    record = _analysis(_concordance(), timestamp=created_at)
     public = public_analysis(record, integrity=ValidAnalysisIntegrity())
 
     assert set(public.model_dump()) == {
         "id",
+        "tab_id",
         "parent_analysis_id",
+        "execution_scope",
+        "supersedes_analysis_ids",
         "request",
         "state",
         "progress",
@@ -220,7 +304,7 @@ def test_analysis_lifecycle_and_public_shape_are_exact() -> None:
 
 
 def test_failed_and_cancelled_lifecycle_fields_are_not_interchangeable() -> None:
-    record = AnalysisRecord.create(_concordance(), timestamp=datetime.now(UTC))
+    record = _analysis(_concordance(), timestamp=datetime.now(UTC))
     payload = record.model_dump()
     payload.update(
         state="failed",
@@ -236,23 +320,30 @@ def test_failed_and_cancelled_lifecycle_fields_are_not_interchangeable() -> None
     assert AnalysisRecord.model_validate(payload).state is AnalysisState.CANCELLED
 
 
-def test_workspace_enforces_one_level_analysis_ownership_and_reservations() -> None:
+def test_workspace_supports_arbitrary_depth_analysis_forests_and_reservations() -> None:
     workspace = Workspace(name="analyses")
     node_id = uuid.uuid4()
+    tab = workspace.add_tab(
+        Tab.create(
+            kind=AnalysisKind.CONCORDANCE,
+            name="Concordance",
+            timestamp=datetime.now(UTC),
+        )
+    )
     request = ConcordanceAnalysisRequest(
         node_ids=[node_id],
         node_columns={node_id: "text"},
         search_word="word",
     )
     root = workspace.add_analysis(
-        AnalysisRecord.create(request, timestamp=datetime.now(UTC))
+        _analysis(request, tab_id=tab.id, timestamp=datetime.now(UTC))
     )
+    run_all_request = ConcordanceRunAllAnalysisRequest(source=request)
     child = workspace.add_analysis(
-        AnalysisRecord.create(
-            ConcordanceDetachmentAnalysisRequest(
-                node_id=node_id,
-                selected_columns=["left", "match", "right"],
-            ),
+        _analysis(
+            run_all_request,
+            tab_id=tab.id,
+            execution_scope=AnalysisExecutionScope.SUPPORTING,
             timestamp=datetime.now(UTC),
             parent_analysis_id=root.id,
         )
@@ -261,43 +352,45 @@ def test_workspace_enforces_one_level_analysis_ownership_and_reservations() -> N
     assert workspace.analysis_children(str(root.id)) == [child]
     assert workspace.reserved_node_ids() == {str(node_id)}
 
-    grandchild = AnalysisRecord.create(
-        ConcordanceDetachmentAnalysisRequest(
-            node_id=node_id,
-            selected_columns=["match"],
-        ),
+    grandchild = _analysis(
+        run_all_request,
+        tab_id=tab.id,
+        execution_scope=AnalysisExecutionScope.SUPPORTING,
         timestamp=datetime.now(UTC),
         parent_analysis_id=child.id,
     )
-    with pytest.raises(ValueError, match="root parent"):
-        workspace.add_analysis(grandchild)
+    workspace.add_analysis(grandchild)
+
+    assert workspace.analysis_descendants(str(root.id)) == [child, grandchild]
+    assert tab.analysis_ids == [root.id, child.id, grandchild.id]
 
 
 def test_workspace_separates_live_visibility_from_detached_reservations() -> None:
     workspace = Workspace(name="analyses")
     node_id = uuid.uuid4()
+    tab = workspace.add_tab(
+        Tab.create(
+            kind=AnalysisKind.CONCORDANCE,
+            name="Concordance",
+            timestamp=datetime.now(UTC),
+        )
+    )
     root = workspace.add_analysis(
-        AnalysisRecord.create(
+        _analysis(
             ConcordanceAnalysisRequest(
                 node_ids=[node_id],
                 node_columns={node_id: "text"},
                 search_word="word",
             ),
+            tab_id=tab.id,
             timestamp=datetime.now(UTC),
         )
     )
-    tab = Tab.create(
-        kind=AnalysisKind.CONCORDANCE,
-        name="Concordance",
-        timestamp=datetime.now(UTC),
-    )
-    tab.analysis_id = root.id
-    workspace.add_tab(tab)
 
     assert workspace.live_analysis_ids() == {str(root.id)}
     assert workspace.analysis_tab_id(str(root.id)) == str(tab.id)
 
-    tab.analysis_id = None
+    tab.analysis_ids.clear()
 
     assert workspace.live_analysis_ids() == set()
     assert workspace.analysis_tab_id(str(root.id)) is None
@@ -306,7 +399,7 @@ def test_workspace_separates_live_visibility_from_detached_reservations() -> Non
 
 def test_analysis_transition_methods_preserve_request_and_advance_revision() -> None:
     created_at = datetime.now(UTC)
-    record = AnalysisRecord.create(_concordance(), timestamp=created_at)
+    record = _analysis(_concordance(), timestamp=created_at)
 
     running = record.start(created_at + timedelta(seconds=1))
     requested = running.request_running_cancellation(
@@ -331,7 +424,7 @@ def test_analysis_transition_methods_preserve_request_and_advance_revision() -> 
 
 def test_queued_cancellation_and_interrupted_failure_have_exact_timestamps() -> None:
     created_at = datetime.now(UTC)
-    record = AnalysisRecord.create(_concordance(), timestamp=created_at)
+    record = _analysis(_concordance(), timestamp=created_at)
     cancelled_at = created_at + timedelta(seconds=1)
 
     cancelled = record.cancel_queued(cancelled_at)
@@ -350,7 +443,7 @@ def test_queued_cancellation_and_interrupted_failure_have_exact_timestamps() -> 
 
 def test_success_is_one_atomic_validated_transition() -> None:
     created_at = datetime.now(UTC)
-    record = AnalysisRecord.create(_concordance(), timestamp=created_at)
+    record = _analysis(_concordance(), timestamp=created_at)
     running = record.start(created_at + timedelta(seconds=1))
 
     succeeded = running.succeed(
@@ -368,7 +461,7 @@ def test_success_is_one_atomic_validated_transition() -> None:
 
 def test_success_records_query_snapshot_as_a_private_explicit_dependency() -> None:
     created_at = datetime.now(UTC)
-    running = AnalysisRecord.create(
+    running = _analysis(
         _concordance(), timestamp=created_at
     ).start(created_at + timedelta(seconds=1))
     query_snapshot = AnalysisQuerySnapshotRecord(
@@ -396,7 +489,7 @@ def test_analysis_output_node_ids_are_required_unique_and_strictly_plural() -> N
     created_at = datetime.now(UTC)
     first = uuid.uuid4()
     second = uuid.uuid4()
-    succeeded = AnalysisRecord.create(
+    succeeded = _analysis(
         _concordance(), timestamp=created_at
     ).start(created_at + timedelta(seconds=1)).succeed(
         created_at + timedelta(seconds=2),

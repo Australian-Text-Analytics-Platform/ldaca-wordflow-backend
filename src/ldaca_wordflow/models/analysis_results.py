@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from typing import Annotated, Generic, Literal, TypeVar, cast
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
 from ..domain.workspace import NodeProvenance
 from ..shared.json_data import JsonData
@@ -38,8 +38,23 @@ class QuotationResultQuery(_PagedQuery):
     kind: Literal["quotation"] = "quotation"
 
 
+class AnnotationResultQuery(_StrictModel):
+    kind: Literal["annotation"] = "annotation"
+    page: int = Field(default=1, ge=1)
+    page_size: int = Field(default=10, ge=1, le=200)
+    api_key: SecretStr | None = Field(
+        default=None,
+        min_length=1,
+        max_length=4_000,
+        json_schema_extra={"writeOnly": True},
+    )
+
+
 AnalysisResultQuery = Annotated[
-    TopicModelingResultQuery | ConcordanceResultQuery | QuotationResultQuery,
+    TopicModelingResultQuery
+    | ConcordanceResultQuery
+    | QuotationResultQuery
+    | AnnotationResultQuery,
     Field(discriminator="kind"),
 ]
 
@@ -243,40 +258,34 @@ class ConcordanceSourceResult(_StrictModel):
     result: ConcordancePage
 
 
-class ConcordanceWorkerResult(_StrictModel):
-    state: Literal["successful"]
-    message: str
-    sources: list[ConcordanceSourceResult] = Field(min_length=1, max_length=2)
+class PreviewReadyStoredResult(_StrictModel):
+    ready: Literal[True] = True
 
 
-class ConcordanceStoredResult(_StrictModel):
-    sources: list[ConcordanceSourceResult] = Field(min_length=1, max_length=2)
+class ConcordanceStoredResult(PreviewReadyStoredResult):
+    pass
 
 
-class ConcordanceResult(ConcordanceStoredResult):
+class ConcordanceResult(PreviewReadyStoredResult):
     kind: Literal["concordance"] = "concordance"
-    query: ConcordanceResultQuery
+    sources: list[ConcordanceSourceResult] | None = Field(
+        default=None, min_length=1, max_length=2
+    )
+    query: ConcordanceResultQuery | None = None
 
 
-class QuotationWorkerResult(_StrictModel):
-    data: list[list[dict[str, JsonData]]]
-    columns: list[str]
-    metadata: ResultColumnMetadata
-    pagination: SourcePagePagination
-    sorting: ResultSorting
+class QuotationStoredResult(PreviewReadyStoredResult):
+    pass
 
 
-class QuotationStoredResult(_StrictModel):
-    data: list[list[dict[str, JsonData]]]
-    columns: list[str]
-    metadata: ResultColumnMetadata
-    pagination: SourcePagePagination
-    sorting: ResultSorting
-
-
-class QuotationResult(QuotationStoredResult):
+class QuotationResult(PreviewReadyStoredResult):
     kind: Literal["quotation"] = "quotation"
-    query: QuotationResultQuery
+    data: list[list[dict[str, JsonData]]] | None = None
+    columns: list[str] | None = None
+    metadata: ResultColumnMetadata | None = None
+    pagination: SourcePagePagination | None = None
+    sorting: ResultSorting | None = None
+    query: QuotationResultQuery | None = None
 
 
 class SequentialWorkerResult(_StrictModel):
@@ -293,7 +302,7 @@ class SequentialResult(SequentialStoredResult):
     table: CompleteTableResource
 
 
-class DetachedDataBlockMetadata(_StrictModel):
+class PublishedDataBlockMetadata(_StrictModel):
     """Exact portable Data Block metadata accepted from a child process."""
 
     id: uuid.UUID
@@ -303,39 +312,76 @@ class DetachedDataBlockMetadata(_StrictModel):
     color: str | None = Field(default=None, max_length=100)
 
 
-class _DetachmentWorkerData(_StrictModel):
-    data_block: DetachedDataBlockMetadata
+class _PublishedDataBlockWorkerData(_StrictModel):
+    data_block: PublishedDataBlockMetadata
     parquet_path: PrivateArtifactPath
     output_columns: list[str]
     record_count: int = Field(ge=0)
 
 
-class DetachmentWorkerResult(_StrictModel):
+class PublishedDataBlockWorkerResult(_StrictModel):
     state: Literal["successful"]
-    result: _DetachmentWorkerData
+    result: _PublishedDataBlockWorkerData
     message: str
 
 
-class ConcordanceDetachmentWorkerResult(DetachmentWorkerResult):
-    pass
+class RunAllSourceDescriptor(_StrictModel):
+    node_id: uuid.UUID
+    node_name: NodeName
+    color: str | None
+    document_column: str = Field(min_length=1, max_length=500)
+    metadata_columns: list[str]
+    analysis_columns: list[str]
+    internal_columns: list[str]
+    record_count: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def validate_columns(self) -> "RunAllSourceDescriptor":
+        groups = (
+            [self.document_column],
+            self.metadata_columns,
+            self.analysis_columns,
+            self.internal_columns,
+        )
+        flattened = [column for group in groups for column in group]
+        if len(flattened) != len(set(flattened)):
+            raise ValueError("Run All Result column roles must be disjoint")
+        return self
 
 
-class ConcordanceDispersionDetachmentWorkerResult(DetachmentWorkerResult):
-    pass
+class RunAllSourceTable(RunAllSourceDescriptor, Generic[ArtifactValueT]):
+    table: PagedTableIdentity[ArtifactValueT]
 
 
-class QuotationDetachmentWorkerResult(DetachmentWorkerResult):
-    pass
+class ConcordanceRunAllWorkerResult(_StrictModel):
+    state: Literal["successful"]
+    result_type: Literal["source"] = "source"
+    source: RunAllSourceTable[PrivateArtifactPath]
+    message: str
 
 
-class AnnotationWorkerResult(DetachmentWorkerResult):
-    pass
+class QuotationRunAllWorkerResult(_StrictModel):
+    state: Literal["successful"]
+    source: RunAllSourceTable[PrivateArtifactPath]
+    message: str
+
+
+class AnnotationRunAllWorkerData(_StrictModel):
+    parquet_path: PrivateArtifactPath
+    output_columns: list[str]
+    record_count: int = Field(ge=0)
+
+
+class AnnotationRunAllWorkerResult(_StrictModel):
+    state: Literal["successful"]
+    result: AnnotationRunAllWorkerData
+    message: str
 
 
 class TopicModelingDetachmentWorkerOutput(_StrictModel):
     source_node_id: uuid.UUID
-    topic_data: _DetachmentWorkerData
-    topic_meanings: _DetachmentWorkerData
+    topic_data: _PublishedDataBlockWorkerData
+    topic_meanings: _PublishedDataBlockWorkerData
 
 
 class TopicModelingDetachmentWorkerResult(_StrictModel):
@@ -358,32 +404,104 @@ class TopicModelingDetachmentWorkerResult(_StrictModel):
         return self
 
 
-class DetachmentStoredResult(_StrictModel):
+class ResultPublicationWorkerOutput(_StrictModel):
+    source_node_id: uuid.UUID
+    data: _PublishedDataBlockWorkerData
+
+
+class ResultPublicationWorkerResult(_StrictModel):
+    state: Literal["successful"]
+    outputs: list[ResultPublicationWorkerOutput] = Field(min_length=1, max_length=2)
+    message: str
+
+    @model_validator(mode="after")
+    def validate_outputs(self) -> "ResultPublicationWorkerResult":
+        source_ids = [item.source_node_id for item in self.outputs]
+        output_ids = [item.data.data_block.id for item in self.outputs]
+        if len(source_ids) != len(set(source_ids)):
+            raise ValueError("Result Publication sources must be unique")
+        if len(output_ids) != len(set(output_ids)):
+            raise ValueError("Result Publication outputs must be unique")
+        return self
+
+
+class PublishedDataBlockStoredResult(_StrictModel):
     output_node_ids: list[uuid.UUID] = Field(min_length=1)
     output_columns: list[str]
     record_count: int = Field(ge=0)
 
 
-class ConcordanceDetachmentResult(DetachmentStoredResult):
-    kind: Literal["concordance_detachment"] = "concordance_detachment"
+class ConcordanceRunAllGroupSource(RunAllSourceDescriptor):
+    analysis_id: uuid.UUID
 
 
-class ConcordanceDispersionDetachmentResult(DetachmentStoredResult):
-    kind: Literal["concordance_dispersion_detachment"] = (
-        "concordance_dispersion_detachment"
-    )
+class ConcordanceRunAllStoredResult(_StrictModel):
+    result_type: Literal["source", "group"]
+    source: RunAllSourceTable[StoredArtifactIdentity] | None = None
+    sources: list[ConcordanceRunAllGroupSource] | None = None
+
+    @model_validator(mode="after")
+    def validate_shape(self) -> "ConcordanceRunAllStoredResult":
+        if self.result_type == "source":
+            if self.source is None or self.sources is not None:
+                raise ValueError("A source Result requires exactly one source table")
+        elif self.sources is None or self.source is not None:
+            raise ValueError("A group Result requires ordered source descriptors")
+        elif not self.sources:
+            raise ValueError("A group Result requires at least one source")
+        return self
 
 
-class QuotationDetachmentResult(DetachmentStoredResult):
-    kind: Literal["quotation_detachment"] = "quotation_detachment"
+class RunAllSourceTableResource(RunAllSourceDescriptor):
+    table: PagedTableResource
 
 
-class AnnotationStoredResult(DetachmentStoredResult):
-    annotation_column: str = Field(min_length=1, max_length=500)
+class ConcordanceRunAllResult(_StrictModel):
+    kind: Literal["concordance_run_all"] = "concordance_run_all"
+    result_type: Literal["source", "group"]
+    source: RunAllSourceTableResource | None = None
+    sources: list[ConcordanceRunAllGroupSource] | None = None
 
 
-class AnnotationResult(AnnotationStoredResult):
+class QuotationRunAllStoredResult(_StrictModel):
+    source: RunAllSourceTable[StoredArtifactIdentity]
+
+
+class QuotationRunAllResult(_StrictModel):
+    kind: Literal["quotation_run_all"] = "quotation_run_all"
+    source: RunAllSourceTableResource
+
+
+class AnnotationStoredResult(PreviewReadyStoredResult):
+    pass
+
+
+class AnnotationResult(PreviewReadyStoredResult):
     kind: Literal["annotation"] = "annotation"
+    node_id: uuid.UUID | None = None
+    page: int | None = Field(default=None, ge=1)
+    page_size: int | None = Field(default=None, ge=1)
+    total_rows: int | None = Field(default=None, ge=0)
+    rows: list[dict[str, JsonData]] | None = None
+    labels: list["AnnotationPreviewLabel"] | None = None
+    query: AnnotationResultQuery | None = None
+
+
+class AnnotationPreviewLabel(_StrictModel):
+    row_index: int = Field(ge=0)
+    label: str | None
+
+
+class AnnotationRunAllStoredResult(_StrictModel):
+    affected_node_id: uuid.UUID
+    annotation_column: str = Field(min_length=1, max_length=500)
+    committed_workspace_revision: int = Field(ge=1)
+    record_count: int = Field(ge=0)
+    annotated_count: int = Field(ge=0)
+
+
+class AnnotationRunAllResult(AnnotationRunAllStoredResult):
+    kind: Literal["annotation_run_all"] = "annotation_run_all"
 
 
 class TopicModelingDetachedOutput(_StrictModel):
@@ -420,6 +538,35 @@ class TopicModelingDetachmentResult(TopicModelingDetachmentStoredResult):
     kind: Literal["topic_modeling_detachment"] = "topic_modeling_detachment"
 
 
+class ResultPublicationOutput(_StrictModel):
+    source_node_id: uuid.UUID
+    output_node_id: uuid.UUID
+    output_columns: list[str]
+    record_count: int = Field(ge=0)
+
+
+class ResultPublicationStoredResult(_StrictModel):
+    output_node_ids: list[uuid.UUID] = Field(min_length=1, max_length=2)
+    outputs: list[ResultPublicationOutput] = Field(min_length=1, max_length=2)
+
+    @model_validator(mode="after")
+    def validate_output_identity(self) -> "ResultPublicationStoredResult":
+        expected = [output.output_node_id for output in self.outputs]
+        if self.output_node_ids != expected:
+            raise ValueError("Result Publication output order is invalid")
+        return self
+
+
+class ConcordanceResultPublicationResult(ResultPublicationStoredResult):
+    kind: Literal["concordance_result_publication"] = (
+        "concordance_result_publication"
+    )
+
+
+class QuotationResultPublicationResult(ResultPublicationStoredResult):
+    kind: Literal["quotation_result_publication"] = "quotation_result_publication"
+
+
 AnalysisResult = Annotated[
     TokenFrequencyResult
     | TopicModelingResult
@@ -427,24 +574,28 @@ AnalysisResult = Annotated[
     | QuotationResult
     | SequentialResult
     | AnnotationResult
-    | ConcordanceDetachmentResult
-    | ConcordanceDispersionDetachmentResult
-    | QuotationDetachmentResult
-    | TopicModelingDetachmentResult,
+    | ConcordanceRunAllResult
+    | QuotationRunAllResult
+    | AnnotationRunAllResult
+    | TopicModelingDetachmentResult
+    | ConcordanceResultPublicationResult
+    | QuotationResultPublicationResult,
     Field(discriminator="kind"),
 ]
 
 ANALYSIS_WORKER_RESULT_MODELS: dict[str, type[BaseModel]] = {
     "token_frequency": TokenFrequencyWorkerResult,
     "topic_modeling": TopicModelingWorkerResult,
-    "concordance": ConcordanceWorkerResult,
-    "quotation": QuotationWorkerResult,
+    "concordance": PreviewReadyStoredResult,
+    "quotation": PreviewReadyStoredResult,
     "sequential": SequentialWorkerResult,
-    "annotation": AnnotationWorkerResult,
-    "concordance_detachment": ConcordanceDetachmentWorkerResult,
-    "concordance_dispersion_detachment": (ConcordanceDispersionDetachmentWorkerResult),
-    "quotation_detachment": QuotationDetachmentWorkerResult,
+    "annotation": PreviewReadyStoredResult,
+    "annotation_run_all": AnnotationRunAllWorkerResult,
+    "concordance_run_all": ConcordanceRunAllWorkerResult,
+    "quotation_run_all": QuotationRunAllWorkerResult,
     "topic_modeling_detachment": TopicModelingDetachmentWorkerResult,
+    "concordance_result_publication": ResultPublicationWorkerResult,
+    "quotation_result_publication": ResultPublicationWorkerResult,
 }
 
 ANALYSIS_STORED_RESULT_MODELS: dict[str, type[BaseModel]] = {
@@ -454,10 +605,12 @@ ANALYSIS_STORED_RESULT_MODELS: dict[str, type[BaseModel]] = {
     "quotation": QuotationStoredResult,
     "sequential": SequentialStoredResult,
     "annotation": AnnotationStoredResult,
-    "concordance_detachment": DetachmentStoredResult,
-    "concordance_dispersion_detachment": DetachmentStoredResult,
-    "quotation_detachment": DetachmentStoredResult,
+    "annotation_run_all": AnnotationRunAllStoredResult,
+    "concordance_run_all": ConcordanceRunAllStoredResult,
+    "quotation_run_all": QuotationRunAllStoredResult,
     "topic_modeling_detachment": TopicModelingDetachmentStoredResult,
+    "concordance_result_publication": ResultPublicationStoredResult,
+    "quotation_result_publication": ResultPublicationStoredResult,
 }
 
 
@@ -468,6 +621,8 @@ def stored_result_payload(kind: str, result: BaseModel) -> dict[str, JsonData]:
         "token_frequency": {"state", "message"},
         "concordance": {"state", "message"},
         "sequential": {"state"},
+        "concordance_run_all": {"state", "message"},
+        "quotation_run_all": {"state", "message"},
     }.get(kind, set())
     return cast(
         dict[str, JsonData],
@@ -480,29 +635,36 @@ __all__ = [
     "ANALYSIS_WORKER_RESULT_MODELS",
     "AnalysisResult",
     "AnalysisResultQuery",
+    "AnnotationResultQuery",
     "AnnotationResult",
     "AnnotationStoredResult",
-    "AnnotationWorkerResult",
+    "AnnotationRunAllResult",
+    "AnnotationRunAllStoredResult",
+    "AnnotationRunAllWorkerResult",
     "ArtifactResource",
     "ConcordanceResult",
     "ConcordanceResultQuery",
     "ConcordanceStoredResult",
-    "ConcordanceWorkerResult",
     "CompleteTableIdentity",
-    "ConcordanceDetachmentResult",
-    "ConcordanceDetachmentWorkerResult",
-    "ConcordanceDispersionDetachmentResult",
-    "ConcordanceDispersionDetachmentWorkerResult",
-    "DetachedDataBlockMetadata",
-    "DetachmentStoredResult",
-    "DetachmentWorkerResult",
+    "ConcordanceRunAllResult",
+    "ConcordanceRunAllStoredResult",
+    "ConcordanceRunAllWorkerResult",
+    "PublishedDataBlockMetadata",
+    "PublishedDataBlockStoredResult",
+    "PublishedDataBlockWorkerResult",
+    "ResultPublicationStoredResult",
+    "ResultPublicationOutput",
+    "ResultPublicationWorkerResult",
     "PrivateArtifactPath",
     "QuotationResult",
     "QuotationResultQuery",
     "QuotationStoredResult",
-    "QuotationWorkerResult",
-    "QuotationDetachmentResult",
-    "QuotationDetachmentWorkerResult",
+    "QuotationRunAllResult",
+    "QuotationRunAllStoredResult",
+    "QuotationRunAllWorkerResult",
+    "RunAllSourceDescriptor",
+    "RunAllSourceTable",
+    "PreviewReadyStoredResult",
     "ResultPagination",
     "SequentialResult",
     "SequentialStoredResult",

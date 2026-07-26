@@ -12,10 +12,11 @@ import polars as pl
 import pytest
 
 from ldaca_wordflow.domain.workspace import (
+    AnalysisExecutionScope,
     AnalysisRecord,
     AnalysisKind,
     ConcordanceAnalysisRequest,
-    ConcordanceDetachmentAnalysisRequest,
+    ConcordanceRunAllAnalysisRequest,
     DerivationInput,
     DerivationProvenance,
     Node,
@@ -121,7 +122,7 @@ def test_native_round_trip_preserves_tokenizer_and_rejects_schema_six(
 
     _rewrite_workspace_snapshot(
         path,
-        lambda payload: payload["workspace_metadata"].update({"version": 6}),
+        lambda payload: payload["workspace_metadata"].update({"version": 9}),
     )
     with pytest.raises(WorkspaceSnapshotInvalidError):
         store.load(path)
@@ -274,7 +275,7 @@ def test_tab_generations_follow_the_workspace_commit_point(tmp_path: Path) -> No
     second_payload = json.loads((path / "workspace.json").read_text(encoding="utf-8"))
     second_record = path / second_payload["tabs"][0]["record_path"]
 
-    assert first_payload["workspace_metadata"]["version"] == 7
+    assert first_payload["workspace_metadata"]["version"] == 10
     assert first_record != second_record
     assert not first_record.exists()
     assert second_record.exists()
@@ -325,29 +326,33 @@ def test_analysis_records_round_trip_with_root_and_child_ownership(
     store = _store()
     workspace = Workspace(name="analyses")
     node_id = uuid.uuid4()
-    root = workspace.add_analysis(
-        AnalysisRecord.create(
-            ConcordanceAnalysisRequest(
-                node_ids=[node_id],
-                node_columns={node_id: "text"},
-                search_word="word",
-            ),
+    tab = workspace.add_tab(
+        Tab.create(
+            kind=AnalysisKind.CONCORDANCE,
+            name="Concordance",
             timestamp=datetime.now(UTC),
         )
     )
-    tab = Tab.create(
-        kind=AnalysisKind.CONCORDANCE,
-        name="Concordance",
-        timestamp=datetime.now(UTC),
+    source_request = ConcordanceAnalysisRequest(
+        node_ids=[node_id],
+        node_columns={node_id: "text"},
+        search_word="word",
     )
-    tab.analysis_id = root.id
-    workspace.add_tab(tab)
+    root = workspace.add_analysis(
+        AnalysisRecord.create(
+            source_request,
+            tab_id=tab.id,
+            execution_scope=AnalysisExecutionScope.PREVIEW,
+            timestamp=datetime.now(UTC),
+        )
+    )
     child = workspace.add_analysis(
         AnalysisRecord.create(
-            ConcordanceDetachmentAnalysisRequest(
-                node_id=node_id,
-                selected_columns=["match"],
+            ConcordanceRunAllAnalysisRequest(
+                source=source_request,
             ),
+            tab_id=tab.id,
+            execution_scope=AnalysisExecutionScope.SUPPORTING,
             timestamp=datetime.now(UTC),
             parent_analysis_id=root.id,
         )
@@ -376,8 +381,11 @@ def test_detached_analysis_remains_persisted_but_is_not_live(
                 node_columns={node_id: "text"},
                 search_word="word",
             ),
+            tab_id=uuid.uuid4(),
+            execution_scope=AnalysisExecutionScope.PREVIEW,
             timestamp=datetime.now(UTC),
-        )
+        ),
+        link_to_tab=False,
     )
 
     store.commit(path, workspace, expected_revision=None)
@@ -402,8 +410,11 @@ def test_analysis_private_execution_storage_survives_commits_until_record_remova
                 node_columns={node_id: "text"},
                 search_word="word",
             ),
+            tab_id=uuid.uuid4(),
+            execution_scope=AnalysisExecutionScope.PREVIEW,
             timestamp=datetime.now(UTC),
-        )
+        ),
+        link_to_tab=False,
     )
     store.commit(path, workspace, expected_revision=None)
     private = path / "analyses" / str(root.id) / ".execution" / "input"
@@ -425,6 +436,13 @@ def test_corrupt_analysis_is_isolated_and_preserved_across_tab_mutation(
     store = _store()
     workspace = Workspace(name="corrupt analysis")
     node_id = uuid.uuid4()
+    tab = workspace.add_tab(
+        Tab.create(
+            kind=AnalysisKind.CONCORDANCE,
+            name="Healthy tab",
+            timestamp=datetime.now(UTC),
+        )
+    )
     root = workspace.add_analysis(
         AnalysisRecord.create(
             ConcordanceAnalysisRequest(
@@ -432,16 +450,11 @@ def test_corrupt_analysis_is_isolated_and_preserved_across_tab_mutation(
                 node_columns={node_id: "text"},
                 search_word="word",
             ),
+            tab_id=tab.id,
+            execution_scope=AnalysisExecutionScope.PREVIEW,
             timestamp=datetime.now(UTC),
         )
     )
-    tab = Tab.create(
-        kind=AnalysisKind.CONCORDANCE,
-        name="Healthy tab",
-        timestamp=datetime.now(UTC),
-    )
-    tab.analysis_id = root.id
-    workspace.add_tab(tab)
     store.commit(path, workspace, expected_revision=None)
     payload = json.loads((path / "workspace.json").read_text(encoding="utf-8"))
     analysis_path = path / payload["analyses"][0]["record_path"]
