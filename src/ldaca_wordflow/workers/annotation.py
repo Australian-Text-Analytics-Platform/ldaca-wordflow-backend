@@ -32,7 +32,6 @@ def run_annotation_analysis(
     output_dir: str,
     request_payload: dict[str, Any],
     api_key: str | None,
-    correction_column: str | None = None,
     progress_callback: Callable[[float, str], None] | None = None,
 ) -> dict[str, Any]:
     """Classify one immutable Data Block snapshot and publish one private output."""
@@ -45,7 +44,10 @@ def run_annotation_analysis(
             raise ValueError("Annotation text column does not exist")
         if request.annotation_column not in schema:
             raise ValueError("Annotation column does not exist")
-        if correction_column is not None and correction_column not in schema:
+        if (
+            request.correction_column is not None
+            and request.correction_column not in schema
+        ):
             raise ValueError("Annotation correction column does not exist")
 
         if progress_callback:
@@ -85,8 +87,8 @@ def run_annotation_analysis(
         )
         if len(labels) != frame.height:
             raise ValueError("Annotation provider returned a misaligned result")
-        if correction_column is not None:
-            corrections = frame.get_column(correction_column).to_list()
+        if request.correction_column is not None:
+            corrections = frame.get_column(request.correction_column).to_list()
             labels = [
                 (
                     str(correction).strip()

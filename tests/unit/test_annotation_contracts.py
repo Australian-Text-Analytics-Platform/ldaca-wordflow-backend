@@ -53,12 +53,34 @@ def test_analysis_request_rejects_duplicate_class_names() -> None:
         )
 
 
+@pytest.mark.parametrize("correction_column", ["text", "class"])
+def test_analysis_request_rejects_overlapping_correction_column(
+    correction_column: str,
+) -> None:
+    with pytest.raises(ValidationError, match="correction column must differ"):
+        AnnotationAnalysisRequest(
+            node_id=uuid.uuid4(),
+            text_column="text",
+            annotation_column="class",
+            correction_column=correction_column,
+            class_node_id=uuid.uuid4(),
+            class_column="class",
+            description_column="description",
+            classes=[DomainAnnotationClass(name="Relevant")],
+            provider_configuration_id=uuid.uuid4(),
+            provider="openai",
+            model="model",
+            instruction="Classify the text",
+        )
+
+
 def test_annotation_submission_persists_only_the_safe_provider_snapshot() -> None:
     configuration_id = uuid.UUID("8edb7484-4b45-4834-bf67-ef113a834fb9")
     submission = AnnotationAnalysisSubmission(
         node_id=uuid.UUID("830961ae-6712-4cd9-872c-258f5255177f"),
         text_column="text",
         annotation_column="class",
+        correction_column="reviewed_class",
         class_node_id=uuid.uuid4(),
         class_column="class",
         description_column="description",
@@ -77,6 +99,7 @@ def test_annotation_submission_persists_only_the_safe_provider_snapshot() -> Non
     assert persisted.provider_configuration_id == configuration_id
     assert persisted.provider == "custom"
     assert persisted.provider_base_url == "http://localhost:8080/v1"
+    assert persisted.correction_column == "reviewed_class"
     assert "request-secret" not in persisted.model_dump_json()
 
 

@@ -444,7 +444,6 @@ class AnalysisExecutionPreparer:
                     "output_dir": str(artifact_dir),
                     "request_payload": source.model_dump(mode="json"),
                     "api_key": credential,
-                    "correction_column": request.correction_column,
                 },
             )
         raise InvalidInputError("Analysis kind has no process implementation")

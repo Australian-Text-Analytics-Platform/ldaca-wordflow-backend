@@ -132,6 +132,17 @@ def test_annotation_requests_share_one_annotation_class_schema() -> None:
         "AnnotationAnalysisSubmission",
     ):
         assert schemas[request_name]["properties"]["classes"]["items"] == expected_ref
+        assert "correction_column" in schemas[request_name]["properties"]
+
+    assert set(schemas["AnnotationRunAllAnalysisRequest"]["properties"]) == {
+        "kind",
+        "source",
+    }
+    assert set(schemas["AnnotationRunAllSubmission"]["properties"]) == {
+        "api_key",
+        "kind",
+        "source",
+    }
 
 
 def test_workspace_owned_analysis_representation_is_exact() -> None:

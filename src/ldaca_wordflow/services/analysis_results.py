@@ -749,7 +749,10 @@ async def _query_annotation_snapshot(
 ) -> dict[str, JsonData]:
     source = load_snapshot_node(snapshot_dir, str(request.node_id))
     schema = source.data.collect_schema()
-    for column in (request.text_column, request.annotation_column):
+    columns = [request.text_column, request.annotation_column]
+    if request.correction_column is not None:
+        columns.append(request.correction_column)
+    for column in columns:
         if column not in schema:
             raise InvalidInputError("Annotation Preview column does not exist")
     start = (query.page - 1) * query.page_size

@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import time
 from functools import partial
+from io import BytesIO
 from pathlib import Path
 
 from anyio.to_thread import run_sync as run_sync_in_worker_thread
 from fastapi.testclient import TestClient
+import polars as pl
 
 from ldaca_wordflow.main import create_app
 from ldaca_wordflow.services import analysis_executor as analysis_executor_module
@@ -106,9 +108,13 @@ def test_annotation_preview_is_durable_and_run_all_edits_the_source(
         for path, content in (
             (
                 "documents.csv",
-                b"text,stance,username\n"
+                b"text,stance,review,username\n"
                 + b"".join(
-                    f"document-{index},,candidate-{index % 133}\n".encode()
+                    (
+                        f"document-{index},,"
+                        f"{'critical' if index == 0 else ''},"
+                        f"candidate-{index % 133}\n"
+                    ).encode()
                     for index in range(2380)
                 ),
             ),
@@ -181,6 +187,7 @@ def test_annotation_preview_is_durable_and_run_all_edits_the_source(
             "node_id": joined_id,
             "text_column": "text",
             "annotation_column": "stance",
+            "correction_column": "review",
             "class_node_id": class_id,
             "class_column": "class",
             "description_column": "description",
@@ -244,3 +251,23 @@ def test_annotation_preview_is_durable_and_run_all_edits_the_source(
         child = _wait(client, workspace_id, run_all.json()["id"])
         assert child["state"] == "succeeded", child
         assert child["output_node_ids"] == []
+        reviewed = client.post(
+            f"/api/workspaces/{workspace_id}/sql",
+            json={
+                "mode": "query",
+                "node_ids": [joined_id],
+                "sql": (
+                    f'SELECT "text", "stance", "review" FROM "{joined_id}" '
+                    "WHERE \"text\" IN ('document-0', 'document-1') "
+                    'ORDER BY "text" ASC'
+                ),
+                "page": 1,
+                "page_size": 2,
+            },
+            headers=unsafe,
+        )
+        assert reviewed.status_code == 200, reviewed.text
+        assert pl.read_ipc_stream(BytesIO(reviewed.content)).to_dicts() == [
+            {"text": "document-0", "stance": "critical", "review": "critical"},
+            {"text": "document-1", "stance": "support", "review": None},
+        ]

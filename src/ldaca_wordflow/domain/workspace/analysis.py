@@ -215,6 +215,7 @@ class _AnnotationFields(AnnotationProviderSnapshot):
     node_id: uuid.UUID
     text_column: NonEmptyText = Field(max_length=500)
     annotation_column: NonEmptyText = Field(max_length=500)
+    correction_column: NonEmptyText | None = Field(default=None, max_length=500)
     class_node_id: uuid.UUID
     class_column: NonEmptyText = Field(max_length=500)
     description_column: NonEmptyText = Field(max_length=500)
@@ -229,10 +230,14 @@ class _AnnotationFields(AnnotationProviderSnapshot):
     reasoning_effort: Literal["low", "medium", "high"] = "medium"
 
     @model_validator(mode="after")
-    def unique_classes(self) -> "_AnnotationFields":
+    def validate_annotation_fields(self) -> "_AnnotationFields":
         normalized = [item.name.casefold() for item in self.classes]
         if len(normalized) != len(set(normalized)):
             raise ValueError("Annotation class names must be unique")
+        if self.correction_column in {self.text_column, self.annotation_column}:
+            raise ValueError(
+                "Annotation correction column must differ from text and annotation columns"
+            )
         example_fields = (
             self.example_node_id,
             self.example_text_column,
@@ -333,13 +338,11 @@ class QuotationResultPublicationAnalysisRequest(_StrictModel):
 class AnnotationRunAllAnalysisRequest(_StrictModel):
     kind: Literal["annotation_run_all"] = "annotation_run_all"
     source: AnnotationAnalysisRequest
-    correction_column: NonEmptyText | None = Field(default=None, max_length=500)
 
 
 class AnnotationRunAllSubmission(_StrictModel):
     kind: Literal["annotation_run_all"] = "annotation_run_all"
     source: AnnotationAnalysisRequest
-    correction_column: NonEmptyText | None = Field(default=None, max_length=500)
     api_key: SecretStr | None = Field(
         default=None,
         min_length=1,
@@ -348,10 +351,7 @@ class AnnotationRunAllSubmission(_StrictModel):
     )
 
     def persisted_request(self) -> AnnotationRunAllAnalysisRequest:
-        return AnnotationRunAllAnalysisRequest(
-            source=self.source,
-            correction_column=self.correction_column,
-        )
+        return AnnotationRunAllAnalysisRequest(source=self.source)
 
 
 class TopicMeaningOverride(_StrictModel):
