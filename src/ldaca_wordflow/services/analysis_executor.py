@@ -34,6 +34,18 @@ class _PipeConnection(Protocol):
     def close(self) -> None: ...
 
 
+def _poll_result_connection(
+    connection: _PipeConnection,
+    timeout: float = 0.0,
+) -> bool:
+    """Treat a closed Windows named pipe as an empty result channel."""
+
+    try:
+        return connection.poll(timeout)
+    except BrokenPipeError:
+        return False
+
+
 class AnalysisProcessError(RuntimeError):
     """One child failed or exited without a valid result envelope."""
 
@@ -228,7 +240,8 @@ class AnalysisProcessExecutor:
                 last_storage_check = now
 
             if await run_sync_in_worker_thread(
-                result_parent.poll,
+                _poll_result_connection,
+                result_parent,
                 0.05,
                 abandon_on_cancel=False,
             ):
@@ -264,7 +277,7 @@ class AnalysisProcessExecutor:
             if not process.is_alive():
                 await self._join(process, timeout=1.0)
                 await self._drain_progress(progress_queue, report_progress)
-                if result_parent.poll():
+                if _poll_result_connection(result_parent):
                     continue
                 async with self._lock:
                     entry = self._entries.get(key)

@@ -16,6 +16,7 @@ from ldaca_wordflow.services.analysis_execution_types import (
 from ldaca_wordflow.services.analysis_executor import (
     AnalysisProcessCancelled,
     AnalysisProcessExecutor,
+    _poll_result_connection,
 )
 from ldaca_wordflow.workers.entrypoints import _progress_callback
 
@@ -45,6 +46,14 @@ def _report_then_write(*, destination: str, progress_queue: Any) -> str:
 
 def _key(value: str) -> AnalysisExecutionKey:
     return AnalysisExecutionKey("user", "workspace", value)
+
+
+def test_broken_result_pipe_has_no_available_envelope() -> None:
+    class BrokenResultPipe:
+        def poll(self, _timeout: float = 0.0) -> bool:
+            raise BrokenPipeError
+
+    assert not _poll_result_connection(cast(Any, BrokenResultPipe()), 0.05)
 
 
 def _invocation(function, **kwargs: object) -> AnalysisInvocation:
