@@ -20,7 +20,7 @@ from ..domain.workspace import (
     AnalysisState,
     NodeProvenance,
     Tab,
-    analysis_input_ids,
+    analysis_snapshot_input_ids,
 )
 
 
@@ -155,7 +155,7 @@ class WorkspaceArchiveAnalysis(_StrictModel):
 
     @model_validator(mode="after")
     def validate_query_inputs(self) -> "WorkspaceArchiveAnalysis":
-        expected_ids = list(analysis_input_ids(self.record.request))
+        expected_ids = list(analysis_snapshot_input_ids(self.record.request))
         actual_ids = [item.id for item in self.query_inputs]
         if self.record.query_snapshot is None:
             if actual_ids:
@@ -175,7 +175,7 @@ class WorkspaceArchiveManifest(_StrictModel):
     """Only accepted client workspace archive manifest."""
 
     format: Literal["wordflow-materialized-workspace"]
-    version: Literal[10]
+    version: Literal[11]
     workspace: WorkspaceArchiveMetadata
     nodes: list[WorkspaceArchiveNode]
     tabs: list[Tab]

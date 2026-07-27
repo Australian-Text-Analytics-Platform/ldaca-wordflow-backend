@@ -44,7 +44,7 @@ from ..domain.workspace import (
     AnalysisState,
     Node,
     Workspace,
-    analysis_input_ids,
+    analysis_snapshot_input_ids,
     referenced_node_ids,
 )
 from ..infrastructure.storage.workspace_store import WorkspaceStore
@@ -991,7 +991,7 @@ def _create_workspace_export(
             query_inputs: list[dict[str, JsonData]] = []
             if record.query_snapshot is not None:
                 query_snapshot = source_root / record.query_snapshot.relative_path
-                for node_id in analysis_input_ids(record.request):
+                for node_id in analysis_snapshot_input_ids(record.request):
                     snapshot_node = load_snapshot_node(query_snapshot, str(node_id))
                     data_file = (
                         Path("analyses")
@@ -1025,7 +1025,7 @@ def _create_workspace_export(
         manifest = WorkspaceArchiveManifest.model_validate(
             {
                 "format": "wordflow-materialized-workspace",
-                "version": 10,
+                "version": 11,
                 "workspace": {
                     "id": workspace.id,
                     "name": workspace.name,
