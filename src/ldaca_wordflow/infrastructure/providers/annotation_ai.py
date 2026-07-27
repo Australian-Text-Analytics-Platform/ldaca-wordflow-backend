@@ -17,29 +17,31 @@ Flow (per call):
 - Dispatch one request per batch through the provider's *native* async SDK
   (``AsyncOpenAI`` for openai/openrouter, ``AsyncAnthropic`` for anthropic,
   ``google-genai`` aio for google).
-- Loosely parse the JSON reply and coerce every returned label to a known class
-  name (case-insensitive) or ``None``, always returning exactly one label per
-  input text so callers can map results back to rows positionally.
+- Validate the JSON reply and canonicalise every returned label to a known class
+  name (case-insensitive) or ``None``. A complete response must contain exactly
+  one label per input text so callers can map results back positionally.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal, cast
 
+from ...domain.annotation import AnnotationClass
+from ...domain.workspace.analysis import (
+    AnnotationAnalysisRequest,
+    AnnotationRunAllAnalysisRequest,
+)
+
 # Per-request network timeout. Chosen well below the provider SDKs' 10-minute
-# default so a slow/rate-limited provider surfaces as a bounded error instead of
-# a silent multi-minute hang (the browser-side stall this refactor fixes).
+# default so a slow or rate-limited provider has a bounded wait.
 REQUEST_TIMEOUT_SECONDS = 90.0
-# One transient retry inside the SDK (429/5xx/timeout). Kept low so a persistently
-# failing provider fails fast rather than multiplying the timeout by the retry count.
-MAX_RETRIES = 1
-# Maximum rows per provider request. Context-window rejections split an affected
-# chunk until it fits, so ordinary short texts use the full 100-row ceiling
-# without letting unusually long rows fail the whole Analysis.
-MAX_BATCH_SIZE = 100
+# Model discovery is not part of an Analysis request, so it keeps one bounded
+# transient retry independently of the per-batch Annotation setting.
+MODEL_DISCOVERY_MAX_RETRIES = 1
 # Ceiling on batches in flight at once for Run All. Bounded so a large table
 # fans out concurrently (not one batch after another) without hammering the
 # provider into rate limits.
@@ -61,13 +63,21 @@ AnnotationChatStyle = Literal["openai", "anthropic", "google"]
 class AnnotationAiError(Exception):
     """A provider/LLM call failed (auth, rate limit, network, bad response).
 
-    ``AnnotationService`` translates this into one safe ``BadGatewayError``
-    instead of leaking SDK-specific exception types to the API surface.
+    Preview translates this into one safe ``BadGatewayError``. Run All records
+    it as one failed terminal batch so other batches can still be published.
     """
+
+    def __init__(self, message: str, *, retryable: bool = True) -> None:
+        super().__init__(message)
+        self.retryable = retryable
 
 
 class AnnotationContextLimitError(AnnotationAiError):
     """A provider rejected one prompt because it exceeded the model context."""
+
+
+class AnnotationResponseError(AnnotationAiError):
+    """A provider returned an incomplete or invalid successful response."""
 
 
 def _completion_error(error: Exception, fallback: str) -> AnnotationAiError:
@@ -83,7 +93,11 @@ def _completion_error(error: Exception, fallback: str) -> AnnotationAiError:
     ).casefold()
     if any(marker in details for marker in _CONTEXT_LIMIT_ERROR_MARKERS):
         return AnnotationContextLimitError(message)
-    return AnnotationAiError(message)
+    status = getattr(error, "status_code", getattr(error, "code", None))
+    retryable = (
+        not isinstance(status, int) or status in {408, 409, 429} or status >= 500
+    )
+    return AnnotationAiError(message, retryable=retryable)
 
 
 @dataclass(frozen=True)
@@ -135,11 +149,6 @@ def resolve_provider_wire(
         raise ValueError("Unsupported annotation provider") from exc
 
 
-# Reasoning-effort levels, ordered low→high. Kept in sync with the frontend's
-# AnnotationInferenceSettings dropdown so a persisted value always resolves to a
-# level every provider can honour.
-REASONING_EFFORTS: tuple[str, ...] = ("low", "medium", "high")
-DEFAULT_REASONING_EFFORT = "medium"
 # Extended-thinking token budget per effort level for the providers whose SDKs
 # take a raw budget (Anthropic, Google). OpenAI-style providers instead accept
 # the effort string directly, so they ignore this table.
@@ -151,79 +160,25 @@ ANSWER_TOKEN_HEADROOM = 4096
 
 @dataclass(frozen=True)
 class InferenceConfig:
-    """Provider-agnostic sampling/reasoning knobs for one annotation request.
+    """Provider-agnostic sampling and reasoning values for one request."""
 
-    Used by:
-    - ``annotate_batch`` / ``annotate_all`` (threaded into every ``_complete_*``
-      dispatcher) because the Annotation tab's collapsible "Model Configuration"
-      section lets the user pick a sampling temperature and optionally enable
-      reasoning with a thinking effort. The immutable Analysis request supplies
-      the same knobs for independent Preview and Run All Analyses.
-
-    Why it exists:
-    - Temperature and reasoning are the two knobs that differ per provider SDK
-      (OpenAI takes ``reasoning_effort``; Anthropic/Google take a thinking-token
-      budget), so centralising them in one immutable value keeps the dispatchers
-      from each re-deriving the mapping and keeps the defaults (temperature 0,
-      reasoning off) identical to the pre-feature behaviour.
-
-    Fields:
-    - ``temperature``: sampling temperature (0 = deterministic, the default).
-    - ``reasoning_enabled``: when False (default) no reasoning/thinking params are
-      sent, so non-reasoning models keep working exactly as before.
-    - ``reasoning_effort``: one of ``REASONING_EFFORTS``; mapped to the provider's
-      native reasoning control only when ``reasoning_enabled`` is True.
-    """
-
-    temperature: float = 0.0
-    reasoning_enabled: bool = False
-    reasoning_effort: str = DEFAULT_REASONING_EFFORT
-
-    @classmethod
-    def from_request(
-        cls, temperature: float, reasoning_enabled: bool, reasoning_effort: str
-    ) -> InferenceConfig:
-        """Build a config from raw request fields, clamped to safe ranges.
-
-        Called at the Analysis request boundary so an out-of-range temperature or
-        unknown effort can never reach a provider SDK: temperature is clamped to
-        ``[0, 2]`` (the range every supported provider accepts) and the effort falls
-        back to the default when it is not a recognised level.
-        """
-        clamped = min(2.0, max(0.0, temperature))
-        effort = reasoning_effort.strip().lower()
-        if effort not in REASONING_EFFORTS:
-            effort = DEFAULT_REASONING_EFFORT
-        return cls(
-            temperature=clamped,
-            reasoning_enabled=reasoning_enabled,
-            reasoning_effort=effort,
-        )
+    temperature: float
+    reasoning_enabled: bool
+    reasoning_effort: Literal["low", "medium", "high"]
 
 
 def _reasoning_budget_tokens(effort: str) -> int:
-    """Map a reasoning effort level to a provider thinking-token budget.
+    """Map a validated reasoning effort to a provider thinking-token budget."""
 
-    Called by the Anthropic and Google dispatchers, whose SDKs take a raw token
-    budget rather than an effort string. Unknown levels fall back to the medium
-    budget so a bad value degrades gracefully instead of raising.
-    """
-    return _REASONING_BUDGET_TOKENS.get(effort, _REASONING_BUDGET_TOKENS["medium"])
+    return _REASONING_BUDGET_TOKENS[effort]
 
 
-@dataclass(frozen=True)
-class AnnotationClassOption:
-    """A class the model may assign, with an optional guiding description.
+def _max_completion_tokens(config: InferenceConfig) -> int:
+    """Bound answer generation while leaving room for requested reasoning."""
 
-    Used by:
-    - ``build_annotation_system_prompt`` to render the labelled choice list and by
-      ``annotate_batch`` to derive the canonical class names label coercion maps
-      onto. Loaded server-side from the class-description node so the valid label
-      set stays authoritative regardless of what the client sends.
-    """
-
-    name: str
-    description: str = ""
+    if not config.reasoning_enabled:
+        return ANSWER_TOKEN_HEADROOM
+    return _reasoning_budget_tokens(config.reasoning_effort) + ANSWER_TOKEN_HEADROOM
 
 
 @dataclass(frozen=True)
@@ -232,18 +187,24 @@ class AnnotationExample:
     label: str
 
 
+@dataclass(frozen=True)
+class AnnotationAllResult:
+    """Row-aligned Run All labels plus terminal batch outcome counts."""
+
+    labels: list[str | None]
+    failed_batch_count: int
+    failed_row_count: int
+
+
 def build_annotation_system_prompt(
     instruction: str,
-    classes: list[AnnotationClassOption],
+    classes: list[AnnotationClass],
     examples: list[AnnotationExample] | None = None,
 ) -> str:
     """Assemble the system message: instruction + labelled classes + JSON contract.
 
-    Called by ``annotate_batch``. Kept byte-for-byte aligned with the frontend's
-    former ``buildAnnotationSystemPrompt`` so moving the call server-side does not
-    change model behaviour: the instruction leads, each class is listed (with its
-    description when present), and a strict ``{"labels": [...]}`` output rule keeps
-    the reply machine-parseable across every provider.
+    The instruction leads, each class is listed with its optional description,
+    and a strict ``{"labels": [...]}`` contract keeps replies machine-parseable.
     """
     class_lines = "\n".join(
         f"- {option.name}: {option.description.strip()}"
@@ -252,17 +213,20 @@ def build_annotation_system_prompt(
         for option in classes
     )
     parts = [
-            instruction.strip(),
-            "",
-            "Classify each input text into exactly one of these classes:",
-            class_lines,
-            "",
-            "Rules:",
-            "- Use the exact class name shown above for each text.",
-            "- If no class applies, use null.",
-            '- Respond with ONLY a JSON object of the form {"labels": [...]} containing one',
-            "  entry per input text, in the same order. No prose, no markdown.",
-        ]
+        instruction.strip(),
+        "",
+        "The batch and JSON response rules below take precedence over any conflicting "
+        "response-format wording in the instruction.",
+        "",
+        "Classify each input text into exactly one of these classes:",
+        class_lines,
+        "",
+        "Rules:",
+        "- Use the exact class name shown above for each text.",
+        "- If no class applies, use null.",
+        '- Respond with ONLY a JSON object of the form {"labels": [...]} containing one',
+        "  entry per input text, in the same order. No prose, no markdown.",
+    ]
     if examples:
         parts.extend(
             [
@@ -283,9 +247,8 @@ def build_annotation_system_prompt(
 def build_annotation_user_prompt(texts: list[str]) -> str:
     """Render the page texts as a JSON array so special characters stay unambiguous.
 
-    Called by ``annotate_batch``. Mirrors the frontend's former
-    ``buildAnnotationUserPrompt``; the count is stated up front and the order is
-    preserved so the model's positional ``labels`` array lines up with the rows.
+    The count is stated up front and input order is preserved so the model's
+    positional ``labels`` array lines up with source rows.
     """
     return "\n".join(
         [
@@ -295,69 +258,40 @@ def build_annotation_user_prompt(texts: list[str]) -> str:
     )
 
 
-def loose_parse_json(content: str) -> object | None:
-    """Best-effort parse of a model reply into JSON.
-
-    Called by ``align_labels``. Ports the frontend's ``looseParseJson``: strip a
-    markdown code fence, try a direct parse, then fall back to the first
-    ``{...}``/``[...]`` span so a chatty model that wraps the payload in prose
-    still yields usable output. Returns ``None`` when nothing parses.
-    """
-    stripped = content.strip()
-    if stripped.startswith("```"):
-        stripped = stripped[3:]
-        # Drop an optional language tag on the opening fence (e.g. ```json).
-        newline = stripped.find("\n")
-        if newline != -1 and " " not in stripped[:newline]:
-            stripped = stripped[newline + 1 :]
-    if stripped.endswith("```"):
-        stripped = stripped[:-3]
-    stripped = stripped.strip()
-
-    def attempt(text: str) -> object | None:
-        try:
-            return json.loads(text)
-        except ValueError, TypeError:
-            return None
-
-    direct = attempt(stripped)
-    if direct is not None:
-        return direct
-    for open_char, close_char in (("{", "}"), ("[", "]")):
-        start = stripped.find(open_char)
-        end = stripped.rfind(close_char)
-        if start != -1 and end > start:
-            span = attempt(stripped[start : end + 1])
-            if span is not None:
-                return span
-    return None
-
-
 def align_labels(content: str, count: int, class_names: list[str]) -> list[str | None]:
-    """Coerce a model reply into exactly ``count`` known-class-or-null labels.
+    """Validate and canonicalise one complete Annotation JSON response."""
 
-    Called by ``annotate_batch``. Ports the frontend's ``alignLabels``: parse the
-    JSON, read a ``labels`` array (or a bare array), and map each entry
-    case-insensitively to a canonical class name or ``None``. Always returns
-    ``count`` entries so a short/long reply still lines up with the rows
-    positionally, and unknown labels degrade to ``None`` rather than corrupting
-    the column.
-    """
-    parsed = loose_parse_json(content)
-    source = (
-        cast("dict[str, object]", parsed).get("labels")
-        if isinstance(parsed, dict)
-        else parsed
-    )
-    raw_labels = source if isinstance(source, list) else []
-    canonical = {name.strip().lower(): name for name in class_names}
+    try:
+        parsed = json.loads(content)
+    except (ValueError, TypeError) as error:
+        raise AnnotationResponseError(
+            "Annotation response was not valid JSON"
+        ) from error
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("labels"), list):
+        raise AnnotationResponseError(
+            'Annotation response must be a JSON object with a "labels" array'
+        )
+    raw_labels = cast("list[object]", parsed["labels"])
+    if len(raw_labels) != count:
+        raise AnnotationResponseError(
+            "Annotation response must contain exactly one label per input text"
+        )
+    canonical = {name.strip().casefold(): name for name in class_names}
     result: list[str | None] = []
-    for index in range(count):
-        raw = raw_labels[index] if index < len(raw_labels) else None
-        if isinstance(raw, str):
-            result.append(canonical.get(raw.strip().lower()))
-        else:
+    for raw in raw_labels:
+        if raw is None:
             result.append(None)
+            continue
+        if not isinstance(raw, str):
+            raise AnnotationResponseError(
+                "Annotation response labels must be class names or null"
+            )
+        label = canonical.get(raw.strip().casefold())
+        if label is None:
+            raise AnnotationResponseError(
+                "Annotation response contained an unknown class name"
+            )
+        result.append(label)
     return result
 
 
@@ -371,7 +305,7 @@ async def _complete_openai(
 ) -> str:
     """Run the completion through the native OpenAI SDK (also OpenRouter/custom).
 
-    Called by ``annotate_batch`` for the ``openai`` chat style. The three
+    Called by ``_annotate_batch`` for the ``openai`` chat style. The three
     OpenAI-compatible providers differ only by ``base_url``; a placeholder key is
     used for keyless endpoints (the SDK rejects an empty string). JSON mode is
     requested when the provider supports it. Any SDK error is wrapped in
@@ -390,7 +324,7 @@ async def _complete_openai(
         api_key=api_key or "no-key-required",
         base_url=wire.base_url,
         timeout=REQUEST_TIMEOUT_SECONDS,
-        max_retries=MAX_RETRIES,
+        max_retries=0,
     )
     messages: list[ChatCompletionMessageParam] = [
         {"role": "system", "content": system},
@@ -419,6 +353,7 @@ async def _complete_openai(
                 messages=messages,
                 temperature=temperature,
                 reasoning_effort=reasoning_effort,
+                max_completion_tokens=_max_completion_tokens(config),
                 response_format={"type": "json_object"},
                 stream=False,
             )
@@ -428,19 +363,27 @@ async def _complete_openai(
                 messages=messages,
                 temperature=temperature,
                 reasoning_effort=reasoning_effort,
+                max_completion_tokens=_max_completion_tokens(config),
                 stream=False,
             )
     except Exception as error:  # noqa: BLE001 - normalise every SDK failure shape
         raise _completion_error(error, "OpenAI request failed") from error
-    return completion.choices[0].message.content or ""
+    choice = completion.choices[0]
+    if choice.finish_reason == "length":
+        raise AnnotationResponseError("Annotation response reached its output limit")
+    return choice.message.content or ""
 
 
 async def _complete_anthropic(
-    model: str, api_key: str, system: str, user: str, config: InferenceConfig
+    model: str,
+    api_key: str,
+    system: str,
+    user: str,
+    config: InferenceConfig,
 ) -> str:
     """Run the completion through the native Anthropic SDK.
 
-    Called by ``annotate_batch`` for the ``anthropic`` chat style. The system
+    Called by ``_annotate_batch`` for the ``anthropic`` chat style. The system
     prompt is passed as Anthropic's top-level ``system`` field; text blocks in the
     reply are concatenated into the raw JSON payload. Errors are wrapped in
     ``AnnotationAiError``.
@@ -457,7 +400,7 @@ async def _complete_anthropic(
     client = AsyncAnthropic(
         api_key=api_key,
         timeout=REQUEST_TIMEOUT_SECONDS,
-        max_retries=MAX_RETRIES,
+        max_retries=0,
     )
     max_tokens = 4096
     thinking: ThinkingConfigParam | Omit = omit
@@ -484,11 +427,15 @@ async def _complete_anthropic(
 
 
 async def _complete_google(
-    model: str, api_key: str, system: str, user: str, config: InferenceConfig
+    model: str,
+    api_key: str,
+    system: str,
+    user: str,
+    config: InferenceConfig,
 ) -> str:
     """Run the completion through the native Google GenAI SDK (async client).
 
-    Called by ``annotate_batch`` for the ``google`` chat style. The system prompt
+    Called by ``_annotate_batch`` for the ``google`` chat style. The system prompt
     becomes ``system_instruction`` and ``response_mime_type`` asks Gemini for raw
     JSON. Errors are wrapped in ``AnnotationAiError``.
 
@@ -499,7 +446,13 @@ async def _complete_google(
     from google import genai
     from google.genai import types
 
-    client = genai.Client(api_key=api_key)
+    client = genai.Client(
+        api_key=api_key,
+        http_options=types.HttpOptions(
+            timeout=int(REQUEST_TIMEOUT_SECONDS * 1000),
+            retry_options=types.HttpRetryOptions(attempts=1),
+        ),
+    )
     thinking_config = (
         types.ThinkingConfig(
             thinking_budget=_reasoning_budget_tokens(config.reasoning_effort)
@@ -514,6 +467,7 @@ async def _complete_google(
             config=types.GenerateContentConfig(
                 system_instruction=system,
                 temperature=config.temperature,
+                max_output_tokens=_max_completion_tokens(config),
                 response_mime_type="application/json",
                 thinking_config=thinking_config,
             ),
@@ -523,105 +477,165 @@ async def _complete_google(
     return response.text or ""
 
 
-async def annotate_batch(
+def _inference_config(request: AnnotationAnalysisRequest) -> InferenceConfig:
+    return InferenceConfig(
+        temperature=request.temperature,
+        reasoning_enabled=request.reasoning_enabled,
+        reasoning_effort=request.reasoning_effort,
+    )
+
+
+async def _annotate_batch(
     wire: ProviderWire,
     model: str,
     api_key: str | None,
     instruction: str,
-    classes: list[AnnotationClassOption],
+    classes: list[AnnotationClass],
     texts: list[str],
-    config: InferenceConfig = InferenceConfig(),
+    config: InferenceConfig,
+    max_retries: int,
     examples: list[AnnotationExample] | None = None,
 ) -> list[str | None]:
     """Classify one batch of texts in a single provider request.
 
-    Used for a fresh Preview page and by ``annotate_all`` once per Run All
-    batch. Builds the shared prompt, dispatches to the matching native SDK by
-    ``wire.chat_style``, then coerces the reply to one known-label-or-null value
-    per text, aligned to input order.
-
-    ``config`` carries the temperature/reasoning knobs; it defaults to
-    deterministic sampling with reasoning off so callers that do not care (and the
-    existing tests) keep the original behaviour.
+    Build the shared prompt, dispatch to the provider adapter, and coerce the
+    response to one known-label-or-null value per input row.
     """
     if not texts:
         return []
+    if wire.chat_style == "anthropic" and api_key is None:
+        raise AnnotationAiError("Anthropic requires an API key", retryable=False)
+    if wire.chat_style == "google" and api_key is None:
+        raise AnnotationAiError("Google requires an API key", retryable=False)
     system = build_annotation_system_prompt(instruction, classes, examples)
     user = build_annotation_user_prompt(texts)
-    if wire.chat_style == "anthropic":
-        if api_key is None:
-            raise AnnotationAiError("Anthropic requires an API key")
-        content = await _complete_anthropic(model, api_key, system, user, config)
-    elif wire.chat_style == "google":
-        if api_key is None:
-            raise AnnotationAiError("Google requires an API key")
-        content = await _complete_google(model, api_key, system, user, config)
-    else:
-        content = await _complete_openai(wire, model, api_key, system, user, config)
     known_labels = [option.name for option in classes]
     if examples is not None:
         known_labels.extend(example.label for example in examples)
-    return align_labels(content, len(texts), known_labels)
+    for attempt in range(max_retries + 1):
+        try:
+            if wire.chat_style == "anthropic":
+                content = await _complete_anthropic(
+                    model, cast("str", api_key), system, user, config
+                )
+            elif wire.chat_style == "google":
+                content = await _complete_google(
+                    model, cast("str", api_key), system, user, config
+                )
+            else:
+                content = await _complete_openai(
+                    wire, model, api_key, system, user, config
+                )
+            return align_labels(content, len(texts), known_labels)
+        except AnnotationContextLimitError:
+            raise
+        except AnnotationAiError as error:
+            if not error.retryable or attempt == max_retries:
+                raise
+            if not isinstance(error, AnnotationResponseError):
+                await asyncio.sleep(2**attempt)
+    raise AssertionError("Annotation response retry loop did not return")
+
+
+async def annotate_preview(
+    request: AnnotationAnalysisRequest,
+    api_key: str | None,
+    texts: list[str],
+    examples: list[AnnotationExample] | None = None,
+) -> list[str | None]:
+    """Classify one fresh Preview page from its immutable request."""
+
+    return await _annotate_batch(
+        resolve_provider_wire(request.provider, request.provider_base_url),
+        request.model,
+        api_key,
+        request.instruction,
+        request.classes,
+        texts,
+        _inference_config(request),
+        request.max_retries_per_batch,
+        examples,
+    )
 
 
 async def annotate_all(
-    wire: ProviderWire,
-    model: str,
+    request: AnnotationRunAllAnalysisRequest,
     api_key: str | None,
-    instruction: str,
-    classes: list[AnnotationClassOption],
     texts: list[str],
-    batch_size: int = MAX_BATCH_SIZE,
-    concurrency: int = MAX_CONCURRENCY,
-    config: InferenceConfig = InferenceConfig(),
     examples: list[AnnotationExample] | None = None,
-) -> list[str | None]:
-    """Classify every text by fanning batches out concurrently, order preserved.
+    progress_callback: Callable[[int, int, int], None] | None = None,
+) -> AnnotationAllResult:
+    """Classify a complete Run All input with row order preserved.
 
-    Run All dispatches its batches concurrently yet receives labels in the
-    original row order so the whole column can be committed atomically.
-
-    Flow:
-    - Split ``texts`` into chunks of at most 100 rows.
-    - Run them through ``annotate_batch`` (with the shared ``config``) under an
-      ``asyncio.Semaphore`` cap so at most ``concurrency`` requests are in flight
-      (avoids provider rate limits).
-    - When a provider rejects a chunk for exceeding its model context window,
-      recursively split only that chunk and retry the smaller halves.
-    - ``asyncio.gather`` preserves submission order, so flattening the per-batch
-      results reproduces the input order exactly.
+    Context-limit and invalid-response failures recursively split only the
+    affected chunk. Other exhausted provider failures become aligned null labels
+    so successful chunks remain publishable.
     """
     if not texts:
-        return []
-    size = min(MAX_BATCH_SIZE, max(1, batch_size))
+        return AnnotationAllResult([], 0, 0)
+    source = request.source
+    wire = resolve_provider_wire(source.provider, source.provider_base_url)
+    config = _inference_config(source)
+    size = request.batch_size
     chunks = [texts[start : start + size] for start in range(0, len(texts), size)]
-    semaphore = asyncio.Semaphore(min(MAX_CONCURRENCY, max(1, concurrency)))
+    semaphore = asyncio.Semaphore(MAX_CONCURRENCY)
+    completed_rows = 0
+    failed_batch_count = 0
+    failed_row_count = 0
+
+    def record_terminal_batch(row_count: int, *, failed: bool) -> None:
+        nonlocal completed_rows
+        nonlocal failed_batch_count
+        nonlocal failed_row_count
+        completed_rows += row_count
+        if failed:
+            failed_batch_count += 1
+            failed_row_count += row_count
+        if progress_callback is not None:
+            progress_callback(completed_rows, len(texts), failed_batch_count)
 
     async def run(chunk: list[str]) -> list[str | None]:
         try:
             async with semaphore:
-                return await annotate_batch(
-                    wire, model, api_key, instruction, classes, chunk, config, examples
+                labels = await _annotate_batch(
+                    wire,
+                    source.model,
+                    api_key,
+                    source.instruction,
+                    source.classes,
+                    chunk,
+                    config,
+                    source.max_retries_per_batch,
+                    examples,
                 )
-        except AnnotationContextLimitError:
+        except AnnotationContextLimitError, AnnotationResponseError:
             if len(chunk) == 1:
-                raise
+                record_terminal_batch(1, failed=True)
+                return [None]
             midpoint = len(chunk) // 2
             left, right = await asyncio.gather(
                 run(chunk[:midpoint]),
                 run(chunk[midpoint:]),
             )
             return [*left, *right]
+        except AnnotationAiError:
+            record_terminal_batch(len(chunk), failed=True)
+            return [None] * len(chunk)
+        record_terminal_batch(len(chunk), failed=False)
+        return labels
 
     batches = await asyncio.gather(*(run(chunk) for chunk in chunks))
-    return [label for batch in batches for label in batch]
+    return AnnotationAllResult(
+        labels=[label for batch in batches for label in batch],
+        failed_batch_count=failed_batch_count,
+        failed_row_count=failed_row_count,
+    )
 
 
 def _strip_google_model_prefix(name: str) -> str:
     """Drop Gemini's ``models/`` namespace so the id matches the generate call.
 
-    Called by ``list_models`` for the google style, matching the frontend's former
-    ``parseGoogleModels`` normalisation.
+    Model discovery returns this namespace while generation accepts the bare id.
     """
     prefix = "models/"
     return name[len(prefix) :] if name.startswith(prefix) else name
@@ -643,7 +657,7 @@ async def list_models(wire: ProviderWire, api_key: str | None) -> list[str]:
             anthropic_client = AsyncAnthropic(
                 api_key=api_key,
                 timeout=REQUEST_TIMEOUT_SECONDS,
-                max_retries=MAX_RETRIES,
+                max_retries=MODEL_DISCOVERY_MAX_RETRIES,
             )
             async for model in anthropic_client.models.list():
                 if isinstance(model.id, str) and model.id:
@@ -652,8 +666,17 @@ async def list_models(wire: ProviderWire, api_key: str | None) -> list[str]:
             if api_key is None:
                 raise AnnotationAiError("Google requires an API key")
             from google import genai
+            from google.genai import types
 
-            google_client = genai.Client(api_key=api_key)
+            google_client = genai.Client(
+                api_key=api_key,
+                http_options=types.HttpOptions(
+                    timeout=int(REQUEST_TIMEOUT_SECONDS * 1000),
+                    retry_options=types.HttpRetryOptions(
+                        attempts=MODEL_DISCOVERY_MAX_RETRIES + 1
+                    ),
+                ),
+            )
             async for model in await google_client.aio.models.list():
                 name = model.name
                 if isinstance(name, str) and name:
@@ -665,7 +688,7 @@ async def list_models(wire: ProviderWire, api_key: str | None) -> list[str]:
                 api_key=api_key or "no-key-required",
                 base_url=wire.base_url,
                 timeout=REQUEST_TIMEOUT_SECONDS,
-                max_retries=MAX_RETRIES,
+                max_retries=MODEL_DISCOVERY_MAX_RETRIES,
             )
             async for model in openai_client.models.list():
                 if isinstance(model.id, str) and model.id:

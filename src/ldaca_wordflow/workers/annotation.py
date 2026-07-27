@@ -10,13 +10,13 @@ from typing import Any
 
 import polars as pl
 
-from ..domain.workspace import AnnotationAnalysisRequest
+from ..domain.workspace import (
+    AnnotationAnalysisRequest,
+    AnnotationRunAllAnalysisRequest,
+)
 from ..infrastructure.providers.annotation_ai import (
-    AnnotationClassOption,
     AnnotationExample,
-    InferenceConfig,
     annotate_all,
-    resolve_provider_wire,
 )
 from ..infrastructure.storage.durable_fs import atomic_output_path
 from .input_snapshots import load_snapshot_node
@@ -37,69 +37,80 @@ def run_annotation_analysis(
     """Classify one immutable Data Block snapshot and publish one private output."""
 
     try:
-        request = AnnotationAnalysisRequest.model_validate(request_payload)
-        source = load_snapshot_node(input_snapshot_dir, str(request.node_id))
+        request = AnnotationRunAllAnalysisRequest.model_validate(request_payload)
+        source_request = request.source
+        source = load_snapshot_node(input_snapshot_dir, str(source_request.node_id))
         schema = source.data.collect_schema()
-        if request.text_column not in schema:
+        if source_request.text_column not in schema:
             raise ValueError("Annotation text column does not exist")
-        if request.annotation_column not in schema:
+        if source_request.annotation_column not in schema:
             raise ValueError("Annotation column does not exist")
-        if (
-            request.correction_column is not None
-            and request.correction_column not in schema
-        ):
-            raise ValueError("Annotation correction column does not exist")
-
         if progress_callback:
             progress_callback(0.05, "Reading annotation input")
         frame = source.data.collect(engine="streaming")
+        text_values = frame.get_column(source_request.text_column).to_list()
+        existing_labels = frame.get_column(source_request.annotation_column).to_list()
+        target_indices = (
+            [
+                index
+                for index, value in enumerate(existing_labels)
+                if value is None or (isinstance(value, str) and not value.strip())
+            ]
+            if request.processing_mode == "fill_missing"
+            else list(range(frame.height))
+        )
         texts = [
-            str(value) if value is not None else ""
-            for value in frame.get_column(request.text_column).to_list()
+            str(text_values[index]) if text_values[index] is not None else ""
+            for index in target_indices
         ]
 
         if progress_callback:
             progress_callback(0.1, "Classifying rows")
-        labels = asyncio.run(
+
+        def report_batch_progress(
+            completed_rows: int,
+            total_rows: int,
+            failed_batches: int,
+        ) -> None:
+            if progress_callback is None:
+                return
+            fraction = (
+                0.8 if total_rows == 0 else 0.1 + (0.7 * completed_rows / total_rows)
+            )
+            suffix = (
+                f"; {failed_batches} failed batch{'es' if failed_batches != 1 else ''}"
+                if failed_batches
+                else ""
+            )
+            progress_callback(
+                fraction,
+                f"Processed {completed_rows}/{total_rows} rows{suffix}",
+            )
+
+        outcome = asyncio.run(
             annotate_all(
-                resolve_provider_wire(
-                    request.provider,
-                    request.provider_base_url,
-                ),
-                request.model,
+                request,
                 api_key,
-                request.instruction,
-                [
-                    AnnotationClassOption(
-                        name=item.name,
-                        description=item.description,
-                    )
-                    for item in request.classes
-                ],
                 texts,
-                config=InferenceConfig(
-                    temperature=request.temperature,
-                    reasoning_enabled=request.reasoning_enabled,
-                    reasoning_effort=request.reasoning_effort,
-                ),
-                examples=_load_examples(request, input_snapshot_dir),
+                examples=_load_examples(source_request, input_snapshot_dir),
+                progress_callback=report_batch_progress,
             )
         )
-        if len(labels) != frame.height:
+        if len(outcome.labels) != len(target_indices):
             raise ValueError("Annotation provider returned a misaligned result")
-        if request.correction_column is not None:
-            corrections = frame.get_column(request.correction_column).to_list()
-            labels = [
-                (
-                    str(correction).strip()
-                    if correction is not None and str(correction).strip()
-                    else predicted
-                )
-                for predicted, correction in zip(labels, corrections, strict=True)
-            ]
-        result = frame.with_columns(
-            pl.Series(name=request.annotation_column, values=labels)
+        labels = (
+            [None] * frame.height
+            if request.processing_mode == "reprocess_all"
+            else existing_labels
         )
+        for index, label in zip(target_indices, outcome.labels, strict=True):
+            labels[index] = label
+        annotation_dtype = frame.schema[source_request.annotation_column]
+        annotation_values = pl.Series(
+            name=source_request.annotation_column,
+            values=labels,
+        ).cast(annotation_dtype)
+        result = frame.with_columns(annotation_values)
 
         if progress_callback:
             progress_callback(0.85, "Serializing annotated Data Block")
@@ -114,8 +125,19 @@ def run_annotation_analysis(
                 "parquet_path": relative_path,
                 "output_columns": list(result.columns),
                 "record_count": result.height,
+                "attempted_count": len(target_indices),
+                "failed_batch_count": outcome.failed_batch_count,
+                "failed_row_count": outcome.failed_row_count,
             },
-            "message": "Annotation completed successfully",
+            "message": (
+                "Annotation completed successfully"
+                if outcome.failed_batch_count == 0
+                else (
+                    "Annotation completed with "
+                    f"{outcome.failed_batch_count} failed batches and "
+                    f"{outcome.failed_row_count} unannotated rows"
+                )
+            ),
         }
     except Exception:
         logger.exception("Annotation Analysis failed")

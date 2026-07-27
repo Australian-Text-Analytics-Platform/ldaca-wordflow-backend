@@ -353,6 +353,9 @@ def _publish_annotation_run_all(
         annotation_column=source_request.annotation_column,
         committed_workspace_revision=committed_workspace_revision,
         record_count=count,
+        attempted_count=result.result.attempted_count,
+        failed_batch_count=result.result.failed_batch_count,
+        failed_row_count=result.result.failed_row_count,
         annotated_count=annotated_count,
     )
 

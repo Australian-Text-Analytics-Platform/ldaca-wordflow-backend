@@ -11,6 +11,10 @@ from ldaca_wordflow.domain import AnnotationClass as DomainAnnotationClass
 from ldaca_wordflow.domain.workspace import (
     AnnotationAnalysisRequest,
     AnnotationAnalysisSubmission,
+    AnnotationRunAllAnalysisRequest,
+    AnnotationRunAllSubmission,
+    analysis_input_ids,
+    analysis_snapshot_input_ids,
     persisted_submission,
 )
 from ldaca_wordflow.models.annotations import (
@@ -90,6 +94,7 @@ def test_annotation_submission_persists_only_the_safe_provider_snapshot() -> Non
         provider_base_url="http://localhost:8080/v1/",
         model="local-model",
         instruction="Classify the text",
+        max_retries_per_batch=4,
         api_key="request-secret",
     )
 
@@ -100,7 +105,127 @@ def test_annotation_submission_persists_only_the_safe_provider_snapshot() -> Non
     assert persisted.provider == "custom"
     assert persisted.provider_base_url == "http://localhost:8080/v1"
     assert persisted.correction_column == "reviewed_class"
+    assert persisted.max_retries_per_batch == 4
     assert "request-secret" not in persisted.model_dump_json()
+
+
+@pytest.mark.parametrize("max_retries", [-1, 11])
+def test_analysis_request_rejects_out_of_range_batch_retries(max_retries: int) -> None:
+    with pytest.raises(ValidationError):
+        AnnotationAnalysisRequest(
+            node_id=uuid.uuid4(),
+            text_column="text",
+            annotation_column="class",
+            class_node_id=uuid.uuid4(),
+            class_column="class",
+            description_column="description",
+            classes=[DomainAnnotationClass(name="Relevant")],
+            provider_configuration_id=uuid.uuid4(),
+            provider="openai",
+            model="model",
+            instruction="Classify the text",
+            max_retries_per_batch=max_retries,
+        )
+
+
+@pytest.mark.parametrize("batch_size", [0, 101])
+def test_run_all_request_rejects_out_of_range_batch_size(batch_size: int) -> None:
+    source = AnnotationAnalysisRequest(
+        node_id=uuid.uuid4(),
+        text_column="text",
+        annotation_column="class",
+        class_node_id=uuid.uuid4(),
+        class_column="class",
+        description_column="description",
+        classes=[DomainAnnotationClass(name="Relevant")],
+        provider_configuration_id=uuid.uuid4(),
+        provider="openai",
+        model="model",
+        instruction="Classify the text",
+    )
+    with pytest.raises(ValidationError):
+        AnnotationRunAllAnalysisRequest(
+            source=source,
+            batch_size=batch_size,
+        )
+
+
+def test_run_all_submission_owns_batching_and_persists_without_secret() -> None:
+    source = AnnotationAnalysisRequest(
+        node_id=uuid.uuid4(),
+        text_column="text",
+        annotation_column="class",
+        class_node_id=uuid.uuid4(),
+        class_column="class",
+        description_column="description",
+        classes=[DomainAnnotationClass(name="Relevant")],
+        provider_configuration_id=uuid.uuid4(),
+        provider="openai",
+        model="model",
+        instruction="Classify the text",
+    )
+    submission = AnnotationRunAllSubmission(
+        source=source,
+        batch_size=17,
+        processing_mode="fill_missing",
+        api_key="request-secret",
+    )
+
+    request = persisted_submission(submission)
+
+    assert isinstance(request, AnnotationRunAllAnalysisRequest)
+    assert request.batch_size == 17
+    assert request.processing_mode == "fill_missing"
+    assert request.source.max_retries_per_batch == 2
+    assert "request-secret" not in request.model_dump_json()
+
+
+def test_preview_request_rejects_run_all_only_fields() -> None:
+    payload = {
+        "node_id": str(uuid.uuid4()),
+        "text_column": "text",
+        "annotation_column": "class",
+        "class_node_id": str(uuid.uuid4()),
+        "class_column": "class",
+        "description_column": "description",
+        "classes": [{"name": "Relevant"}],
+        "provider_configuration_id": str(uuid.uuid4()),
+        "provider": "openai",
+        "model": "model",
+        "instruction": "Classify the text",
+        "batch_size": 20,
+    }
+
+    with pytest.raises(ValidationError):
+        AnnotationAnalysisRequest.model_validate(payload)
+
+
+def test_annotation_snapshot_excludes_embedded_class_data_block() -> None:
+    source_id = uuid.uuid4()
+    class_id = uuid.uuid4()
+    example_id = uuid.uuid4()
+    request = AnnotationAnalysisRequest(
+        node_id=source_id,
+        text_column="text",
+        annotation_column="class",
+        class_node_id=class_id,
+        class_column="class",
+        description_column="description",
+        example_node_id=example_id,
+        example_text_column="text",
+        example_annotation_column="class",
+        classes=[DomainAnnotationClass(name="Relevant")],
+        provider_configuration_id=uuid.uuid4(),
+        provider="openai",
+        model="model",
+        instruction="Classify the text",
+    )
+
+    assert analysis_input_ids(request) == (source_id, class_id, example_id)
+    assert analysis_snapshot_input_ids(request) == (source_id, example_id)
+    assert analysis_snapshot_input_ids(
+        AnnotationRunAllAnalysisRequest(source=request)
+    ) == (source_id, example_id)
 
 
 def test_analysis_and_discovery_share_the_safe_provider_snapshot_contract() -> None:

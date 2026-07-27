@@ -11,6 +11,7 @@ from anyio.to_thread import run_sync as run_sync_in_worker_thread
 from fastapi.testclient import TestClient
 import polars as pl
 
+from ldaca_wordflow.infrastructure.providers.annotation_ai import AnnotationAllResult
 from ldaca_wordflow.main import create_app
 from ldaca_wordflow.services import analysis_executor as analysis_executor_module
 from ldaca_wordflow.settings import Settings
@@ -48,37 +49,44 @@ def test_annotation_preview_is_durable_and_run_all_edits_the_source(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    run_all_retry_limits: list[int] = []
+    run_all_batch_sizes: list[int] = []
+    preview_retry_limits: list[int] = []
+
     async def fake_annotate_all(
-        _wire,
-        _model,
+        request,
         _api_key,
-        _instruction,
-        _classes,
         texts,
-        **_kwargs,
+        **kwargs,
     ):
-        return ["support" for _ in texts]
+        run_all_retry_limits.append(request.source.max_retries_per_batch)
+        run_all_batch_sizes.append(request.batch_size)
+        progress_callback = kwargs["progress_callback"]
+        progress_callback(len(texts), len(texts), 1 if texts else 0)
+        labels = [None if text == "document-2379" else "support" for text in texts]
+        return AnnotationAllResult(
+            labels=labels,
+            failed_batch_count=1 if texts else 0,
+            failed_row_count=1 if texts else 0,
+        )
 
     monkeypatch.setattr(
         "ldaca_wordflow.workers.annotation.annotate_all",
         fake_annotate_all,
     )
 
-    async def fake_annotate_batch(
-        _wire,
-        _model,
+    async def fake_annotate_preview(
+        request,
         _api_key,
-        _instruction,
-        _classes,
         texts,
-        _config,
         _examples,
     ):
+        preview_retry_limits.append(request.max_retries_per_batch)
         return ["support" for _ in texts]
 
     monkeypatch.setattr(
-        "ldaca_wordflow.services.analysis_results.annotate_batch",
-        fake_annotate_batch,
+        "ldaca_wordflow.services.analysis_results.annotate_preview",
+        fake_annotate_preview,
     )
 
     class _ProgressQueue:
@@ -91,7 +99,9 @@ def test_annotation_preview_is_durable_and_run_all_edits_the_source(
     async def execute_in_process(_self, _key, invocation, report_progress):
         progress = _ProgressQueue()
         result = await run_sync_in_worker_thread(
-            partial(invocation.function, **dict(invocation.kwargs), progress_queue=progress)
+            partial(
+                invocation.function, **dict(invocation.kwargs), progress_queue=progress
+            )
         )
         for item in progress.items:
             await report_progress(item)
@@ -111,7 +121,7 @@ def test_annotation_preview_is_durable_and_run_all_edits_the_source(
                 b"text,stance,review,username\n"
                 + b"".join(
                     (
-                        f"document-{index},,"
+                        f"document-{index},{'  critical  ' if index == 0 else ''},"
                         f"{'critical' if index == 0 else ''},"
                         f"candidate-{index % 133}\n"
                     ).encode()
@@ -143,7 +153,12 @@ def test_annotation_preview_is_durable_and_run_all_edits_the_source(
         workspace_id = client.post(
             "/api/workspaces", json={"name": "Annotations"}, headers=unsafe
         ).json()["id"]
-        assert client.put(f"/api/workspaces/{workspace_id}/open", headers=unsafe).status_code == 200
+        assert (
+            client.put(
+                f"/api/workspaces/{workspace_id}/open", headers=unsafe
+            ).status_code
+            == 200
+        )
         source_id = client.post(
             f"/api/workspaces/{workspace_id}/nodes",
             json={"kind": "file", "file_path": "documents.csv"},
@@ -199,6 +214,7 @@ def test_annotation_preview_is_durable_and_run_all_edits_the_source(
             "provider": "openai",
             "model": "test-model",
             "instruction": "Classify each document.",
+            "max_retries_per_batch": 4,
         }
         preview = client.post(
             f"/api/workspaces/{workspace_id}/tabs/{tab_id}/analyses",
@@ -218,9 +234,7 @@ def test_annotation_preview_is_durable_and_run_all_edits_the_source(
         assert marker["ready"] is True
         assert marker["labels"] is None
 
-        page_url = (
-            f"/api/workspaces/{workspace_id}/analyses/{preview_id}/result/query"
-        )
+        page_url = f"/api/workspaces/{workspace_id}/analyses/{preview_id}/result/query"
         first_page = client.post(
             page_url,
             json={"kind": "annotation", "page": 1, "page_size": 20},
@@ -234,6 +248,7 @@ def test_annotation_preview_is_durable_and_run_all_edits_the_source(
         assert first_page.status_code == 200, first_page.text
         assert second_page.status_code == 200, second_page.text
         assert first_page.json()["rows"] == second_page.json()["rows"]
+        assert preview_retry_limits == [4, 4]
 
         run_all = client.post(
             f"/api/workspaces/{workspace_id}/tabs/{tab_id}/analyses",
@@ -242,6 +257,8 @@ def test_annotation_preview_is_durable_and_run_all_edits_the_source(
                 "request": {
                     "kind": "annotation_run_all",
                     "source": preview_request,
+                    "batch_size": 17,
+                    "processing_mode": "fill_missing",
                 },
             },
             headers=unsafe,
@@ -249,7 +266,15 @@ def test_annotation_preview_is_durable_and_run_all_edits_the_source(
         assert run_all.status_code == 201, run_all.text
         child = _wait(client, workspace_id, run_all.json()["id"])
         assert child["state"] == "succeeded", child
+        assert run_all_retry_limits == [4]
+        assert run_all_batch_sizes == [17]
         assert child["output_node_ids"] == []
+        run_all_result = client.get(
+            f"/api/workspaces/{workspace_id}/analyses/{child['id']}/result"
+        ).json()
+        assert run_all_result["attempted_count"] == 2379
+        assert run_all_result["failed_batch_count"] == 1
+        assert run_all_result["failed_row_count"] == 1
         forest = client.get(
             f"/api/workspaces/{workspace_id}/tabs/{tab_id}/analyses"
         ).json()
@@ -271,6 +296,64 @@ def test_annotation_preview_is_durable_and_run_all_edits_the_source(
         )
         assert reviewed.status_code == 200, reviewed.text
         assert pl.read_ipc_stream(BytesIO(reviewed.content)).to_dicts() == [
-            {"text": "document-0", "stance": "critical", "review": "critical"},
+            {
+                "text": "document-0",
+                "stance": "  critical  ",
+                "review": "critical",
+            },
             {"text": "document-1", "stance": "support", "review": None},
+        ]
+
+        restarted = client.post(
+            f"/api/workspaces/{workspace_id}/tabs/{tab_id}/analyses",
+            json={
+                "execution_scope": "run_all",
+                "request": {
+                    "kind": "annotation_run_all",
+                    "source": preview_request,
+                    "batch_size": 17,
+                    "processing_mode": "reprocess_all",
+                },
+            },
+            headers=unsafe,
+        )
+        assert restarted.status_code == 201, restarted.text
+        assert (
+            _wait(client, workspace_id, restarted.json()["id"])["state"] == "succeeded"
+        )
+        reviewed_after_restart = client.post(
+            f"/api/workspaces/{workspace_id}/sql",
+            json={
+                "mode": "query",
+                "node_ids": [joined_id],
+                "sql": (
+                    f'SELECT "text", "stance", "review" FROM "{joined_id}" '
+                    "WHERE \"text\" = 'document-0'"
+                ),
+                "page": 1,
+                "page_size": 1,
+            },
+            headers=unsafe,
+        )
+        assert pl.read_ipc_stream(
+            BytesIO(reviewed_after_restart.content)
+        ).to_dicts() == [
+            {"text": "document-0", "stance": "support", "review": "critical"}
+        ]
+        partial_row = client.post(
+            f"/api/workspaces/{workspace_id}/sql",
+            json={
+                "mode": "query",
+                "node_ids": [joined_id],
+                "sql": (
+                    f'SELECT "text", "stance" FROM "{joined_id}" '
+                    "WHERE \"text\" = 'document-2379'"
+                ),
+                "page": 1,
+                "page_size": 1,
+            },
+            headers=unsafe,
+        )
+        assert pl.read_ipc_stream(BytesIO(partial_row.content)).to_dicts() == [
+            {"text": "document-2379", "stance": None}
         ]

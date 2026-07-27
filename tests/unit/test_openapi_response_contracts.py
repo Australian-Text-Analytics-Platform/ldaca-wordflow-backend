@@ -133,15 +133,32 @@ def test_annotation_requests_share_one_annotation_class_schema() -> None:
     ):
         assert schemas[request_name]["properties"]["classes"]["items"] == expected_ref
         assert "correction_column" in schemas[request_name]["properties"]
+        assert "batch_size" not in schemas[request_name]["properties"]
+        assert "processing_mode" not in schemas[request_name]["properties"]
 
     assert set(schemas["AnnotationRunAllAnalysisRequest"]["properties"]) == {
+        "batch_size",
         "kind",
+        "processing_mode",
         "source",
     }
     assert set(schemas["AnnotationRunAllSubmission"]["properties"]) == {
         "api_key",
+        "batch_size",
         "kind",
+        "processing_mode",
         "source",
+    }
+    assert set(schemas["AnnotationRunAllResult"]["properties"]) == {
+        "affected_node_id",
+        "annotated_count",
+        "annotation_column",
+        "attempted_count",
+        "committed_workspace_revision",
+        "failed_batch_count",
+        "failed_row_count",
+        "kind",
+        "record_count",
     }
 
 

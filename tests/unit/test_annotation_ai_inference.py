@@ -1,52 +1,60 @@
-"""Unit probes for the AI-annotation inference knobs and OpenAI SDK dispatch.
-
-Covers the pure ``InferenceConfig`` factory and the effort→budget mapping in
-``infrastructure/providers/annotation_ai.py``. These need no network or workspace, so they guard the
-clamping/normalisation rules the endpoints rely on (see the endpoint tests for
-the wire-through) without spinning up the app.
-
-The second half swaps in a fake ``openai.AsyncOpenAI`` client (the SDK is imported
-lazily inside the functions, so patching ``openai.AsyncOpenAI`` intercepts it) to
-verify the OpenAI path always sends ``stream=False`` so the non-streaming SDK
-path cannot receive an SSE response unexpectedly.
-"""
+"""Unit probes for Annotation inference batching and provider dispatch."""
 
 import asyncio
+import uuid
 
 import pytest
 
+from ldaca_wordflow.domain import AnnotationClass
+from ldaca_wordflow.domain.workspace import (
+    AnnotationAnalysisRequest,
+    AnnotationRunAllAnalysisRequest,
+)
 from ldaca_wordflow.infrastructure.providers.annotation_ai import (
+    AnnotationAiError,
     AnnotationContextLimitError,
-    DEFAULT_REASONING_EFFORT,
+    AnnotationResponseError,
     InferenceConfig,
     _complete_openai,
+    _complete_google,
+    align_labels,
     annotate_all,
+    annotate_preview,
+    build_annotation_system_prompt,
     _reasoning_budget_tokens,
     list_models,
     resolve_provider_wire,
 )
 
 
-def test_inference_config_defaults_match_prior_behaviour():
-    config = InferenceConfig()
-    assert config.temperature == 0.0
-    assert config.reasoning_enabled is False
-    assert config.reasoning_effort == DEFAULT_REASONING_EFFORT
+def _inference_config() -> InferenceConfig:
+    return InferenceConfig(
+        temperature=0.0,
+        reasoning_enabled=False,
+        reasoning_effort="medium",
+    )
 
 
-def test_from_request_clamps_temperature_to_supported_range():
-    assert InferenceConfig.from_request(-1.0, False, "medium").temperature == 0.0
-    assert InferenceConfig.from_request(5.0, False, "medium").temperature == 2.0
-    assert InferenceConfig.from_request(0.4, False, "medium").temperature == 0.4
+def _source_request() -> AnnotationAnalysisRequest:
+    return AnnotationAnalysisRequest(
+        node_id=uuid.uuid4(),
+        text_column="text",
+        annotation_column="annotation",
+        class_node_id=uuid.uuid4(),
+        class_column="class",
+        description_column="description",
+        classes=[AnnotationClass(name="positive")],
+        provider_configuration_id=uuid.uuid4(),
+        provider="openai",
+        model="some-model",
+        instruction="Classify the text",
+    )
 
 
-def test_from_request_normalizes_effort_and_falls_back():
-    assert InferenceConfig.from_request(0.0, True, "HIGH").reasoning_effort == "high"
-    assert InferenceConfig.from_request(0.0, True, " low ").reasoning_effort == "low"
-    # Unknown levels degrade to the default rather than reaching a provider SDK.
-    assert (
-        InferenceConfig.from_request(0.0, True, "turbo").reasoning_effort
-        == DEFAULT_REASONING_EFFORT
+def _run_all_request(*, batch_size: int = 20) -> AnnotationRunAllAnalysisRequest:
+    return AnnotationRunAllAnalysisRequest(
+        source=_source_request(),
+        batch_size=batch_size,
     )
 
 
@@ -55,8 +63,26 @@ def test_reasoning_budget_tokens_orders_low_below_high():
     medium = _reasoning_budget_tokens("medium")
     high = _reasoning_budget_tokens("high")
     assert low < medium < high
-    # An unrecognised level uses the medium budget as a safe default.
-    assert _reasoning_budget_tokens("bogus") == medium
+
+
+def test_align_labels_matches_unicode_casefolds_and_preserves_null() -> None:
+    assert align_labels(
+        '{"labels": ["STRASSE", null]}',
+        2,
+        ["Straße"],
+    ) == ["Straße", None]
+
+
+def test_system_prompt_makes_the_batch_contract_authoritative() -> None:
+    prompt = build_annotation_system_prompt(
+        "Respond with only the chosen class label.",
+        [AnnotationClass(name="positive")],
+    )
+
+    assert (
+        "The batch and JSON response rules below take precedence over any conflicting "
+        "response-format wording in the instruction."
+    ) in prompt
 
 
 def test_custom_provider_wire_uses_the_immutable_openai_compatible_base_url():
@@ -69,7 +95,7 @@ def test_custom_provider_wire_uses_the_immutable_openai_compatible_base_url():
 
 # --- OpenAI SDK dispatch probes -------------------------------------------------
 #
-# The endpoint tests monkeypatch ``annotate_batch``/``list_models`` wholesale, so
+# The endpoint tests monkeypatch ``annotate_preview``/``list_models`` wholesale, so
 # the real OpenAI-path streaming branch has no
 # other coverage. The fakes below stand in for the parts of the async SDK those
 # branches touch: ``chat.completions.create`` returns one completion (recording its
@@ -83,13 +109,14 @@ class _FakeMessage:
 
 
 class _FakeChoice:
-    def __init__(self, content: str) -> None:
+    def __init__(self, content: str, *, finish_reason: str = "stop") -> None:
         self.message = _FakeMessage(content)
+        self.finish_reason = finish_reason
 
 
 class _FakeCompletion:
-    def __init__(self, content: str) -> None:
-        self.choices = [_FakeChoice(content)]
+    def __init__(self, content: str, *, finish_reason: str = "stop") -> None:
+        self.choices = [_FakeChoice(content, finish_reason=finish_reason)]
 
 
 class _FakeModel:
@@ -146,7 +173,7 @@ async def test_complete_openai_always_disables_streaming(monkeypatch):
     create_kwargs = _install_fake_openai(monkeypatch)
     wire = resolve_provider_wire("openai")
     result = await _complete_openai(
-        wire, "some-model", "key", "system", "user", InferenceConfig()
+        wire, "some-model", "key", "system", "user", _inference_config()
     )
     assert result == "positive"
     assert create_kwargs["stream"] is False
@@ -174,7 +201,7 @@ async def test_complete_openai_classifies_context_limit_errors(monkeypatch):
             "key",
             "system",
             "user",
-            InferenceConfig(),
+            _inference_config(),
         )
 
 
@@ -202,6 +229,35 @@ async def test_custom_model_discovery_uses_its_base_url_and_allows_no_key(
     assert constructor_kwargs["api_key"] == "no-key-required"
 
 
+async def test_google_model_discovery_has_bounded_timeout_and_retry(monkeypatch):
+    constructor_kwargs: dict = {}
+
+    class _Models:
+        async def list(self):
+            async def items():
+                yield type("Model", (), {"name": "models/gemini-test"})()
+
+            return items()
+
+    class _Aio:
+        def __init__(self) -> None:
+            self.models = _Models()
+
+    class _Client:
+        def __init__(self, **kwargs) -> None:
+            constructor_kwargs.update(kwargs)
+            self.aio = _Aio()
+
+    monkeypatch.setattr("google.genai.Client", _Client)
+
+    models = await list_models(resolve_provider_wire("google"), "key")
+
+    assert models == ["gemini-test"]
+    http_options = constructor_kwargs["http_options"]
+    assert http_options.timeout == 90_000
+    assert http_options.retry_options.attempts == 2
+
+
 async def test_custom_chat_completion_uses_its_base_url_and_allows_no_key(
     monkeypatch,
 ):
@@ -226,7 +282,7 @@ async def test_custom_chat_completion_uses_its_base_url_and_allows_no_key(
     wire = resolve_provider_wire("custom", "http://localhost:8080/v1")
 
     result = await _complete_openai(
-        wire, "local-model", None, "system", "user", InferenceConfig()
+        wire, "local-model", None, "system", "user", _inference_config()
     )
 
     assert result == '{"labels": ["positive"]}'
@@ -235,7 +291,115 @@ async def test_custom_chat_completion_uses_its_base_url_and_allows_no_key(
     assert create_kwargs["model"] == "local-model"
 
 
-async def test_annotate_all_uses_one_hundred_row_batches_with_ten_in_flight(
+async def test_annotation_preview_retries_a_truncated_openrouter_completion(
+    monkeypatch,
+):
+    constructor_kwargs: list[dict] = []
+    create_kwargs: list[dict] = []
+    completions = iter(
+        [
+            _FakeCompletion(
+                '{"labels": ["positive", "positive", "positive"]',
+                finish_reason="length",
+            ),
+            _FakeCompletion('{"labels": ["positive"]}'),
+        ]
+    )
+
+    class _FakeCompletions:
+        async def create(self, **kwargs):
+            create_kwargs.append(kwargs)
+            return next(completions)
+
+    class _FakeChat:
+        def __init__(self) -> None:
+            self.completions = _FakeCompletions()
+
+    class _FakeAsyncOpenAI:
+        def __init__(self, **kwargs) -> None:
+            constructor_kwargs.append(kwargs)
+            self.chat = _FakeChat()
+
+    monkeypatch.setattr("openai.AsyncOpenAI", _FakeAsyncOpenAI)
+    request = _source_request().model_copy(
+        update={"provider": "openrouter", "max_retries_per_batch": 2}
+    )
+
+    labels = await annotate_preview(request, "key", ["one input"])
+
+    assert labels == ["positive"]
+    assert len(create_kwargs) == 2
+    assert {kwargs["max_completion_tokens"] for kwargs in create_kwargs} == {4096}
+    assert {kwargs["max_retries"] for kwargs in constructor_kwargs} == {0}
+
+
+async def test_annotation_preview_rejects_the_wrong_number_of_labels_after_retries(
+    monkeypatch,
+):
+    attempts = 0
+
+    class _FakeCompletions:
+        async def create(self, **_kwargs):
+            nonlocal attempts
+            attempts += 1
+            return _FakeCompletion('{"labels": ["positive", "positive"]}')
+
+    class _FakeChat:
+        def __init__(self) -> None:
+            self.completions = _FakeCompletions()
+
+    class _FakeAsyncOpenAI:
+        def __init__(self, **_kwargs) -> None:
+            self.chat = _FakeChat()
+
+    monkeypatch.setattr("openai.AsyncOpenAI", _FakeAsyncOpenAI)
+    request = _source_request().model_copy(update={"max_retries_per_batch": 1})
+
+    with pytest.raises(
+        AnnotationResponseError,
+        match="exactly one label per input text",
+    ):
+        await annotate_preview(request, "key", ["one input"])
+
+    assert attempts == 2
+
+
+async def test_google_completion_disables_sdk_retries_and_bounds_output(monkeypatch):
+    constructor_kwargs: dict = {}
+    generate_kwargs: dict = {}
+
+    class _FakeModels:
+        async def generate_content(self, **kwargs):
+            generate_kwargs.update(kwargs)
+            return type("Response", (), {"text": '{"labels": ["positive"]}'})()
+
+    class _FakeAio:
+        def __init__(self) -> None:
+            self.models = _FakeModels()
+
+    class _FakeClient:
+        def __init__(self, **kwargs) -> None:
+            constructor_kwargs.update(kwargs)
+            self.aio = _FakeAio()
+
+    monkeypatch.setattr("google.genai.Client", _FakeClient)
+
+    await _complete_google(
+        "some-model",
+        "key",
+        "system",
+        "user",
+        _inference_config(),
+    )
+
+    retry_options = constructor_kwargs["http_options"].retry_options
+    assert retry_options is not None
+    assert retry_options.attempts == 1
+    assert constructor_kwargs["http_options"].timeout == 90_000
+    assert generate_kwargs["config"].max_output_tokens == 4096
+
+
+async def test_annotate_all_uses_twenty_row_batches_with_ten_in_flight(
     monkeypatch,
 ):
     active = 0
@@ -250,6 +414,7 @@ async def test_annotate_all_uses_one_hundred_row_batches_with_ten_in_flight(
         _classes,
         texts,
         _config,
+        _max_retries,
         _examples,
     ):
         nonlocal active, max_active
@@ -261,22 +426,20 @@ async def test_annotate_all_uses_one_hundred_row_batches_with_ten_in_flight(
         return list(texts)
 
     monkeypatch.setattr(
-        "ldaca_wordflow.infrastructure.providers.annotation_ai.annotate_batch",
+        "ldaca_wordflow.infrastructure.providers.annotation_ai._annotate_batch",
         fake_annotate_batch,
     )
 
-    texts = [str(index) for index in range(1001)]
-    labels = await annotate_all(
-        resolve_provider_wire("openai"),
-        "some-model",
+    texts = [str(index) for index in range(201)]
+    outcome = await annotate_all(
+        _run_all_request(),
         "key",
-        "instruction",
-        [],
         texts,
     )
 
-    assert labels == texts
-    assert sorted(chunk_sizes) == [1, *([100] * 10)]
+    assert outcome.labels == texts
+    assert outcome.failed_batch_count == 0
+    assert sorted(chunk_sizes) == [1, *([20] * 10)]
     assert max_active == 10
 
 
@@ -293,6 +456,7 @@ async def test_annotate_all_splits_only_batches_rejected_by_the_context_limit(
         _classes,
         texts,
         _config,
+        _max_retries,
         _examples,
     ):
         attempted_sizes.append(len(texts))
@@ -301,19 +465,99 @@ async def test_annotate_all_splits_only_batches_rejected_by_the_context_limit(
         return list(texts)
 
     monkeypatch.setattr(
-        "ldaca_wordflow.infrastructure.providers.annotation_ai.annotate_batch",
+        "ldaca_wordflow.infrastructure.providers.annotation_ai._annotate_batch",
         fake_annotate_batch,
     )
 
     texts = [str(index) for index in range(100)]
-    labels = await annotate_all(
-        resolve_provider_wire("openai"),
-        "some-model",
+    outcome = await annotate_all(
+        _run_all_request(batch_size=100),
         "key",
-        "instruction",
-        [],
         texts,
     )
 
-    assert labels == texts
+    assert outcome.labels == texts
+    assert outcome.failed_batch_count == 0
     assert sorted(attempted_sizes) == [25, 25, 25, 25, 50, 50, 100]
+
+
+async def test_annotate_all_splits_batches_with_exhausted_invalid_responses(
+    monkeypatch,
+):
+    attempted_sizes: list[int] = []
+
+    async def fake_annotate_batch(
+        _wire,
+        _model,
+        _api_key,
+        _instruction,
+        _classes,
+        texts,
+        _config,
+        _max_retries,
+        _examples,
+    ):
+        attempted_sizes.append(len(texts))
+        if len(texts) > 25:
+            raise AnnotationResponseError("invalid batch response")
+        return list(texts)
+
+    monkeypatch.setattr(
+        "ldaca_wordflow.infrastructure.providers.annotation_ai._annotate_batch",
+        fake_annotate_batch,
+    )
+
+    texts = [str(index) for index in range(100)]
+    outcome = await annotate_all(
+        _run_all_request(batch_size=100),
+        "key",
+        texts,
+    )
+
+    assert outcome.labels == texts
+    assert outcome.failed_batch_count == 0
+    assert sorted(attempted_sizes) == [25, 25, 25, 25, 50, 50, 100]
+
+
+async def test_annotate_all_keeps_successful_batches_and_reports_failed_rows(
+    monkeypatch,
+):
+    progress: list[tuple[int, int, int]] = []
+
+    async def fake_annotate_batch(
+        _wire,
+        _model,
+        _api_key,
+        _instruction,
+        _classes,
+        texts,
+        _config,
+        _max_retries,
+        _examples,
+    ):
+        if texts[0] == "20":
+            raise AnnotationAiError("provider unavailable")
+        return list(texts)
+
+    monkeypatch.setattr(
+        "ldaca_wordflow.infrastructure.providers.annotation_ai._annotate_batch",
+        fake_annotate_batch,
+    )
+
+    outcome = await annotate_all(
+        _run_all_request(),
+        "key",
+        [str(index) for index in range(45)],
+        progress_callback=lambda completed, total, failed: progress.append(
+            (completed, total, failed)
+        ),
+    )
+
+    assert outcome.labels == [
+        *[str(index) for index in range(20)],
+        *([None] * 20),
+        *[str(index) for index in range(40, 45)],
+    ]
+    assert outcome.failed_batch_count == 1
+    assert outcome.failed_row_count == 20
+    assert progress[-1] == (45, 45, 1)

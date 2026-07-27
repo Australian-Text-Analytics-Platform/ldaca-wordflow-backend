@@ -27,7 +27,7 @@ from ..domain.workspace import (
     TopicModelingAnalysisRequest,
     TopicModelingDetachmentAnalysisRequest,
     Workspace,
-    analysis_input_ids,
+    analysis_snapshot_input_ids,
 )
 from ..infrastructure.storage.embedding_cache import embeddings_cache_path
 from ..models.quotation import QuotationEngineType, ResolvedQuotationEngine
@@ -80,7 +80,9 @@ class AnalysisExecutionPreparer:
 
         analysis_id = str(record.id)
         workspace = lease.workspace
-        node_ids = _request_node_ids(record, workspace)
+        node_ids = [
+            str(node_id) for node_id in analysis_snapshot_input_ids(record.request)
+        ]
         analysis_dir = lease.path / "analyses" / analysis_id
         execution_dir = analysis_dir / ".execution"
         snapshot_dir = execution_dir / "input"
@@ -434,30 +436,18 @@ class AnalysisExecutionPreparer:
                 },
             )
         if isinstance(request, AnnotationRunAllAnalysisRequest):
-            source = request.source
-            if credential is None and source.provider != "custom":
+            if credential is None and request.source.provider != "custom":
                 raise InvalidInputError("Annotation credential is unavailable")
             return owned(
                 annotation_process,
                 {
                     "input_snapshot_dir": str(snapshot_dir),
                     "output_dir": str(artifact_dir),
-                    "request_payload": source.model_dump(mode="json"),
+                    "request_payload": request.model_dump(mode="json"),
                     "api_key": credential,
                 },
             )
         raise InvalidInputError("Analysis kind has no process implementation")
-
-
-def _request_node_ids(record: AnalysisRecord, workspace: Workspace) -> list[str]:
-    request = record.request
-    if isinstance(request, AnnotationRunAllAnalysisRequest):
-        return [
-            str(node_id)
-            for node_id in analysis_input_ids(request.source)
-            if node_id != request.source.class_node_id
-        ]
-    return [str(node_id) for node_id in analysis_input_ids(request)]
 
 
 def _analysis_artifact_path(

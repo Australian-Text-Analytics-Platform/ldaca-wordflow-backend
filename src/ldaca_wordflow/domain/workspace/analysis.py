@@ -203,14 +203,18 @@ class SequentialAnalysisRequest(_StrictModel):
             self.numeric_interval is None or self.numeric_interval <= 0
         ):
             raise ValueError("Numeric input requires a positive numeric_interval")
-        if self.column_type == "datetime" and self.frequency == "custom" and (
-            self.custom_interval_value is None or self.custom_interval_unit is None
+        if (
+            self.column_type == "datetime"
+            and self.frequency == "custom"
+            and (
+                self.custom_interval_value is None or self.custom_interval_unit is None
+            )
         ):
             raise ValueError("Custom datetime frequency requires a value and unit")
         return self
 
 
-class _AnnotationFields(AnnotationProviderSnapshot):
+class _AnnotationInferenceFields(AnnotationProviderSnapshot):
     kind: Literal["annotation"] = "annotation"
     node_id: uuid.UUID
     text_column: NonEmptyText = Field(max_length=500)
@@ -226,11 +230,12 @@ class _AnnotationFields(AnnotationProviderSnapshot):
     model: NonEmptyText = Field(max_length=500)
     instruction: NonEmptyText = Field(max_length=20_000)
     temperature: float = Field(default=0.0, ge=0.0, le=2.0, allow_inf_nan=False)
+    max_retries_per_batch: int = Field(default=2, ge=0, le=10)
     reasoning_enabled: bool = False
     reasoning_effort: Literal["low", "medium", "high"] = "medium"
 
     @model_validator(mode="after")
-    def validate_annotation_fields(self) -> "_AnnotationFields":
+    def validate_annotation_fields(self) -> "_AnnotationInferenceFields":
         normalized = [item.name.casefold() for item in self.classes]
         if len(normalized) != len(set(normalized)):
             raise ValueError("Annotation class names must be unique")
@@ -250,11 +255,11 @@ class _AnnotationFields(AnnotationProviderSnapshot):
         return self
 
 
-class AnnotationAnalysisRequest(_AnnotationFields):
+class AnnotationAnalysisRequest(_AnnotationInferenceFields):
     """Secret-free immutable Annotation request stored in a Workspace."""
 
 
-class AnnotationAnalysisSubmission(_AnnotationFields):
+class AnnotationAnalysisSubmission(_AnnotationInferenceFields):
     """Annotation creation command with an optional request-only credential."""
 
     api_key: SecretStr | None = Field(
@@ -296,7 +301,6 @@ class ConcordanceRunAllAnalysisRequest(_StrictModel):
     source: ConcordanceAnalysisRequest
 
 
-
 class QuotationRunAllAnalysisRequest(_StrictModel):
     kind: Literal["quotation_run_all"] = "quotation_run_all"
     source: QuotationAnalysisRequest
@@ -317,9 +321,7 @@ class ResultPublicationSource(_StrictModel):
 
 
 class ConcordanceResultPublicationAnalysisRequest(_StrictModel):
-    kind: Literal["concordance_result_publication"] = (
-        "concordance_result_publication"
-    )
+    kind: Literal["concordance_result_publication"] = "concordance_result_publication"
     sources: list[ResultPublicationSource] = Field(min_length=1, max_length=2)
 
     @model_validator(mode="after")
@@ -338,11 +340,15 @@ class QuotationResultPublicationAnalysisRequest(_StrictModel):
 class AnnotationRunAllAnalysisRequest(_StrictModel):
     kind: Literal["annotation_run_all"] = "annotation_run_all"
     source: AnnotationAnalysisRequest
+    batch_size: int = Field(default=20, ge=1, le=100)
+    processing_mode: Literal["reprocess_all", "fill_missing"] = "reprocess_all"
 
 
 class AnnotationRunAllSubmission(_StrictModel):
     kind: Literal["annotation_run_all"] = "annotation_run_all"
     source: AnnotationAnalysisRequest
+    batch_size: int = Field(default=20, ge=1, le=100)
+    processing_mode: Literal["reprocess_all", "fill_missing"] = "reprocess_all"
     api_key: SecretStr | None = Field(
         default=None,
         min_length=1,
@@ -351,7 +357,11 @@ class AnnotationRunAllSubmission(_StrictModel):
     )
 
     def persisted_request(self) -> AnnotationRunAllAnalysisRequest:
-        return AnnotationRunAllAnalysisRequest(source=self.source)
+        return AnnotationRunAllAnalysisRequest(
+            source=self.source,
+            batch_size=self.batch_size,
+            processing_mode=self.processing_mode,
+        )
 
 
 class TopicMeaningOverride(_StrictModel):
@@ -372,11 +382,16 @@ class TopicModelingDetachmentAnalysisRequest(_StrictModel):
         if len(self.node_ids) != len(set(self.node_ids)):
             raise ValueError("Topic Modeling detachment Data Block IDs must be unique")
         expected = set(self.node_ids)
-        if set(self.selected_columns) != expected or set(self.new_node_names) != expected:
+        if (
+            set(self.selected_columns) != expected
+            or set(self.new_node_names) != expected
+        ):
             raise ValueError("Topic Modeling detachment source fields must align")
         if any(len(name) > 475 for name in self.new_node_names.values()):
             raise ValueError("Topic Modeling detached Data Block names are too long")
-        if self.topic_ids is not None and len(self.topic_ids) != len(set(self.topic_ids)):
+        if self.topic_ids is not None and len(self.topic_ids) != len(
+            set(self.topic_ids)
+        ):
             raise ValueError("Selected Topic IDs must be unique")
         override_ids = [item.topic_id for item in self.topic_meanings_override]
         if len(override_ids) != len(set(override_ids)):
@@ -463,6 +478,19 @@ def analysis_input_ids(request: AnalysisRequest) -> tuple[uuid.UUID, ...]:
     return tuple(dict.fromkeys(ids))
 
 
+def analysis_snapshot_input_ids(request: AnalysisRequest) -> tuple[uuid.UUID, ...]:
+    """Return only Data Blocks whose plans execution or result queries read."""
+
+    if isinstance(request, AnnotationRunAllAnalysisRequest):
+        return analysis_snapshot_input_ids(request.source)
+    if isinstance(request, AnnotationAnalysisRequest):
+        ids = [request.node_id]
+        if request.example_node_id is not None:
+            ids.append(request.example_node_id)
+        return tuple(dict.fromkeys(ids))
+    return analysis_input_ids(request)
+
+
 class AnalysisArtifactRecord(_StrictModel):
     """Private portable identity for one Analysis-owned artifact."""
 
@@ -498,11 +526,9 @@ class _AnalysisLifecycle(_StrictModel):
     def validate_lifecycle(self) -> "_AnalysisLifecycle":
         if self.parent_analysis_id == self.id:
             raise ValueError("An Analysis cannot parent itself")
-        if (
-            self.id in self.supersedes_analysis_ids
-            or len(self.supersedes_analysis_ids)
-            != len(set(self.supersedes_analysis_ids))
-        ):
+        if self.id in self.supersedes_analysis_ids or len(
+            self.supersedes_analysis_ids
+        ) != len(set(self.supersedes_analysis_ids)):
             raise ValueError("Superseded Analysis IDs must be distinct")
         terminal = self.state in {
             AnalysisState.SUCCEEDED,
@@ -760,6 +786,7 @@ __all__ = [
     "TopicMeaningOverride",
     "ValidAnalysisIntegrity",
     "analysis_input_ids",
+    "analysis_snapshot_input_ids",
     "SupportingAnalysisRequest",
     "SupportingAnalysisSubmission",
     "persisted_submission",

@@ -366,10 +366,26 @@ class QuotationRunAllWorkerResult(_StrictModel):
     message: str
 
 
-class AnnotationRunAllWorkerData(_StrictModel):
+class _AnnotationRunAllCounts(_StrictModel):
+    record_count: int = Field(ge=0)
+    attempted_count: int = Field(ge=0)
+    failed_batch_count: int = Field(ge=0)
+    failed_row_count: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def validate_counts(self) -> "_AnnotationRunAllCounts":
+        if self.attempted_count > self.record_count:
+            raise ValueError("Annotation attempted count exceeds its row count")
+        if self.failed_row_count > self.attempted_count:
+            raise ValueError("Annotation failed row count exceeds its attempted count")
+        if self.failed_batch_count > self.failed_row_count:
+            raise ValueError("Annotation failed batch count exceeds its failed row count")
+        return self
+
+
+class AnnotationRunAllWorkerData(_AnnotationRunAllCounts):
     parquet_path: PrivateArtifactPath
     output_columns: list[str]
-    record_count: int = Field(ge=0)
 
 
 class AnnotationRunAllWorkerResult(_StrictModel):
@@ -492,12 +508,17 @@ class AnnotationPreviewLabel(_StrictModel):
     label: str | None
 
 
-class AnnotationRunAllStoredResult(_StrictModel):
+class AnnotationRunAllStoredResult(_AnnotationRunAllCounts):
     affected_node_id: uuid.UUID
     annotation_column: str = Field(min_length=1, max_length=500)
     committed_workspace_revision: int = Field(ge=1)
-    record_count: int = Field(ge=0)
     annotated_count: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def validate_annotated_count(self) -> "AnnotationRunAllStoredResult":
+        if self.annotated_count > self.record_count:
+            raise ValueError("Annotation annotated count exceeds its row count")
+        return self
 
 
 class AnnotationRunAllResult(AnnotationRunAllStoredResult):

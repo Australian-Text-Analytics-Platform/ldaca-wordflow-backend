@@ -31,11 +31,8 @@ from ..domain.workspace import (
 from ..infrastructure.providers.quotation_client import QuotationProviderClient
 from ..infrastructure.providers.annotation_ai import (
     AnnotationAiError,
-    AnnotationClassOption,
     AnnotationExample,
-    InferenceConfig,
-    annotate_batch,
-    resolve_provider_wire,
+    annotate_preview,
 )
 from ..models.analysis_results import (
     ANALYSIS_STORED_RESULT_MODELS,
@@ -786,24 +783,10 @@ async def _query_annotation_snapshot(
                     )
                 )
     try:
-        labels = await annotate_batch(
-            resolve_provider_wire(request.provider, request.provider_base_url),
-            request.model,
+        labels = await annotate_preview(
+            request,
             credential,
-            request.instruction,
-            [
-                AnnotationClassOption(
-                    name=item.name,
-                    description=item.description,
-                )
-                for item in request.classes
-            ],
             texts,
-            InferenceConfig(
-                temperature=request.temperature,
-                reasoning_enabled=request.reasoning_enabled,
-                reasoning_effort=request.reasoning_effort,
-            ),
             examples,
         )
     except AnnotationAiError as exc:
