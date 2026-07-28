@@ -72,6 +72,7 @@ from .services.data_portal import DataPortalService
 from .services.user_file_import_executor import UserFileImportProcessExecutor
 from .services.user_file_imports import UserFileImportService
 from .services.nodes import NodeService
+from .services.data_block_exports import DataBlockExportService
 from .services.workspace_sql import WorkspaceSqlService
 from .services.workspace import WorkspaceService
 from .infrastructure.storage.workspace_store import WorkspaceStore
@@ -238,6 +239,7 @@ class Runtime:
     data_portal_service: DataPortalService
     user_file_import_service: UserFileImportService
     node_service: NodeService
+    data_block_export_service: DataBlockExportService
     workspace_sql_service: WorkspaceSqlService
     workspace_archive_service: WorkspaceArchiveService
     maintenance_service: MaintenanceService
@@ -474,6 +476,14 @@ async def runtime_context(settings: Settings) -> AsyncIterator[Runtime]:
             max_source_bytes=settings.max_preview_source_bytes,
             max_storage_bytes=settings.max_node_storage_bytes,
         )
+        data_block_export_service = DataBlockExportService(
+            workspace_service,
+            response_snapshot_service,
+            max_export_bytes=min(
+                settings.max_workspace_export_bytes,
+                settings.max_response_snapshot_bytes,
+            ),
+        )
         workspace_sql_service = WorkspaceSqlService(
             workspace_service,
             io_limiter=io_limiter,
@@ -605,6 +615,7 @@ async def runtime_context(settings: Settings) -> AsyncIterator[Runtime]:
             user_file_store=user_file_store,
             file_read_service=file_read_service,
             node_service=node_service,
+            data_block_export_service=data_block_export_service,
             workspace_sql_service=workspace_sql_service,
             session_service=session_service,
             oauth_service=oauth_service,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from enum import StrEnum
 from typing import Annotated, Literal
 
 from pydantic import (
@@ -31,6 +32,29 @@ class _StrictRequest(BaseModel):
     """Reject misspelled or obsolete fields at the public API boundary."""
 
     model_config = ConfigDict(extra="forbid")
+
+
+class DataBlockExportFormat(StrEnum):
+    """Portable file formats supported by Data Block export."""
+
+    CSV = "csv"
+    JSON = "json"
+    NDJSON = "ndjson"
+    PARQUET = "parquet"
+    IPC = "ipc"
+
+
+class DataBlockExportRequest(_StrictRequest):
+    """Export one or more ordered Data Blocks in one shared format."""
+
+    node_ids: list[uuid.UUID] = Field(min_length=1)
+    format: DataBlockExportFormat = DataBlockExportFormat.CSV
+
+    @model_validator(mode="after")
+    def validate_node_ids(self) -> "DataBlockExportRequest":
+        if len(self.node_ids) != len(set(self.node_ids)):
+            raise ValueError("Data Block export IDs must be unique")
+        return self
 
 
 class FileNodeCreateRequest(_StrictRequest):

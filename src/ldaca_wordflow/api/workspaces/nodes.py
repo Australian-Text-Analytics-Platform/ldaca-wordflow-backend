@@ -14,8 +14,11 @@ from fastapi import (
     Security,
     status,
 )
+from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 
 from ...models.node_resources import (
+    DataBlockExportRequest,
     NodeCreateRequest,
     NodeDerivationRequest,
     NodeEditRequest,
@@ -58,6 +61,57 @@ async def list_nodes(
     )
     response.headers["ETag"] = workspace_etag(revision)
     return nodes
+
+
+@router.post(
+    "/exports",
+    response_class=FileResponse,
+    responses={
+        **api_errors(403, 404, 409, 413, 422, 507),
+        status.HTTP_200_OK: {
+            "content": {
+                "text/csv": {"schema": {"type": "string", "format": "binary"}},
+                "application/json": {"schema": {"type": "string", "format": "binary"}},
+                "application/x-ndjson": {
+                    "schema": {"type": "string", "format": "binary"}
+                },
+                "application/vnd.apache.parquet": {
+                    "schema": {"type": "string", "format": "binary"}
+                },
+                "application/vnd.apache.arrow.file": {
+                    "schema": {"type": "string", "format": "binary"}
+                },
+                "application/zip": {"schema": {"type": "string", "format": "binary"}},
+            },
+            "description": "One Data Block file or a ZIP containing multiple files",
+        },
+    },
+)
+async def export_data_blocks(
+    workspace_id: uuid.UUID,
+    request: DataBlockExportRequest,
+    principal: Annotated[SessionPrincipal, Security(get_current_session)],
+    runtime: Runtime = Depends(get_runtime),
+) -> FileResponse:
+    """Return selected Data Blocks as one file or a server-built ZIP."""
+
+    (
+        snapshot,
+        filename,
+        media_type,
+        revision,
+    ) = await runtime.data_block_export_service.export(
+        principal.user.id,
+        str(workspace_id),
+        request,
+    )
+    return FileResponse(
+        snapshot.path,
+        filename=filename,
+        media_type=media_type,
+        headers={"ETag": workspace_etag(revision)},
+        background=BackgroundTask(snapshot.cleanup),
+    )
 
 
 @router.post(
