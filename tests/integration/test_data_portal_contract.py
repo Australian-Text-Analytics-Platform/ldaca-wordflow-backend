@@ -143,7 +143,7 @@ def test_multi_user_portal_reads_use_request_token_only(
     assert all(
         b"browser-portal-secret" not in path.read_bytes()
         for path in tmp_path.rglob("*")
-        if path.is_file() and path.name != ".wordflow-runtime.lock"
+        if path.is_file()
     )
 
 
@@ -259,5 +259,5 @@ def test_multi_user_portal_import_token_is_execution_only(
     assert all(
         b"browser-import-secret" not in path.read_bytes()
         for path in tmp_path.rglob("*")
-        if path.is_file() and path.name != ".wordflow-runtime.lock"
+        if path.is_file()
     )

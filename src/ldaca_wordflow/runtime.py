@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import logging
 import os
-import stat
 import sys
 import tempfile
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -53,7 +52,7 @@ from .infrastructure.storage.layout import (
     workspace_trash_root,
     workspaces_root,
 )
-from .infrastructure.storage.durable_fs import fsync_directory, mkdir_durable
+from .infrastructure.storage.durable_fs import mkdir_durable
 from .services.storage_admission import StorageAdmissionService
 from .services.quota import QuotaService
 from .services.response_snapshots import ResponseSnapshotService
@@ -95,93 +94,6 @@ class RuntimeReadiness:
 
     def mark_stopping(self) -> None:
         self._status = "stopping"
-
-
-@dataclass(slots=True)
-class _DataRootLock:
-    """Process-lifetime exclusive ownership of one single-process data root."""
-
-    descriptor: int
-
-    def close(self) -> None:
-        if self.descriptor < 0:
-            return
-        try:
-            if os.name == "nt":
-                import msvcrt
-
-                os.lseek(self.descriptor, 0, os.SEEK_SET)
-                msvcrt.locking(self.descriptor, msvcrt.LK_UNLCK, 1)
-            else:
-                import fcntl
-
-                fcntl.flock(self.descriptor, fcntl.LOCK_UN)
-        finally:
-            os.close(self.descriptor)
-            self.descriptor = -1
-
-
-def _acquire_data_root_lock(root: Path) -> _DataRootLock:
-    name = ".wordflow-runtime.lock"
-    existed = (root / name).exists()
-    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
-    root_descriptor = -1
-    descriptor = -1
-    try:
-        try:
-            if os.open in os.supports_dir_fd and hasattr(os, "O_DIRECTORY"):
-                root_descriptor = os.open(
-                    root,
-                    os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
-                )
-                descriptor = os.open(name, flags, 0o600, dir_fd=root_descriptor)
-            else:
-                path = root / name
-                try:
-                    metadata = path.lstat()
-                except FileNotFoundError:
-                    pass
-                else:
-                    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
-                    attributes = getattr(metadata, "st_file_attributes", 0)
-                    if stat.S_ISLNK(metadata.st_mode) or (
-                        reparse and attributes & reparse
-                    ):
-                        raise RuntimeError("Data root lock must not be a link")
-                descriptor = os.open(path, flags, 0o600)
-        except (OSError, RuntimeError) as exc:
-            raise RuntimeError("Data root lock is unsafe or unavailable") from exc
-    finally:
-        if root_descriptor >= 0:
-            os.close(root_descriptor)
-    try:
-        metadata = os.fstat(descriptor)
-        if not stat.S_ISREG(metadata.st_mode):
-            raise RuntimeError("Data root lock must be a regular file")
-        if hasattr(os, "getuid") and metadata.st_uid != os.getuid():
-            raise RuntimeError("Data root lock has an unexpected owner")
-        if os.name == "nt":
-            import msvcrt
-
-            if os.fstat(descriptor).st_size == 0:
-                os.write(descriptor, b"\0")
-            os.lseek(descriptor, 0, os.SEEK_SET)
-            msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
-        else:
-            import fcntl
-
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        os.ftruncate(descriptor, 0)
-        os.write(descriptor, f"pid={os.getpid()}\n".encode("ascii"))
-        os.fsync(descriptor)
-        if not existed:
-            fsync_directory(root)
-        return _DataRootLock(descriptor)
-    except (OSError, RuntimeError) as exc:
-        os.close(descriptor)
-        raise RuntimeError(
-            "Data root is already owned by another backend process"
-        ) from exc
 
 
 def _initialize_storage(settings: Settings) -> None:
@@ -384,14 +296,6 @@ async def runtime_context(settings: Settings) -> AsyncIterator[Runtime]:
             abandon_on_cancel=False,
             limiter=io_limiter,
         )
-        data_root_lock = await run_sync_in_worker_thread(
-            _acquire_data_root_lock,
-            settings.get_data_root(),
-            abandon_on_cancel=False,
-            limiter=io_limiter,
-        )
-        resources.callback(data_root_lock.close)
-
         database = Database(deployment_database_path(settings))
         await database.initialize()
 

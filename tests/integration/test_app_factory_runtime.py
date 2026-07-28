@@ -26,11 +26,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from ldaca_wordflow.runtime import (
-    RuntimeReadiness,
-    _RuntimeTaskGroupOwner,
-    _acquire_data_root_lock,
-)
+from ldaca_wordflow.runtime import RuntimeReadiness, _RuntimeTaskGroupOwner
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,21 +118,6 @@ async def test_runtime_shutdown_cancels_execution_at_the_shared_deadline() -> No
     assert events == ["task-group-cancel", "task-group-exit"]
 
 
-def test_runtime_lock_never_follows_a_preexisting_symlink(tmp_path: Path) -> None:
-    """A hostile lock entry must not redirect the process-owned lock write."""
-
-    target = tmp_path / "outside.txt"
-    target.write_text("unchanged", encoding="utf-8")
-    try:
-        (tmp_path / ".wordflow-runtime.lock").symlink_to(target)
-    except NotImplementedError, OSError:
-        pytest.skip("symlinks are unavailable on this platform")
-
-    with pytest.raises((OSError, RuntimeError)):
-        _acquire_data_root_lock(tmp_path)
-    assert target.read_text(encoding="utf-8") == "unchanged"
-
-
 def test_settings_are_loaded_explicitly_and_are_immutable(tmp_path: Path) -> None:
     """Bootstrap settings cannot be reloaded or mutated after validation."""
 
@@ -194,6 +175,24 @@ def test_runtime_factory_is_deferred_until_lifespan_and_unwinds() -> None:
         assert client.get("/__runtime-probe").json() == {"name": "deferred"}
 
     assert events == ["factory", "startup", "shutdown"]
+
+
+def test_two_app_instances_can_share_one_data_root(tmp_path: Path) -> None:
+    """Independent backend processes may use the same Data Root."""
+
+    from ldaca_wordflow.main import create_app
+    from ldaca_wordflow.settings import load_settings
+
+    settings = load_settings(data_root=tmp_path, multi_user=False)
+    app_a = create_app(settings, serve_frontend=False)
+    app_b = create_app(settings, serve_frontend=False)
+
+    with (
+        TestClient(app_a, base_url="http://localhost") as client_a,
+        TestClient(app_b, base_url="http://localhost") as client_b,
+    ):
+        assert client_a.get("/health").status_code == 200
+        assert client_b.get("/health").status_code == 200
 
 
 def test_two_app_instances_keep_settings_runtime_and_overrides_isolated(
