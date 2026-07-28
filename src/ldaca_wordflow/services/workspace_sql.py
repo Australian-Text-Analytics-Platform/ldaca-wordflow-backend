@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
-from typing import Any, TypeVar, cast
+from typing import Any, TypeVar
 
 import anyio
 import polars as pl
@@ -167,7 +167,7 @@ def _execute_sql(inputs: list[Node], sql: str) -> pl.LazyFrame:
             for node in inputs:
                 context.register(node.id, node.data)
             result = context.execute(sql)
-        return cast(pl.LazyFrame, result)
+        return result
     except pl.exceptions.PolarsError as exc:
         raise InvalidInputError(str(exc)) from exc
 
