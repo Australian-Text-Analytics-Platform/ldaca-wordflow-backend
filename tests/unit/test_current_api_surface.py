@@ -125,6 +125,21 @@ EXPECTED_OPERATIONS = {
     ),
     (
         "GET",
+        "/api/workspaces/{workspace_id}/analyses/{analysis_id}/result/tables/{table_id}/projections/{row_unit}/rows",
+        "get_analysis_table_projection_rows",
+    ),
+    (
+        "GET",
+        "/api/workspaces/{workspace_id}/analyses/{analysis_id}/result/tables/{table_id}/projections/{row_unit}/schema",
+        "get_analysis_table_projection_schema",
+    ),
+    (
+        "GET",
+        "/api/workspaces/{workspace_id}/analyses/{analysis_id}/result/tables/{table_id}/density",
+        "get_concordance_table_density",
+    ),
+    (
+        "GET",
         "/api/workspaces/{workspace_id}/analyses/{analysis_id}/artifacts/{artifact_name}",
         "download_analysis_artifact",
     ),
@@ -134,6 +149,11 @@ EXPECTED_OPERATIONS = {
     ("POST", "/api/workspaces/{workspace_id}/sql", "execute_workspace_sql"),
     ("POST", "/api/workspaces/{workspace_id}/nodes", "create_node"),
     ("GET", "/api/workspaces/{workspace_id}/nodes", "list_nodes"),
+    (
+        "POST",
+        "/api/workspaces/{workspace_id}/nodes/exports",
+        "export_data_blocks",
+    ),
     (
         "PUT",
         "/api/workspaces/{workspace_id}/nodes/order",
@@ -253,9 +273,7 @@ def test_transient_provider_secrets_are_write_only_and_absent_from_resources() -
         assert field["anyOf"][0]["writeOnly"] is True
 
     assert "api_key" not in schemas["AnnotationAnalysisRequest"]["properties"]
-    assert "api_token" not in schemas["DataPortalUserFileImportRequest"][
-        "properties"
-    ]
+    assert "api_token" not in schemas["DataPortalUserFileImportRequest"]["properties"]
 
 
 def test_spa_runtime_config_contains_only_the_reverse_proxy_base_path() -> None:

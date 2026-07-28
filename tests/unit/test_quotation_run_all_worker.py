@@ -85,6 +85,9 @@ def test_quotation_run_all_writes_complete_analysis_table_artifact(
         *QUOTE_COLUMN_NAMES,
     ]
     assert source["table"]["table_id"] == "quotation-run-all"
+    assert source["table"]["supports_density"] is False
+    assert source["document_count"] == 1
+    assert source["match_count"] == 1
     assert "data_block" not in source
     data_file = tmp_path / source["table"]["artifact"]
     assert data_file.exists()
@@ -95,20 +98,9 @@ def test_quotation_run_all_writes_complete_analysis_table_artifact(
         "document",
         "QUOTE_extraction",
         "speaker_label",
-        "QUOTE_speaker",
-        "QUOTE_speaker_start_idx",
-        "QUOTE_speaker_end_idx",
-        "QUOTE_quote",
-        "QUOTE_quote_start_idx",
-        "QUOTE_quote_end_idx",
-        "QUOTE_verb",
-        "QUOTE_verb_start_idx",
-        "QUOTE_verb_end_idx",
-        "QUOTE_quote_type",
-        "QUOTE_quote_token_count",
-        "QUOTE_is_floating_quote",
-        "QUOTE_quote_row_idx",
+        "quotation",
     ]
+    assert restored.collect().get_column("quotation").list.len().to_list() == [1]
     assert "__quotation_source__" not in restored.collect_schema().names()
     assert progress_updates[0][1].startswith("Loading quotation")
     assert any(

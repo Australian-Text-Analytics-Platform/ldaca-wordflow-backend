@@ -122,7 +122,7 @@ def test_native_round_trip_preserves_tokenizer_and_rejects_previous_schema(
 
     _rewrite_workspace_snapshot(
         path,
-        lambda payload: payload["workspace_metadata"].update({"version": 11}),
+        lambda payload: payload["workspace_metadata"].update({"version": 12}),
     )
     with pytest.raises(WorkspaceSnapshotInvalidError):
         store.load(path)
@@ -275,7 +275,7 @@ def test_tab_generations_follow_the_workspace_commit_point(tmp_path: Path) -> No
     second_payload = json.loads((path / "workspace.json").read_text(encoding="utf-8"))
     second_record = path / second_payload["tabs"][0]["record_path"]
 
-    assert first_payload["workspace_metadata"]["version"] == 12
+    assert first_payload["workspace_metadata"]["version"] == 13
     assert first_record != second_record
     assert not first_record.exists()
     assert second_record.exists()

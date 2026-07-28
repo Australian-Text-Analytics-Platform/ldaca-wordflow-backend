@@ -426,6 +426,8 @@ def run_concordance_run_all(
 
         import os
 
+        import polars as pl
+
         from .input_snapshots import load_snapshot_node
 
         logger.info("[Worker %d] Starting concordance Run All", os.getpid())
@@ -500,6 +502,29 @@ def run_concordance_run_all(
             r1_freq, on=CONC_R1_COLUMN, how="left"
         )
         output_columns = output_columns + [CONC_L1_FREQ_COLUMN, CONC_R1_FREQ_COLUMN]
+        result = result.sort([SOURCE_ROW_ID_COLUMN, CONC_START_IDX_COLUMN])
+        match_count = result.height
+        source_columns = [
+            column
+            for column in output_columns
+            if column
+            not in {
+                *DETACHABLE_CONCORDANCE_COLUMNS,
+                CONC_EXTRACTION_COLUMN,
+            }
+        ]
+        analysis_columns = [
+            *DETACHABLE_CONCORDANCE_COLUMNS,
+            CONC_EXTRACTION_COLUMN,
+        ]
+        result = result.group_by(SOURCE_ROW_ID_COLUMN, maintain_order=True).agg(
+            *[
+                pl.col(column).first()
+                for column in source_columns
+                if column != SOURCE_ROW_ID_COLUMN
+            ],
+            pl.struct(analysis_columns).alias("concordance"),
+        )
 
         if progress_callback:
             progress_callback(0.82, "Serializing concordance Result...")
@@ -534,16 +559,15 @@ def run_concordance_run_all(
                         CONC_EXTRACTION_COLUMN,
                     }
                 ],
-                "analysis_columns": [
-                    *DETACHABLE_CONCORDANCE_COLUMNS,
-                    CONC_EXTRACTION_COLUMN,
-                ],
+                "analysis_columns": analysis_columns,
                 "internal_columns": [SOURCE_ROW_ID_COLUMN],
                 "table": {
                     "table_id": "concordance-run-all",
                     "artifact": str(result_path),
+                    "supports_density": True,
                 },
-                "record_count": len(result),
+                "document_count": result.height,
+                "match_count": match_count,
             },
             "message": "Concordance Run All completed successfully",
         }

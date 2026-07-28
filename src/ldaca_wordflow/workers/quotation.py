@@ -216,10 +216,7 @@ def run_quotation_run_all(
 
         import polars as pl
 
-        from ..analysis.quotation_core import (
-            compute_quote_dataframe,
-            flatten_grouped_quotation_dataframe,
-        )
+        from ..analysis.quotation_core import compute_quote_dataframe
         from ..infrastructure.providers.quotation_client import (
             QuotationProviderClient,
             QuotationServiceError,
@@ -291,12 +288,20 @@ def run_quotation_run_all(
                     quotation_service_max_batch_size=(quotation_service_max_batch_size),
                     quotation_service_timeout=quotation_service_timeout,
                 )
-                return flatten_grouped_quotation_dataframe(grouped)
+                return grouped
             finally:
                 if client is not None:
                     await client.close()
 
-        quote_df = asyncio.run(extract())
+        quote_df = (
+            asyncio.run(extract())
+            .filter(pl.col("quotation").list.len().fill_null(0) > 0)
+            .sort(SOURCE_ROW_ID_COLUMN)
+        )
+        match_count_value = quote_df.select(
+            pl.col("quotation").list.len().sum()
+        ).item()
+        match_count = int(match_count_value or 0)
         output_columns = list(quote_df.columns)
 
         if progress_callback:
@@ -328,6 +333,7 @@ def run_quotation_run_all(
                         SOURCE_ROW_ID_COLUMN,
                         document_column,
                         QUOTE_EXTRACTION_COLUMN,
+                        "quotation",
                         *QUOTE_COLUMN_NAMES,
                     }
                 ],
@@ -339,8 +345,10 @@ def run_quotation_run_all(
                 "table": {
                     "table_id": "quotation-run-all",
                     "artifact": str(result_path),
+                    "supports_density": False,
                 },
-                "record_count": int(quote_df.height),
+                "document_count": int(quote_df.height),
+                "match_count": match_count,
             },
             "message": "Quotation Run All completed successfully",
         }

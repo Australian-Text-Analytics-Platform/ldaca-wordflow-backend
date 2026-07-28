@@ -529,12 +529,16 @@ def test_concordance_run_all_group_stores_results_without_publishing_nodes(
             assert payload["source"]["document_column"] == "text"
             assert payload["source"]["metadata_columns"] == ["source"]
             assert "CONC_matched_text" in payload["source"]["analysis_columns"]
-            assert payload["source"]["table"]["delivery"] == "paged"
+            assert payload["source"]["table"]["delivery"] == "projected"
             page = client.get(
-                payload["source"]["table"]["rows_url"],
+                payload["source"]["table"]["matches"]["rows_url"],
                 params={"page": 1, "page_size": 20},
             )
             assert page.status_code == 200, page.text
+            density = client.get(payload["source"]["table"]["density_url"])
+            assert density.status_code == 200, density.text
+            assert density.json()["document_count"] == 2
+            assert density.json()["match_count"] == 2
             assert child["output_node_ids"] == []
             assert not (
                 tmp_path

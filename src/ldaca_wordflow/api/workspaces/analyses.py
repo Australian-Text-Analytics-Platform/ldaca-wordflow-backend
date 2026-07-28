@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Query, Request, Response, Security, status
 from fastapi.responses import FileResponse
@@ -17,9 +17,16 @@ from ...models.analysis_results import (
     ArtifactResource,
     CompleteTableIdentity,
     PagedTableIdentity,
+    ProjectedTableIdentity,
+    ConcordanceDensityResult,
     StoredArtifactIdentity,
 )
-from ...models.tables import CompleteTableResource, PagedTableResource
+from ...models.tables import (
+    CompleteTableResource,
+    PagedTableResource,
+    ProjectedTableResource,
+    TableProjectionResource,
+)
 from ...models.analyses import AnalysisCreate, AnalysisPage
 from ...runtime import Runtime, get_runtime
 from ...services.analysis_results import ResultMaterialization
@@ -75,6 +82,43 @@ def _present_typed_value(
                 workspace_id=workspace_id,
                 analysis_id=analysis_id,
                 table_id=value.table_id,
+            ),
+        ).model_dump(mode="json")
+    if isinstance(value, ProjectedTableIdentity):
+        def projection(row_unit: str) -> TableProjectionResource:
+            return TableProjectionResource(
+                schema_url=route_path(
+                    request,
+                    "get_analysis_table_projection_schema",
+                    workspace_id=workspace_id,
+                    analysis_id=analysis_id,
+                    table_id=value.table_id,
+                    row_unit=row_unit,
+                ),
+                rows_url=route_path(
+                    request,
+                    "get_analysis_table_projection_rows",
+                    workspace_id=workspace_id,
+                    analysis_id=analysis_id,
+                    table_id=value.table_id,
+                    row_unit=row_unit,
+                ),
+            )
+
+        return ProjectedTableResource(
+            table_id=value.table_id,
+            documents=projection("documents"),
+            matches=projection("matches"),
+            density_url=(
+                route_path(
+                    request,
+                    "get_concordance_table_density",
+                    workspace_id=workspace_id,
+                    analysis_id=analysis_id,
+                    table_id=value.table_id,
+                )
+                if value.supports_density
+                else None
             ),
         ).model_dump(mode="json")
     if isinstance(value, StoredArtifactIdentity):
@@ -438,6 +482,86 @@ async def get_analysis_table_schema(
         table_id,
     )
     return arrow_stream_response(content)
+
+
+@router.get(
+    "/analyses/{analysis_id}/result/tables/{table_id}/projections/{row_unit}/rows",
+    response_class=Response,
+    responses={
+        **api_errors(403, 404, 409, 410, 422, 500, 507),
+        **ARROW_STREAM_RESPONSE,
+    },
+)
+async def get_analysis_table_projection_rows(
+    workspace_id: uuid.UUID,
+    analysis_id: uuid.UUID,
+    table_id: str,
+    row_unit: Literal["documents", "matches"],
+    principal: Annotated[SessionPrincipal, Security(get_current_session)],
+    runtime: Runtime = Depends(get_runtime),
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=500)] = 50,
+    sort_by: str | None = None,
+    descending: bool = False,
+) -> Response:
+    result = await runtime.analysis_result_service.projected_table_page(
+        principal.user.id,
+        str(workspace_id),
+        str(analysis_id),
+        table_id,
+        row_unit=row_unit,
+        page=page,
+        page_size=page_size,
+        sort_by=sort_by,
+        descending=descending,
+    )
+    return arrow_page_response(result)
+
+
+@router.get(
+    "/analyses/{analysis_id}/result/tables/{table_id}/projections/{row_unit}/schema",
+    response_class=Response,
+    responses={
+        **api_errors(403, 404, 409, 410, 422, 500, 507),
+        **ARROW_STREAM_RESPONSE,
+    },
+)
+async def get_analysis_table_projection_schema(
+    workspace_id: uuid.UUID,
+    analysis_id: uuid.UUID,
+    table_id: str,
+    row_unit: Literal["documents", "matches"],
+    principal: Annotated[SessionPrincipal, Security(get_current_session)],
+    runtime: Runtime = Depends(get_runtime),
+) -> Response:
+    content = await runtime.analysis_result_service.projected_table_schema(
+        principal.user.id,
+        str(workspace_id),
+        str(analysis_id),
+        table_id,
+        row_unit=row_unit,
+    )
+    return arrow_stream_response(content)
+
+
+@router.get(
+    "/analyses/{analysis_id}/result/tables/{table_id}/density",
+    response_model=ConcordanceDensityResult,
+    responses=api_errors(403, 404, 409, 410, 422, 500, 507),
+)
+async def get_concordance_table_density(
+    workspace_id: uuid.UUID,
+    analysis_id: uuid.UUID,
+    table_id: str,
+    principal: Annotated[SessionPrincipal, Security(get_current_session)],
+    runtime: Runtime = Depends(get_runtime),
+) -> ConcordanceDensityResult:
+    return await runtime.analysis_result_service.concordance_density(
+        principal.user.id,
+        str(workspace_id),
+        str(analysis_id),
+        table_id,
+    )
 
 
 @router.get(

@@ -20,7 +20,13 @@ from pydantic import BaseModel, ValidationError
 from ..analysis.concordance_core import compute_node_concordance_page
 from ..analysis.quotation_core import compute_quotation_page
 from ..analysis.token_cache import tokenize_lazyframe, tokens_cache_path
-from ..analysis.generated_columns import TOPIC_DISTRIBUTION_COLUMN
+from ..analysis.generated_columns import (
+    CONC_MATCHED_TEXT_COLUMN,
+    CONC_START_IDX_COLUMN,
+    QUOTE_COLUMN_NAMES,
+    QUOTE_ROW_IDX_COLUMN,
+    TOPIC_DISTRIBUTION_COLUMN,
+)
 from ..domain.workspace import (
     AnalysisArtifactRecord,
     AnalysisRecord,
@@ -45,10 +51,13 @@ from ..models.analysis_results import (
     PublishedDataBlockStoredResult,
     QuotationResultQuery,
     QuotationRunAllStoredResult,
+    ConcordanceDensityResult,
     PreviewReadyStoredResult,
+    RunAllSourceTable,
     ResultPublicationStoredResult,
     SequentialStoredResult,
     PagedTableIdentity,
+    ProjectedTableIdentity,
     StoredArtifactIdentity,
     TokenFrequencyStoredResult,
     TopicModelingResultQuery,
@@ -245,6 +254,86 @@ class AnalysisResultService:
             with anyio.CancelScope(shield=True):
                 await snapshot.cleanup()
 
+    async def projected_table_page(
+        self,
+        user_id: str,
+        workspace_id: str,
+        analysis_id: str,
+        table_id: str,
+        *,
+        row_unit: str,
+        page: int,
+        page_size: int,
+        sort_by: str | None,
+        descending: bool,
+    ) -> IpcTablePage:
+        snapshot, source, kind = await self._projected_table_snapshot(
+            user_id, workspace_id, analysis_id, table_id
+        )
+        try:
+            return await self._run_sync(
+                _projected_artifact_page,
+                snapshot.path,
+                kind,
+                row_unit,
+                source.document_column,
+                source.metadata_columns,
+                page,
+                page_size,
+                sort_by,
+                descending,
+            )
+        finally:
+            with anyio.CancelScope(shield=True):
+                await snapshot.cleanup()
+
+    async def projected_table_schema(
+        self,
+        user_id: str,
+        workspace_id: str,
+        analysis_id: str,
+        table_id: str,
+        *,
+        row_unit: str,
+    ) -> bytes:
+        snapshot, _source, kind = await self._projected_table_snapshot(
+            user_id, workspace_id, analysis_id, table_id
+        )
+        try:
+            return await self._run_sync(
+                _projected_artifact_schema,
+                snapshot.path,
+                kind,
+                row_unit,
+            )
+        finally:
+            with anyio.CancelScope(shield=True):
+                await snapshot.cleanup()
+
+    async def concordance_density(
+        self,
+        user_id: str,
+        workspace_id: str,
+        analysis_id: str,
+        table_id: str,
+    ) -> ConcordanceDensityResult:
+        snapshot, source, kind = await self._projected_table_snapshot(
+            user_id, workspace_id, analysis_id, table_id
+        )
+        try:
+            if kind != "concordance_run_all":
+                raise AnalysisKindMismatchError(
+                    "Density is available only for Concordance Results"
+                )
+            return await self._run_sync(
+                _concordance_density,
+                snapshot.path,
+                source.document_column,
+            )
+        finally:
+            with anyio.CancelScope(shield=True):
+                await snapshot.cleanup()
+
     async def _paged_table_snapshot(
         self,
         user_id: str,
@@ -272,6 +361,38 @@ class AnalysisResultService:
                 artifact.name,
             )
             return snapshot
+
+    async def _projected_table_snapshot(
+        self,
+        user_id: str,
+        workspace_id: str,
+        analysis_id: str,
+        table_id: str,
+    ) -> tuple[
+        ResponseSnapshot,
+        RunAllSourceTable[StoredArtifactIdentity],
+        str,
+    ]:
+        async with self._analyses.successful_record_context(
+            user_id,
+            workspace_id,
+            analysis_id,
+            allow_closing=True,
+        ) as (lease, record):
+            stored_model = ANALYSIS_STORED_RESULT_MODELS.get(record.request.kind)
+            if stored_model is None or record.result_payload is None:
+                raise AnalysisCorruptError("Analysis data is corrupt")
+            try:
+                stored = stored_model.model_validate(record.result_payload)
+            except ValidationError as exc:
+                raise AnalysisCorruptError("Analysis data is corrupt") from exc
+            source = _projected_table_source(stored, table_id)
+            snapshot, _reference = await self._artifacts.response_snapshot(
+                lease,
+                record,
+                source.table.artifact.name,
+            )
+            return snapshot, source, record.request.kind
 
     async def query(
         self,
@@ -531,13 +652,6 @@ def _paged_table_artifact(
     stored: BaseModel,
     table_id: str,
 ) -> StoredArtifactIdentity:
-    if isinstance(
-        stored,
-        (ConcordanceRunAllStoredResult, QuotationRunAllStoredResult),
-    ):
-        source = stored.source
-        if source is not None and source.table.table_id == table_id:
-            return source.table.artifact
     if isinstance(stored, TopicModelingStoredResult):
         table = next(
             (
@@ -550,6 +664,24 @@ def _paged_table_artifact(
         if isinstance(table, PagedTableIdentity):
             return table.artifact
     raise ArtifactGoneError("Analysis Result table is unavailable")
+
+
+def _projected_table_source(
+    stored: BaseModel,
+    table_id: str,
+) -> RunAllSourceTable[StoredArtifactIdentity]:
+    source = None
+    if isinstance(stored, ConcordanceRunAllStoredResult):
+        source = stored.source
+    elif isinstance(stored, QuotationRunAllStoredResult):
+        source = stored.source
+    if (
+        source is None
+        or not isinstance(source.table, ProjectedTableIdentity)
+        or source.table.table_id != table_id
+    ):
+        raise ArtifactGoneError("Analysis Result table is unavailable")
+    return source
 
 
 def _paged_artifact_lazyframe(path: Path) -> pl.LazyFrame:
@@ -585,6 +717,107 @@ def _paged_artifact_schema(path: Path) -> bytes:
             _topic_distribution_topic_count(schema)
         )
     return encode_schema_stream(schema)
+
+
+def _projected_artifact_lazyframe(
+    path: Path,
+    kind: str,
+    row_unit: str,
+) -> pl.LazyFrame:
+    if row_unit not in {"documents", "matches"}:
+        raise InvalidInputError("Result row unit is invalid")
+    frame = pl.scan_parquet(path)
+    if row_unit == "documents":
+        return frame
+    if kind == "concordance_run_all":
+        return frame.explode("concordance").unnest("concordance")
+    if kind == "quotation_run_all":
+        return frame.explode("quotation").unnest("quotation").rename(
+            {column.removeprefix("QUOTE_"): column for column in QUOTE_COLUMN_NAMES},
+            strict=False,
+        )
+    raise AnalysisKindMismatchError("Analysis Result table is not projected")
+
+
+def _projected_artifact_page(
+    path: Path,
+    kind: str,
+    row_unit: str,
+    document_column: str,
+    metadata_columns: list[str],
+    page: int,
+    page_size: int,
+    sort_by: str | None,
+    descending: bool,
+) -> IpcTablePage:
+    if page < 1 or page_size < 1:
+        raise InvalidInputError("Page and page size must be positive")
+    frame = _projected_artifact_lazyframe(path, kind, row_unit)
+    schema = frame.collect_schema()
+    sortable_columns = {document_column, *metadata_columns}
+    if sort_by is not None and sort_by not in sortable_columns:
+        raise InvalidInputError("Result sort column not found")
+
+    stable_columns = ["__wordflow_source_row_id"]
+    if row_unit == "matches":
+        stable_columns.append(
+            CONC_START_IDX_COLUMN
+            if kind == "concordance_run_all"
+            else QUOTE_ROW_IDX_COLUMN
+        )
+    order = [sort_by, *stable_columns] if sort_by is not None else stable_columns
+    order = [column for column in order if column in schema]
+    frame = frame.sort(
+        order,
+        descending=[descending, *([False] * (len(order) - 1))]
+        if sort_by is not None
+        else False,
+    )
+    page_frame = frame.slice((page - 1) * page_size, page_size + 1).collect()
+    has_next = page_frame.height > page_size
+    return IpcTablePage(
+        content=encode_ipc_stream(page_frame.head(page_size)),
+        has_next=has_next,
+    )
+
+
+def _projected_artifact_schema(path: Path, kind: str, row_unit: str) -> bytes:
+    schema = _projected_artifact_lazyframe(path, kind, row_unit).collect_schema()
+    return encode_schema_stream(schema)
+
+
+def _concordance_density(
+    path: Path,
+    document_column: str,
+) -> ConcordanceDensityResult:
+    rows = (
+        pl.scan_parquet(path)
+        .select(document_column, "concordance")
+        .collect()
+        .to_dicts()
+    )
+    series: dict[str, list[int]] = {}
+    match_count = 0
+    for row in rows:
+        document = str(row.get(document_column) or "")
+        document_length = max(len(document), 1)
+        for match in row.get("concordance") or []:
+            if not isinstance(match, dict):
+                continue
+            label = str(match.get(CONC_MATCHED_TEXT_COLUMN) or "")
+            start_index = int(match.get(CONC_START_IDX_COLUMN) or 0)
+            bin_index = min(99, max(0, start_index * 100 // document_length))
+            counts = series.setdefault(label, [0] * 100)
+            counts[bin_index] += 1
+            match_count += 1
+    return ConcordanceDensityResult(
+        document_count=len(rows),
+        match_count=match_count,
+        series=[
+            {"label": label, "counts": counts}
+            for label, counts in sorted(series.items())
+        ],
+    )
 
 
 def _topic_distribution_topic_count(schema: pl.Schema) -> int:

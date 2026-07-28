@@ -43,12 +43,14 @@ def run_result_publication(
             )
             selections = request.sources
             operation = ConcordanceResultPublicationDerivation()
+            nested_column = "concordance"
         elif kind == "quotation_result_publication":
             request = QuotationResultPublicationAnalysisRequest.model_validate(
                 request_payload
             )
             selections = [request.source]
             operation = QuotationResultPublicationDerivation()
+            nested_column = "quotation"
         else:
             raise ValueError("Result Publication kind is unsupported")
 
@@ -61,7 +63,17 @@ def run_result_publication(
                 raise ValueError("Result Publication source artifact is unavailable")
             if document_column not in selection.selected_columns:
                 raise ValueError("Result Publication requires the document column")
-            frame = pl.scan_parquet(path)
+            frame = pl.scan_parquet(path).explode(nested_column).unnest(nested_column)
+            if kind == "quotation_result_publication":
+                from ..analysis.generated_columns import QUOTE_COLUMN_NAMES
+
+                frame = frame.rename(
+                    {
+                        column.removeprefix("QUOTE_"): column
+                        for column in QUOTE_COLUMN_NAMES
+                    },
+                    strict=False,
+                )
             schema = frame.collect_schema()
             if any(column not in schema for column in selection.selected_columns):
                 raise ValueError("Result Publication column is unavailable")

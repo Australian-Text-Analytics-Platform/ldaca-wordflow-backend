@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 from ..domain.workspace import NodeProvenance
 from ..shared.json_data import JsonData
 from .names import NodeName
-from .tables import CompleteTableResource, PagedTableResource
+from .tables import CompleteTableResource, ProjectedTableResource, PagedTableResource
 
 
 class _StrictModel(BaseModel):
@@ -111,6 +111,24 @@ class CompleteTableIdentity(_StrictModel, Generic[ArtifactValueT]):
 class PagedTableIdentity(_StrictModel, Generic[ArtifactValueT]):
     table_id: str = Field(min_length=1, max_length=200)
     artifact: ArtifactValueT
+
+
+class ProjectedTableIdentity(_StrictModel, Generic[ArtifactValueT]):
+    table_id: str = Field(min_length=1, max_length=200)
+    artifact: ArtifactValueT
+    supports_density: bool
+
+
+class ConcordanceDensitySeries(_StrictModel):
+    label: str
+    counts: list[int] = Field(min_length=100, max_length=100)
+
+
+class ConcordanceDensityResult(_StrictModel):
+    resolution: Literal[100] = 100
+    document_count: int = Field(ge=0)
+    match_count: int = Field(ge=0)
+    series: list[ConcordanceDensitySeries]
 
 
 class _TokenNodeTable(_StrictModel, Generic[ArtifactValueT]):
@@ -333,7 +351,8 @@ class RunAllSourceDescriptor(_StrictModel):
     metadata_columns: list[str]
     analysis_columns: list[str]
     internal_columns: list[str]
-    record_count: int = Field(ge=0)
+    document_count: int = Field(ge=0)
+    match_count: int = Field(ge=0)
 
     @model_validator(mode="after")
     def validate_columns(self) -> "RunAllSourceDescriptor":
@@ -350,7 +369,7 @@ class RunAllSourceDescriptor(_StrictModel):
 
 
 class RunAllSourceTable(RunAllSourceDescriptor, Generic[ArtifactValueT]):
-    table: PagedTableIdentity[ArtifactValueT]
+    table: ProjectedTableIdentity[ArtifactValueT]
 
 
 class ConcordanceRunAllWorkerResult(_StrictModel):
@@ -469,7 +488,7 @@ class ConcordanceRunAllStoredResult(_StrictModel):
 
 
 class RunAllSourceTableResource(RunAllSourceDescriptor):
-    table: PagedTableResource
+    table: ProjectedTableResource
 
 
 class ConcordanceRunAllResult(_StrictModel):
@@ -677,6 +696,8 @@ __all__ = [
     "ResultPublicationOutput",
     "ResultPublicationWorkerResult",
     "PrivateArtifactPath",
+    "ProjectedTableIdentity",
+    "ConcordanceDensityResult",
     "QuotationResult",
     "QuotationResultQuery",
     "QuotationStoredResult",
