@@ -97,6 +97,81 @@ def test_workspace_sql_query_uses_declared_uuid_tables_and_outer_pagination(
         ]
 
 
+def test_workspace_sql_filters_annotation_differences_before_pagination(
+    tmp_path: Path,
+) -> None:
+    parquet = BytesIO()
+    pl.DataFrame(
+        {
+            "annotation": ["same", "a", "a", "a", None, "a"],
+            "first": ["same", "b", "a", "b", "b", None],
+            "second": ["same", "a", "b", "b", "b", "a"],
+        }
+    ).write_parquet(parquet)
+
+    with _client(tmp_path) as client:
+        workspace_id, unsafe, [node_id] = _workspace_with_sources(
+            client,
+            ("source.parquet", parquet.getvalue()),
+        )
+        indexed = (
+            'WITH "indexed" AS ('
+            'SELECT ROW_NUMBER() OVER () - 1 AS "source_row_index", * '
+            f'FROM "{node_id}"), '
+            '"filtered" AS (SELECT * FROM "indexed" '
+            'WHERE "annotation" != "first" OR "annotation" != "second") '
+        )
+        first_page = client.post(
+            f"/api/workspaces/{workspace_id}/sql",
+            json={
+                "mode": "query",
+                "node_ids": [node_id],
+                "sql": f'{indexed}SELECT * FROM "filtered" ORDER BY "source_row_index"',
+                "page": 1,
+                "page_size": 2,
+            },
+            headers=unsafe,
+        )
+        second_page = client.post(
+            f"/api/workspaces/{workspace_id}/sql",
+            json={
+                "mode": "query",
+                "node_ids": [node_id],
+                "sql": f'{indexed}SELECT * FROM "filtered" ORDER BY "source_row_index"',
+                "page": 2,
+                "page_size": 2,
+            },
+            headers=unsafe,
+        )
+        count = client.post(
+            f"/api/workspaces/{workspace_id}/sql",
+            json={
+                "mode": "query",
+                "node_ids": [node_id],
+                "sql": f'{indexed}SELECT COUNT(*) AS "total_rows" FROM "filtered"',
+                "page": 1,
+                "page_size": 1,
+            },
+            headers=unsafe,
+        )
+
+        assert first_page.status_code == 200, first_page.text
+        assert first_page.headers["x-wordflow-has-next"] == "true"
+        assert [
+            row["source_row_index"]
+            for row in pl.read_ipc_stream(BytesIO(first_page.content)).to_dicts()
+        ] == [1, 2]
+        assert second_page.status_code == 200, second_page.text
+        assert [
+            row["source_row_index"]
+            for row in pl.read_ipc_stream(BytesIO(second_page.content)).to_dicts()
+        ] == [3]
+        assert count.status_code == 200, count.text
+        assert pl.read_ipc_stream(BytesIO(count.content)).to_dicts() == [
+            {"total_rows": 3}
+        ]
+
+
 def test_workspace_sql_create_records_ordered_lineage_and_survives_context_close(
     tmp_path: Path,
 ) -> None:
