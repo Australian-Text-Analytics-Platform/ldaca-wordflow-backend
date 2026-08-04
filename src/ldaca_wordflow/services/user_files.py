@@ -39,8 +39,8 @@ import anyio
 from anyio.to_thread import run_sync as run_sync_in_worker_thread
 
 from ..infrastructure.storage.data_loading import (
-    PREVIEWABLE_FILE_TYPES,
     detect_file_type,
+    is_loadable_file,
 )
 from ..shared.errors import (
     FileNotFoundError as FileResourceNotFoundError,
@@ -852,7 +852,7 @@ def _file_resource(
             "type": "directory",
             "size_bytes": None,
             "file_type": None,
-            "preview_available": False,
+            "loadable": False,
         }
     if not stat.S_ISREG(metadata.st_mode):
         raise UnsafePathError("File resource is not a regular file or directory")
@@ -862,5 +862,5 @@ def _file_resource(
         "type": "file",
         "size_bytes": metadata.st_size,
         "file_type": file_type,
-        "preview_available": file_type in PREVIEWABLE_FILE_TYPES,
+        "loadable": is_loadable_file(path.name),
     }

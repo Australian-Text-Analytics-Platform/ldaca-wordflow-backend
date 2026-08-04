@@ -303,17 +303,20 @@ async def test_user_file_tree_is_complete_depth_first_and_deterministic(
 
 
 @pytest.mark.parametrize(
-    "filename",
+    ("filename", "loadable"),
     [
-        "data.tsv",
-        "data.jsonl",
-        "data.xlsx",
-        "notes.txt",
+        ("data.tsv", True),
+        ("data.jsonl", True),
+        ("data.xlsx", True),
+        ("notes.txt", True),
+        ("documents.zip", True),
+        ("figure.png", False),
     ],
 )
-async def test_tree_marks_every_supported_preview_type(
+async def test_tree_marks_only_allowlisted_files_as_loadable(
     tmp_path: Path,
     filename: str,
+    loadable: bool,
 ) -> None:
     store = _store(tmp_path)
     root = tmp_path / "alice"
@@ -322,7 +325,7 @@ async def test_tree_marks_every_supported_preview_type(
 
     [resource] = await store.list_tree("alice")
 
-    assert resource["preview_available"] is True
+    assert resource["loadable"] is loadable
 
 
 def test_user_file_tree_uses_exact_paths_to_break_casefold_collisions() -> None:

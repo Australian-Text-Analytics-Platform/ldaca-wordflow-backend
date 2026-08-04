@@ -19,14 +19,14 @@ class FileResource(_StrictModel):
     size_bytes: int | None = Field(default=None, ge=0)
     modified_at: float
     file_type: str | None = None
-    preview_available: bool = False
+    loadable: bool
 
     @model_validator(mode="after")
     def validate_kind_fields(self) -> "FileResource":
         if self.type == "directory":
             if self.size_bytes is not None or self.file_type is not None:
                 raise ValueError("directory resources cannot contain file metadata")
-            self.preview_available = False
+            self.loadable = False
         elif self.size_bytes is None or self.file_type is None:
             raise ValueError("file resources require size and file type metadata")
         return self

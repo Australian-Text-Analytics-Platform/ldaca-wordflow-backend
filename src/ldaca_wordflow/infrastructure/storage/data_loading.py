@@ -9,12 +9,36 @@ import stat
 import unicodedata
 import zipfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
+from types import MappingProxyType
+from typing import Final
 
 import fastexcel
 import polars as pl
 
-PREVIEWABLE_FILE_TYPES = frozenset(
-    {"csv", "tsv", "json", "jsonl", "parquet", "excel", "text"}
+LOADABLE_FILE_TYPES: Final = MappingProxyType(
+    {
+        ".csv": "csv",
+        ".tsv": "tsv",
+        ".json": "json",
+        ".jsonl": "jsonl",
+        ".ndjson": "jsonl",
+        ".parquet": "parquet",
+        ".avro": "avro",
+        ".arrow": "ipc",
+        ".ipc": "ipc",
+        ".feather": "ipc",
+        ".xlsx": "excel",
+        ".xls": "excel",
+        ".xlsm": "excel",
+        ".xlsb": "excel",
+        ".ods": "excel",
+        ".txt": "text",
+        ".text": "text",
+        ".md": "text",
+        ".rst": "text",
+        ".log": "text",
+        ".zip": "zip",
+    }
 )
 
 
@@ -30,26 +54,13 @@ def detect_file_type(filename: str) -> str:
       need a backend boundary that validates inputs before delegating to workspace or worker
       state.
     """
-    ext = Path(filename).suffix.lower()
-    type_map = {
-        ".csv": "csv",
-        ".json": "json",
-        ".jsonl": "jsonl",
-        ".ndjson": "jsonl",
-        ".parquet": "parquet",
-        ".xlsx": "excel",
-        ".xls": "excel",
-        ".xlsm": "excel",
-        ".xlsb": "excel",
-        ".ods": "excel",
-        ".txt": "text",
-        ".text": "text",
-        ".md": "text",
-        ".rst": "text",
-        ".log": "text",
-        ".tsv": "tsv",
-    }
-    return type_map.get(ext, "unknown")
+    return LOADABLE_FILE_TYPES.get(Path(filename).suffix.lower(), "unknown")
+
+
+def is_loadable_file(filename: str) -> bool:
+    """Return whether one filename is admitted by the canonical allowlist."""
+
+    return Path(filename).suffix.lower() in LOADABLE_FILE_TYPES
 
 
 def load_data_file(
@@ -63,6 +74,8 @@ def load_data_file(
         OSError,
         UnicodeError,
         ValueError,
+        zipfile.BadZipFile,
+        zipfile.LargeZipFile,
         fastexcel.FastExcelError,
         pl.exceptions.PolarsError,
     ) as exc:
@@ -79,6 +92,10 @@ def _load_data_file(
         return pl.scan_csv(file_path)
     if file_type == "parquet":
         return pl.scan_parquet(file_path)
+    if file_type == "avro":
+        return pl.read_avro(file_path)
+    if file_type == "ipc":
+        return pl.scan_ipc(file_path)
     if file_type == "json":
         return pl.read_json(file_path)
     if file_type == "jsonl":
@@ -97,6 +114,8 @@ def _load_data_file(
         return result
     if file_type == "text":
         return read_text_file(file_path)
+    if file_type == "zip":
+        return read_zip_file(file_path)
     raise ValueError(f"Unsupported file type: {file_type}")
 
 
@@ -109,6 +128,47 @@ def read_text_file(file_path: Path) -> pl.DataFrame:
     return pl.DataFrame({"text": lines})
 
 
+_ZIP_DOCUMENT_SCHEMA = {
+    "file_path": pl.String,
+    "base_name": pl.String,
+    "extension": pl.String,
+    "document": pl.String,
+}
+
+
+def read_zip_file(file_path: Path) -> pl.DataFrame:
+    """Read safe UTF-8 ZIP members into the canonical document table."""
+
+    records: list[dict[str, str]] = []
+    try:
+        with zipfile.ZipFile(file_path) as archive:
+            members = _validate_zip_members(archive, label="ZIP archive")
+            for member in sorted(members, key=lambda item: item.filename):
+                if member.is_dir():
+                    continue
+                inner_path = member.filename
+                inner_name = PurePosixPath(inner_path).name
+                if inner_path.startswith("__MACOSX/") or inner_name.startswith("._"):
+                    continue
+                try:
+                    document = archive.read(member).decode("utf-8", errors="strict")
+                except UnicodeDecodeError:
+                    continue
+                path = PurePosixPath(inner_path)
+                records.append(
+                    {
+                        "file_path": inner_path,
+                        "base_name": path.stem,
+                        "extension": path.suffix,
+                        "document": document,
+                    }
+                )
+    except (OSError, zipfile.BadZipFile, zipfile.LargeZipFile) as exc:
+        raise ValueError("ZIP archive is invalid") from exc
+
+    return pl.DataFrame(records, schema=_ZIP_DOCUMENT_SCHEMA)
+
+
 def validate_spreadsheet_container(file_path: Path) -> None:
     """Bound and validate ZIP-based spreadsheet containers before parsing."""
 
@@ -116,48 +176,52 @@ def validate_spreadsheet_container(file_path: Path) -> None:
         return
     try:
         with zipfile.ZipFile(file_path) as archive:
-            members = archive.infolist()
-            if len(members) > 5_000:
-                raise ValueError("Spreadsheet has too many members")
-            expanded_total = 0
-            seen: set[str] = set()
-            for member in members:
-                name = member.filename.rstrip("/")
-                posix = PurePosixPath(name)
-                windows = PureWindowsPath(name)
-                if (
-                    not name
-                    or "\\" in name
-                    or "\x00" in name
-                    or posix.is_absolute()
-                    or windows.drive
-                    or windows.root
-                    or any(part in {"", ".", ".."} for part in posix.parts)
-                ):
-                    raise ValueError("Spreadsheet contains an unsafe member path")
-                collision = unicodedata.normalize("NFC", name).casefold()
-                if collision in seen:
-                    raise ValueError("Spreadsheet contains colliding member names")
-                seen.add(collision)
-                if member.flag_bits & 0x1:
-                    raise ValueError("Encrypted spreadsheets are unsupported")
-                unix_mode = (member.external_attr >> 16) & 0xFFFF
-                kind = stat.S_IFMT(unix_mode)
-                allowed = {0, stat.S_IFDIR} if member.is_dir() else {0, stat.S_IFREG}
-                if kind not in allowed:
-                    raise ValueError("Spreadsheet contains a link or special file")
-                if member.file_size > 64 * 1024 * 1024:
-                    raise ValueError("Spreadsheet member is too large")
-                expanded_total += member.file_size
-                if expanded_total > 256 * 1024 * 1024:
-                    raise ValueError("Spreadsheet expands beyond the safe limit")
-                if member.file_size:
-                    if member.compress_size == 0:
-                        raise ValueError("Spreadsheet compression ratio is invalid")
-                    if member.file_size / member.compress_size > 200:
-                        raise ValueError("Spreadsheet compression ratio is too high")
+            _validate_zip_members(archive, label="Spreadsheet")
     except (OSError, zipfile.BadZipFile, zipfile.LargeZipFile) as exc:
         raise ValueError("Spreadsheet container is invalid") from exc
+
+
+def _validate_zip_members(
+    archive: zipfile.ZipFile,
+    *,
+    label: str,
+) -> list[zipfile.ZipInfo]:
+    """Validate a ZIP directory before any member is read."""
+
+    members = archive.infolist()
+    seen: set[str] = set()
+    for member in members:
+        raw_name = member.filename
+        name = raw_name[:-1] if member.is_dir() and raw_name.endswith("/") else raw_name
+        posix = PurePosixPath(name)
+        windows = PureWindowsPath(name)
+        if (
+            not name
+            or "\\" in name
+            or "\x00" in name
+            or posix.is_absolute()
+            or windows.drive
+            or windows.root
+            or any(part in {"", ".", ".."} for part in name.split("/"))
+        ):
+            raise ValueError(f"{label} contains an unsafe member path")
+        collision = unicodedata.normalize("NFC", name).casefold()
+        if collision in seen:
+            raise ValueError(f"{label} contains colliding member names")
+        seen.add(collision)
+        if member.flag_bits & 0x1:
+            raise ValueError(f"Encrypted {label.lower()}s are unsupported")
+        unix_mode = (member.external_attr >> 16) & 0xFFFF
+        kind = stat.S_IFMT(unix_mode)
+        allowed = {0, stat.S_IFDIR} if member.is_dir() else {0, stat.S_IFREG}
+        if kind not in allowed:
+            raise ValueError(f"{label} contains a link or special file")
+        if member.file_size:
+            if member.compress_size == 0:
+                raise ValueError(f"{label} compression ratio is invalid")
+            if member.file_size / member.compress_size > 200:
+                raise ValueError(f"{label} compression ratio is too high")
+    return members
 
 
 _JS_MAX_SAFE_INTEGER = 2**53 - 1

@@ -11,8 +11,9 @@ import polars as pl
 from anyio.to_thread import run_sync as run_sync_in_worker_thread
 
 from ..infrastructure.storage.data_loading import (
+    DataFileLoadError,
     detect_file_type,
-    read_text_file,
+    load_data_file,
     validate_spreadsheet_container,
 )
 from ..models.files import FileWorksheetsResource
@@ -115,38 +116,17 @@ class FileReadService:
 def _file_lazyframe(path: Path, sheet_name: str | None) -> pl.LazyFrame:
     file_type = detect_file_type(path.name)
     try:
-        if file_type == "csv":
-            return pl.scan_csv(path)
-        if file_type == "tsv":
-            return pl.scan_csv(path, separator="\t")
-        if file_type == "parquet":
-            return pl.scan_parquet(path)
-        if file_type == "jsonl":
-            return pl.scan_ndjson(path)
-        if file_type == "json":
-            return pl.read_json(path).lazy()
-        if file_type == "text":
-            return read_text_file(path).lazy()
         if file_type == "excel":
-            validate_spreadsheet_container(path)
             sheets = _excel_worksheets(path)
             selected = sheet_name or sheets[0]
             if selected not in sheets:
                 raise InvalidInputError("Excel sheet not found")
-            frame = pl.read_excel(path, sheet_name=selected)
-            if not isinstance(frame, pl.DataFrame):
-                raise InvalidInputError("Excel sheet could not be read")
-            return frame.lazy()
-        raise InvalidInputError("File type is not previewable")
+            sheet_name = selected
+        loaded = load_data_file(path, sheet_name)
+        return loaded if isinstance(loaded, pl.LazyFrame) else loaded.lazy()
     except InvalidInputError:
         raise
-    except (
-        OSError,
-        UnicodeError,
-        ValueError,
-        fastexcel.FastExcelError,
-        pl.exceptions.PolarsError,
-    ) as exc:
+    except DataFileLoadError as exc:
         raise InvalidInputError("File preview could not be generated") from exc
 
 

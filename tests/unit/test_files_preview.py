@@ -41,8 +41,8 @@ def test_csv_preview_supported_types_and_preview(files_test_client, tmp_path):
     assert frame.to_dict(as_series=False) == {"a": [1, 2], "b": ["x", "y"]}
 
 
-def test_generic_zip_preview_is_rejected(files_test_client, tmp_path):
-    """Executable/unbounded archive contents are not a user-data format."""
+def test_zip_preview_uses_the_canonical_document_table(files_test_client, tmp_path):
+    """ZIP previews expose the same rows that Source Data Block ingestion uses."""
 
     user_root = tmp_path / "users" / "root" / "files"
     zip_path = user_root / "archive.zip"
@@ -57,8 +57,22 @@ def test_generic_zip_preview_is_rejected(files_test_client, tmp_path):
         params={"path": "archive.zip", "page": 1, "page_size": 10},
     )
 
-    assert resp.status_code == 400
-    assert resp.json()["code"] == "invalid_input"
+    assert resp.status_code == 200
+    frame = pl.read_ipc_stream(BytesIO(resp.content))
+    assert frame.to_dicts() == [
+        {
+            "file_path": "a.txt",
+            "base_name": "a",
+            "extension": ".txt",
+            "document": "hello",
+        },
+        {
+            "file_path": "b.txt",
+            "base_name": "b",
+            "extension": ".txt",
+            "document": "world",
+        },
+    ]
 
 
 def test_text_preview_returns_single_cell(files_test_client, tmp_path):
