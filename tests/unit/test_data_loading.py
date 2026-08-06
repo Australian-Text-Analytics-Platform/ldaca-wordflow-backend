@@ -164,8 +164,12 @@ def test_zip_ingestion_rejects_unsafe_member_paths(
     unsafe_name: str,
 ) -> None:
     path = tmp_path / "unsafe.zip"
+    member = zipfile.ZipInfo("placeholder")
+    # Bypass ZipInfo's Windows separator normalization to write the raw test path.
+    member.orig_filename = unsafe_name
+    member.filename = unsafe_name
     with zipfile.ZipFile(path, "w") as archive:
-        archive.writestr(unsafe_name, "unsafe")
+        archive.writestr(member, "unsafe")
 
     with pytest.raises(DataFileLoadError):
         load_data_file(path)

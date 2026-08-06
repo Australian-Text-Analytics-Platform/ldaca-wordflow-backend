@@ -191,7 +191,7 @@ def _validate_zip_members(
     members = archive.infolist()
     seen: set[str] = set()
     for member in members:
-        raw_name = member.filename
+        raw_name = member.orig_filename
         name = raw_name[:-1] if member.is_dir() and raw_name.endswith("/") else raw_name
         posix = PurePosixPath(name)
         windows = PureWindowsPath(name)
