@@ -22,6 +22,7 @@ import polars as pl
 import pytest
 from ldaca_wordflow.workers import topic_modeling, topic_pipeline, topic_result
 from ldaca_wordflow.workers.topic_pipeline import (
+    _automatic_segment_overlap,
     _sample_corpus,
 )
 
@@ -51,6 +52,16 @@ def test_topic_distribution_rejects_noncanonical_entries(entries) -> None:
 # ---------------------------------------------------------------------------
 # Sampling helpers (pure, deterministic)
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("max_segment_tokens", "expected_overlap"),
+    [(32, 4), (64, 8), (128, 16), (256, 32), (510, 32)],
+)
+def test_automatic_segment_overlap_is_scaled_and_bounded(
+    max_segment_tokens: int, expected_overlap: int
+) -> None:
+    assert _automatic_segment_overlap(max_segment_tokens) == expected_overlap
 
 
 def test_sample_corpus_reduces_length_and_is_reproducible():
@@ -103,8 +114,10 @@ def _fake_topic_modeling_expr_factory(
     xs: list[float],
     ys: list[float],
     n_chunks: int,
+    truncated_segment_count: int = 0,
     distribution: list[list[dict[str, Any]]] | None = None,
     stage_timings: list[dict[str, Any]] | None = None,
+    seen_kwargs: dict[str, Any] | None = None,
 ):
     """Build a fake ``.text.topic_modeling`` method returning a canned struct.
 
@@ -125,7 +138,9 @@ def _fake_topic_modeling_expr_factory(
         ]
     timings = stage_timings if stage_timings is not None else _STAGE_TIMINGS
 
-    def _fake(self, **_kwargs):  # noqa: ANN001 - mirrors namespace method shape
+    def _fake(self, **kwargs):  # noqa: ANN001 - mirrors namespace method shape
+        if seen_kwargs is not None:
+            seen_kwargs.update(kwargs)
         return pl.struct(
             pl.Series("dominant_topic", dominant, dtype=pl.Int32),
             pl.Series(
@@ -140,6 +155,11 @@ def _fake_topic_modeling_expr_factory(
             pl.Series("y", ys, dtype=pl.Float32),
             pl.Series("n_topics", [0] * n, dtype=pl.UInt32),
             pl.Series("n_chunks", [n_chunks] * n, dtype=pl.UInt32),
+            pl.Series(
+                "truncated_segment_count",
+                [truncated_segment_count] * n,
+                dtype=pl.UInt32,
+            ),
             pl.Series(
                 "stage_timings_ms",
                 [timings] * n,
@@ -243,6 +263,45 @@ def test_run_rust_topic_modeling_reconstructs_result_dict(monkeypatch):
     assert result["stage_timings_ms"] == _STAGE_TIMINGS
 
 
+def test_run_rust_topic_modeling_forwards_segmentation_and_reports_truncation(
+    monkeypatch,
+) -> None:
+    from polars_text.namespace import TextNamespace
+
+    seen_kwargs: dict[str, Any] = {}
+    monkeypatch.setattr(
+        TextNamespace,
+        "topic_modeling",
+        _fake_topic_modeling_expr_factory(
+            dominant=[0],
+            words=[["alpha"]],
+            xs=[0.0],
+            ys=[0.0],
+            n_chunks=3,
+            truncated_segment_count=2,
+            seen_kwargs=seen_kwargs,
+        ),
+    )
+
+    result = topic_pipeline._run_rust_topic_modeling(
+        all_docs=["one document"],
+        seed=0,
+        top_k=10,
+        min_cluster_size=2,
+        vectorizer_model="native:plain_words_en",
+        stopwords=[],
+        segmentation_method="paragraph",
+        max_segment_tokens=64,
+    )
+
+    assert (
+        seen_kwargs["segmentation_method"],
+        seen_kwargs["max_tokens"],
+        seen_kwargs["overlap"],
+        result["truncated_segment_count"],
+    ) == ("paragraph", 64, 8, 2)
+
+
 # ---------------------------------------------------------------------------
 # Orchestrator + payload assembly (with _run_rust_topic_modeling faked)
 # ---------------------------------------------------------------------------
@@ -253,6 +312,7 @@ def _canned_rust_result(
     documents: list[dict[str, Any]],
     topics: list[dict[str, Any]],
     n_chunks: int = 7,
+    truncated_segment_count: int = 0,
     stage_timings_ms: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     return {
@@ -260,6 +320,7 @@ def _canned_rust_result(
         "topics": topics,
         "n_topics": len(topics),
         "n_chunks": n_chunks,
+        "truncated_segment_count": truncated_segment_count,
         "stage_timings_ms": stage_timings_ms or _STAGE_TIMINGS,
     }
 
@@ -312,6 +373,7 @@ def test__compute_topic_modeling_writes_parquet_and_meaning_lists(
                     "y": 3.0,
                 },
             ],
+            truncated_segment_count=2,
         )
 
     monkeypatch.setattr(topic_modeling, "_run_rust_topic_modeling", fake_run)
@@ -324,6 +386,8 @@ def test__compute_topic_modeling_writes_parquet_and_meaning_lists(
         artifact_dir=str(tmp_path),
         artifact_prefix="tm_test",
         representative_words_count=3,
+        segmentation_method="paragraph",
+        max_segment_tokens=64,
         embedding_cache_path=str(embedding_cache_path),
         progress_callback=lambda p, m: progress.append((p, m)),
     )
@@ -376,10 +440,13 @@ def test__compute_topic_modeling_writes_parquet_and_meaning_lists(
     assert result["meta"]["engine"] == "rust"
     assert result["meta"]["embedding_backend"] == "ort"
     assert seen_run_kwargs["embedding_cache"] == str(embedding_cache_path)
+    assert seen_run_kwargs["segmentation_method"] == "paragraph"
+    assert seen_run_kwargs["max_segment_tokens"] == 64
     assert result["meta"]["n_chunks"] == 7
+    assert result["meta"]["truncated_segment_count"] == 2
     assert result["meta"]["stage_timings_ms"] == _STAGE_TIMINGS
-    assert progress[0][1].startswith("Loading topic modeling")
-    assert progress[-1] == (0.9, "Writing topic-modeling results...")
+    assert progress[0][1].startswith("Loading topic modelling")
+    assert progress[-1] == (0.9, "Writing topic-modelling results...")
     assert all(0.0 <= fraction < 1.0 for fraction, _message in progress)
 
 

@@ -207,6 +207,8 @@ class AnalysisExecutionPreparer:
                     "random_seed": request.random_seed,
                     "representative_words_count": request.representative_words_count,
                     "sample_fractions": request.sample_fractions,
+                    "segmentation_method": request.segmentation_method.value,
+                    "max_segment_tokens": request.max_segment_tokens,
                     "embedding_cache_path": str(
                         embeddings_cache_path(self._cache_root(user_id))
                     ),

@@ -63,7 +63,7 @@ def run_topic_modeling_detachment(
     topic_meanings_path: str,
     progress_callback: Callable[[float, str], None] | None = None,
 ) -> dict[str, Any]:
-    """Materialize selected Topic Modeling rows and meanings as Data Blocks."""
+    """Materialize selected Topic Modelling rows and meanings as Data Blocks."""
 
     import polars as pl
 
@@ -101,10 +101,10 @@ def run_topic_modeling_detachment(
         schema = source.data.collect_schema()
         missing = [column for column in selected_columns if column not in schema]
         if missing:
-            raise ValueError(f"Topic Modeling detachment columns not found: {missing}")
+            raise ValueError(f"Topic Modelling detachment columns not found: {missing}")
         assignment_path = assignment_paths.get(source_id)
         if assignment_path is None:
-            raise ValueError("Topic Modeling assignment Artifact is unavailable")
+            raise ValueError("Topic Modelling assignment Artifact is unavailable")
 
         assignments = pl.scan_parquet(assignment_path)
         if TOPIC_DISTRIBUTION_COLUMN not in assignments.collect_schema():
@@ -220,12 +220,12 @@ def run_topic_modeling_detachment(
         if progress_callback:
             progress_callback(
                 0.95 * (index + 1) / total,
-                "Detaching Topic Modeling results...",
+                "Publishing Topic Modelling results...",
             )
     return {
         "state": "successful",
         "outputs": outputs,
-        "message": "Topic Modeling results added to the Workspace",
+        "message": "Topic Modelling results added to the Workspace",
     }
 
 
@@ -315,7 +315,7 @@ def _prepare_payload(
         )
 
     if progress_callback:
-        progress_callback(0.05, "Preparing topic modeling payload...")
+        progress_callback(0.05, "Preparing topic modelling payload...")
 
     node_names = [
         str(info.get("node_name") or info.get("node_id") or "node")
@@ -340,6 +340,8 @@ def _compute_topic_payload(
     progress_callback: Callable[[float, str], None] | None,
     sample_fractions: list[float | None] | None,
     min_topic_size: int,
+    segmentation_method: str,
+    max_segment_tokens: int,
 ) -> dict[str, Any]:
     """Run the full topic-modeling pipeline: sample, run Rust, build the payload.
 
@@ -381,7 +383,7 @@ def _compute_topic_payload(
         min_cluster_size,
     )
     if progress_callback:
-        progress_callback(0.1, "Embedding and clustering documents...")
+        progress_callback(0.1, "Embedding and clustering Topic Segments...")
 
     rust_result = _run_rust_topic_modeling(
         all_docs=sampled.all_docs,
@@ -392,6 +394,8 @@ def _compute_topic_payload(
         stopwords=_stopwords_for_lang(stopwords_lang),
         embedder_model=_DEFAULT_EMBEDDER_MODEL,
         embedding_cache=embedding_cache_path,
+        segmentation_method=segmentation_method,
+        max_segment_tokens=max_segment_tokens,
     )
 
     if progress_callback:
@@ -418,6 +422,9 @@ def _compute_topic_payload(
             "random_state": random_state,
             "vectorizer_model": vectorizer_model,
             "n_chunks": int(rust_result.get("n_chunks") or 0),
+            "truncated_segment_count": int(
+                rust_result.get("truncated_segment_count") or 0
+            ),
             **(
                 {
                     "corpus_sizes_before_sample": sampled.corpus_sizes_before_sample,
@@ -446,6 +453,8 @@ def _compute_topic_modeling(
     corpora: list[list[str]] | None = None,
     random_seed: int = 0,
     representative_words_count: int = 5,
+    segmentation_method: str = "automatic",
+    max_segment_tokens: int = 256,
     progress_callback: Callable[[float, str], None] | None = None,
     sample_fractions: list[float | None] | None = None,
 ) -> dict[str, Any]:
@@ -470,7 +479,7 @@ def _compute_topic_modeling(
         if progress_callback:
             progress_callback(
                 0.01,
-                "Loading topic modeling resources. First runs may download model files...",
+                "Loading topic modelling resources. First runs may download model files...",
             )
 
         logger.info(
@@ -501,10 +510,12 @@ def _compute_topic_modeling(
             progress_callback=progress_callback,
             sample_fractions=sample_fractions,
             min_topic_size=min_topic_size,
+            segmentation_method=segmentation_method,
+            max_segment_tokens=max_segment_tokens,
         )
 
         if progress_callback:
-            progress_callback(0.9, "Writing topic-modeling results...")
+            progress_callback(0.9, "Writing topic-modelling results...")
 
         result = {
             "topics": topic_payload["topics"],
@@ -538,6 +549,8 @@ def run_topic_modeling_analysis(
     min_topic_size: int = 10,
     random_seed: int = 0,
     representative_words_count: int = 5,
+    segmentation_method: str = "automatic",
+    max_segment_tokens: int = 256,
     progress_callback: Callable[[float, str], None] | None = None,
     sample_fractions: list[float | None] | None = None,
 ) -> dict[str, Any]:
@@ -553,6 +566,8 @@ def run_topic_modeling_analysis(
         corpora=None,
         random_seed=random_seed,
         representative_words_count=representative_words_count,
+        segmentation_method=segmentation_method,
+        max_segment_tokens=max_segment_tokens,
         progress_callback=progress_callback,
         sample_fractions=sample_fractions,
         embedding_cache_path=embedding_cache_path,

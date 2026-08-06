@@ -220,6 +220,12 @@ def _stopwords_for_lang(lang: str | None) -> list[str]:
     return []
 
 
+def _automatic_segment_overlap(max_segment_tokens: int) -> int:
+    """Return the bounded overlap used only by automatic segmentation."""
+
+    return min(32, max_segment_tokens // 8)
+
+
 def _run_rust_topic_modeling(
     *,
     all_docs: list[str],
@@ -228,6 +234,8 @@ def _run_rust_topic_modeling(
     min_cluster_size: int,
     vectorizer_model: str | None,
     stopwords: list[str],
+    segmentation_method: str = "automatic",
+    max_segment_tokens: int = 256,
     embedder_model: str | None = None,
     embedding_cache: str | os.PathLike[str] | None = None,
 ) -> dict:
@@ -237,7 +245,8 @@ def _run_rust_topic_modeling(
     Topic modeling is exposed by ``polars-text`` as a first-class Polars
     expression in the ``.text`` namespace (``pl.col(...).text.topic_modeling``),
     mirroring ``tokenize``/``concordance``. The Rust side owns chunking, ORT
-    embedding, PaCMAP reduction, HDBSCAN clustering, and c-TF-IDF labeling. The
+    segmentation, ORT embedding, PaCMAP reduction, HDBSCAN clustering, and
+    c-TF-IDF labeling. The
     number of topics is whatever HDBSCAN yields for ``min_cluster_size`` (the
     only native topic-count control). The expression returns one struct **per
     input document** with the document's ``dominant_topic`` and
@@ -269,6 +278,9 @@ def _run_rust_topic_modeling(
             .text.topic_modeling(
                 embedder_model=embedder_model,
                 cache=embedding_cache,
+                segmentation_method=segmentation_method,
+                max_tokens=max_segment_tokens,
+                overlap=_automatic_segment_overlap(max_segment_tokens),
                 seed=int(seed),
                 top_k=int(top_k),
                 min_cluster_size=int(min_cluster_size),
@@ -345,6 +357,11 @@ def _run_rust_topic_modeling(
         )
 
     n_chunks = int(result["n_chunks"][0]) if result.height else 0
+    truncated_segment_count = (
+        int(result["truncated_segment_count"][0])
+        if result.height and "truncated_segment_count" in result.columns
+        else 0
+    )
     raw_stage_timings = (
         result["stage_timings_ms"].to_list()[0]
         if result.height and "stage_timings_ms" in result.columns
@@ -365,5 +382,6 @@ def _run_rust_topic_modeling(
         "documents": documents,
         "n_topics": len(topics),
         "n_chunks": n_chunks,
+        "truncated_segment_count": truncated_segment_count,
         "stage_timings_ms": stage_timings_ms,
     }

@@ -355,5 +355,5 @@ def _build_empty_topic_payload(
             "topic_meanings_parquet_path": str(topic_meanings_path),
             "nodes": node_artifacts,
         },
-        "meta": {},
+        "meta": {"n_chunks": 0, "truncated_segment_count": 0},
     }

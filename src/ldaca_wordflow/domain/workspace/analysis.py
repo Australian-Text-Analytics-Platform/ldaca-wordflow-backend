@@ -113,6 +113,12 @@ class TokenFrequencyAnalysisRequest(_StrictModel):
         return self
 
 
+class TopicSegmentationMethod(StrEnum):
+    AUTOMATIC = "automatic"
+    PARAGRAPH = "paragraph"
+    SENTENCE = "sentence"
+
+
 class TopicModelingAnalysisRequest(_StrictModel):
     kind: Literal["topic_modeling"] = "topic_modeling"
     node_ids: list[uuid.UUID] = Field(min_length=1, max_length=2)
@@ -121,6 +127,8 @@ class TopicModelingAnalysisRequest(_StrictModel):
     random_seed: int = 0
     representative_words_count: int = Field(default=5, ge=1, le=100)
     sample_fractions: list[float | None] | None = None
+    segmentation_method: TopicSegmentationMethod = TopicSegmentationMethod.AUTOMATIC
+    max_segment_tokens: int = Field(default=256, ge=32, le=510)
 
     @model_validator(mode="after")
     def validate_nodes_and_sampling(self) -> "TopicModelingAnalysisRequest":
@@ -782,6 +790,7 @@ __all__ = [
     "ResultPublicationSource",
     "TokenFrequencyAnalysisRequest",
     "TopicModelingAnalysisRequest",
+    "TopicSegmentationMethod",
     "TopicModelingDetachmentAnalysisRequest",
     "TopicMeaningOverride",
     "ValidAnalysisIntegrity",

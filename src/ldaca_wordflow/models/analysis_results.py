@@ -234,6 +234,7 @@ class TopicMetadata(_StrictModel):
     random_state: int | None = None
     vectorizer_model: str | None = None
     n_chunks: int | None = Field(default=None, ge=0)
+    truncated_segment_count: int | None = Field(default=None, ge=0)
     corpus_sizes_before_sample: list[int] | None = None
     corpus_sizes_after_sample: list[int] | None = None
     stage_timings_ms: list[TopicStageTiming] | None = None
