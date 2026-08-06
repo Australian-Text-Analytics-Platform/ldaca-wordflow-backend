@@ -26,8 +26,11 @@ def run_result_publication(
         import polars as pl
 
         from ..domain.workspace import (
-            ConcordanceResultPublicationAnalysisRequest,
-            ConcordanceResultPublicationDerivation,
+            ConcordanceDocumentPublicationAnalysisRequest,
+            ConcordanceDocumentPublicationDerivation,
+            ConcordanceDocumentPublicationSource,
+            ConcordanceMatchPublicationAnalysisRequest,
+            ConcordanceMatchPublicationDerivation,
             DerivationInput,
             DerivationProvenance,
             QuotationResultPublicationAnalysisRequest,
@@ -37,13 +40,20 @@ def run_result_publication(
         from ..infrastructure.storage.node_store import write_published_frame
 
         kind = request_payload.get("kind")
-        if kind == "concordance_result_publication":
-            request = ConcordanceResultPublicationAnalysisRequest.model_validate(
+        if kind == "concordance_match_publication":
+            request = ConcordanceMatchPublicationAnalysisRequest.model_validate(
                 request_payload
             )
             selections = request.sources
-            operation = ConcordanceResultPublicationDerivation()
+            operation = ConcordanceMatchPublicationDerivation()
             nested_column = "concordance"
+        elif kind == "concordance_document_publication":
+            request = ConcordanceDocumentPublicationAnalysisRequest.model_validate(
+                request_payload
+            )
+            selections = request.sources
+            operation = ConcordanceDocumentPublicationDerivation()
+            nested_column = None
         elif kind == "quotation_result_publication":
             request = QuotationResultPublicationAnalysisRequest.model_validate(
                 request_payload
@@ -61,9 +71,53 @@ def run_result_publication(
             document_column = document_columns.get(source_id)
             if path is None or document_column is None:
                 raise ValueError("Result Publication source artifact is unavailable")
-            if document_column not in selection.selected_columns:
-                raise ValueError("Result Publication requires the document column")
-            frame = pl.scan_parquet(path).explode(nested_column).unnest(nested_column)
+            if isinstance(selection, ConcordanceDocumentPublicationSource):
+                from ..analysis.concordance_projection import (
+                    filter_concordance_documents,
+                )
+                from ..analysis.generated_columns import CONC_EXTRACTION_COLUMN
+
+                frame = filter_concordance_documents(
+                    pl.scan_parquet(path),
+                    document_column=document_column,
+                    excluded_matched_texts=selection.excluded_matched_texts,
+                    bin_count=selection.bin_count,
+                    selected_bins=selection.selected_bins,
+                )
+                schema = frame.collect_schema()
+                if any(
+                    column not in schema
+                    for column in selection.selected_metadata_columns
+                ):
+                    raise ValueError("Document Publication metadata is unavailable")
+                output_columns = [
+                    document_column,
+                    CONC_EXTRACTION_COLUMN,
+                    *selection.selected_metadata_columns,
+                ]
+                frame = frame.with_columns(
+                    pl.col("concordance")
+                    .list.eval(
+                        pl.element()
+                        .struct.field(CONC_EXTRACTION_COLUMN)
+                        .cast(pl.String)
+                        .fill_null("")
+                        .str.replace_all(r"\s+", " ")
+                        .str.strip_chars()
+                    )
+                    .list.join("\n")
+                    .alias(CONC_EXTRACTION_COLUMN)
+                )
+            else:
+                if document_column not in selection.selected_columns:
+                    raise ValueError("Result Publication requires the document column")
+                assert nested_column is not None
+                frame = (
+                    pl.scan_parquet(path)
+                    .explode(nested_column)
+                    .unnest(nested_column)
+                )
+                output_columns = selection.selected_columns
             if kind == "quotation_result_publication":
                 from ..analysis.generated_columns import QUOTE_COLUMN_NAMES
 
@@ -75,14 +129,14 @@ def run_result_publication(
                     strict=False,
                 )
             schema = frame.collect_schema()
-            if any(column not in schema for column in selection.selected_columns):
+            if any(column not in schema for column in output_columns):
                 raise ValueError("Result Publication column is unavailable")
             if progress_callback:
                 progress_callback(
                     0.1 + (0.65 * index / max(len(selections), 1)),
                     f"Preparing {selection.new_node_name}",
                 )
-            selected = frame.select(selection.selected_columns).collect(
+            selected = frame.select(output_columns).collect(
                 engine="streaming"
             )
             node_payload = write_published_frame(
@@ -106,7 +160,7 @@ def run_result_publication(
                     "source_node_id": source_id,
                     "data": {
                         **node_payload,
-                        "output_columns": selection.selected_columns,
+                        "output_columns": output_columns,
                         "record_count": selected.height,
                     },
                 }

@@ -34,6 +34,30 @@ class ConcordanceResultQuery(_PagedQuery):
     node_id: uuid.UUID | None = None
 
 
+class ConcordanceDocumentProjectionQuery(_PagedQuery):
+    """Filter and page document rows from an immutable Concordance Result."""
+
+    excluded_matched_texts: list[str] = Field(default_factory=list)
+    bin_count: Literal[4, 5, 10, 20, 25, 50, 100] | None = None
+    selected_bins: list[int] | None = Field(default=None, min_length=1, max_length=100)
+
+    @model_validator(mode="after")
+    def validate_filter(self) -> "ConcordanceDocumentProjectionQuery":
+        if any(not value for value in self.excluded_matched_texts) or len(
+            self.excluded_matched_texts
+        ) != len(set(self.excluded_matched_texts)):
+            raise ValueError("Excluded Concordance terms must be non-empty and unique")
+        if (self.bin_count is None) != (self.selected_bins is None):
+            raise ValueError("Selected bins and bin count must be provided together")
+        if self.selected_bins is not None:
+            if len(self.selected_bins) != len(set(self.selected_bins)):
+                raise ValueError("Selected Concordance bins must be unique")
+            assert self.bin_count is not None
+            if any(index < 0 or index >= self.bin_count for index in self.selected_bins):
+                raise ValueError("Selected Concordance bin is out of range")
+        return self
+
+
 class QuotationResultQuery(_PagedQuery):
     kind: Literal["quotation"] = "quotation"
 
@@ -598,9 +622,13 @@ class ResultPublicationStoredResult(_StrictModel):
         return self
 
 
-class ConcordanceResultPublicationResult(ResultPublicationStoredResult):
-    kind: Literal["concordance_result_publication"] = (
-        "concordance_result_publication"
+class ConcordanceMatchPublicationResult(ResultPublicationStoredResult):
+    kind: Literal["concordance_match_publication"] = "concordance_match_publication"
+
+
+class ConcordanceDocumentPublicationResult(ResultPublicationStoredResult):
+    kind: Literal["concordance_document_publication"] = (
+        "concordance_document_publication"
     )
 
 
@@ -619,7 +647,8 @@ AnalysisResult = Annotated[
     | QuotationRunAllResult
     | AnnotationRunAllResult
     | TopicModelingDetachmentResult
-    | ConcordanceResultPublicationResult
+    | ConcordanceMatchPublicationResult
+    | ConcordanceDocumentPublicationResult
     | QuotationResultPublicationResult,
     Field(discriminator="kind"),
 ]
@@ -635,7 +664,8 @@ ANALYSIS_WORKER_RESULT_MODELS: dict[str, type[BaseModel]] = {
     "concordance_run_all": ConcordanceRunAllWorkerResult,
     "quotation_run_all": QuotationRunAllWorkerResult,
     "topic_modeling_detachment": TopicModelingDetachmentWorkerResult,
-    "concordance_result_publication": ResultPublicationWorkerResult,
+    "concordance_match_publication": ResultPublicationWorkerResult,
+    "concordance_document_publication": ResultPublicationWorkerResult,
     "quotation_result_publication": ResultPublicationWorkerResult,
 }
 
@@ -650,7 +680,8 @@ ANALYSIS_STORED_RESULT_MODELS: dict[str, type[BaseModel]] = {
     "concordance_run_all": ConcordanceRunAllStoredResult,
     "quotation_run_all": QuotationRunAllStoredResult,
     "topic_modeling_detachment": TopicModelingDetachmentStoredResult,
-    "concordance_result_publication": ResultPublicationStoredResult,
+    "concordance_match_publication": ResultPublicationStoredResult,
+    "concordance_document_publication": ResultPublicationStoredResult,
     "quotation_result_publication": ResultPublicationStoredResult,
 }
 
@@ -685,6 +716,9 @@ __all__ = [
     "ArtifactResource",
     "ConcordanceResult",
     "ConcordanceResultQuery",
+    "ConcordanceDocumentProjectionQuery",
+    "ConcordanceDocumentPublicationResult",
+    "ConcordanceMatchPublicationResult",
     "ConcordanceStoredResult",
     "CompleteTableIdentity",
     "ConcordanceRunAllResult",

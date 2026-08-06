@@ -17,7 +17,9 @@ from ..domain.workspace import (
     AnnotationAnalysisRequest,
     AnnotationRunAllAnalysisRequest,
     ConcordanceAnalysisRequest,
-    ConcordanceResultPublicationAnalysisRequest,
+    ConcordanceDocumentPublicationAnalysisRequest,
+    ConcordanceDocumentPublicationSource,
+    ConcordanceMatchPublicationAnalysisRequest,
     ConcordanceRunAllAnalysisRequest,
     QuotationAnalysisRequest,
     QuotationResultPublicationAnalysisRequest,
@@ -285,7 +287,8 @@ class AnalysisExecutionPreparer:
         if isinstance(
             request,
             (
-                ConcordanceResultPublicationAnalysisRequest,
+                ConcordanceMatchPublicationAnalysisRequest,
+                ConcordanceDocumentPublicationAnalysisRequest,
                 QuotationResultPublicationAnalysisRequest,
             ),
         ):
@@ -293,12 +296,24 @@ class AnalysisExecutionPreparer:
                 raise InvalidInputError("Run All Result is unavailable")
             selections = (
                 request.sources
-                if isinstance(request, ConcordanceResultPublicationAnalysisRequest)
+                if isinstance(
+                    request,
+                    (
+                        ConcordanceMatchPublicationAnalysisRequest,
+                        ConcordanceDocumentPublicationAnalysisRequest,
+                    ),
+                )
                 else [request.source]
             )
             result_paths: dict[str, str] = {}
             document_columns: dict[str, str] = {}
-            if isinstance(request, ConcordanceResultPublicationAnalysisRequest):
+            if isinstance(
+                request,
+                (
+                    ConcordanceMatchPublicationAnalysisRequest,
+                    ConcordanceDocumentPublicationAnalysisRequest,
+                ),
+            ):
                 if not isinstance(parent_request, ConcordanceRunAllAnalysisRequest):
                     raise InvalidInputError(
                         "Concordance Result Publication parent is invalid"
@@ -327,10 +342,18 @@ class AnalysisExecutionPreparer:
                         raise InvalidInputError(
                             "Concordance source Result is unavailable"
                         )
-                    _validate_publication_columns(
-                        selection.selected_columns,
-                        child_result.source,
-                    )
+                    if not isinstance(
+                        selection, ConcordanceDocumentPublicationSource
+                    ):
+                        _validate_publication_columns(
+                            selection.selected_columns,
+                            child_result.source,
+                        )
+                    else:
+                        _validate_document_publication_columns(
+                            selection.selected_metadata_columns,
+                            child_result.source,
+                        )
                     result_paths[str(selection.source_node_id)] = str(
                         _analysis_artifact_path(
                             workspace_path,
@@ -349,7 +372,7 @@ class AnalysisExecutionPreparer:
                 stored = QuotationRunAllStoredResult.model_validate(
                     parent.result_payload
                 )
-                selection = selections[0]
+                selection = request.source
                 if selection.source_node_id != stored.source.node_id:
                     raise InvalidInputError("Result Publication source is unavailable")
                 _validate_publication_columns(
@@ -379,7 +402,13 @@ class AnalysisExecutionPreparer:
                         ].color
                         for selection in selections
                     }
-                    if isinstance(request, ConcordanceResultPublicationAnalysisRequest)
+                    if isinstance(
+                        request,
+                        (
+                            ConcordanceMatchPublicationAnalysisRequest,
+                            ConcordanceDocumentPublicationAnalysisRequest,
+                        ),
+                    )
                     else {
                         str(selections[0].source_node_id): stored.source.color
                     },
@@ -487,6 +516,15 @@ def _validate_publication_columns(
         raise InvalidInputError("Result Publication requires the document column")
     if any(column not in allowed for column in selected_columns):
         raise InvalidInputError("Result Publication column is unavailable")
+
+
+def _validate_document_publication_columns(
+    selected_metadata_columns: list[str],
+    source: object,
+) -> None:
+    metadata_columns = set(getattr(source, "metadata_columns"))
+    if any(column not in metadata_columns for column in selected_metadata_columns):
+        raise InvalidInputError("Document Publication metadata column is unavailable")
 
 
 def _remove_execution_staging(path: Path) -> None:

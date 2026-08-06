@@ -129,6 +129,11 @@ EXPECTED_OPERATIONS = {
         "get_analysis_table_projection_rows",
     ),
     (
+        "POST",
+        "/api/workspaces/{workspace_id}/analyses/{analysis_id}/result/tables/{table_id}/projections/documents/query",
+        "query_concordance_document_projection",
+    ),
+    (
         "GET",
         "/api/workspaces/{workspace_id}/analyses/{analysis_id}/result/tables/{table_id}/projections/{row_unit}/schema",
         "get_analysis_table_projection_schema",

@@ -19,6 +19,7 @@ from ...models.analysis_results import (
     PagedTableIdentity,
     ProjectedTableIdentity,
     ConcordanceDensityResult,
+    ConcordanceDocumentProjectionQuery,
     StoredArtifactIdentity,
 )
 from ...models.tables import (
@@ -514,6 +515,34 @@ async def get_analysis_table_projection_rows(
         page_size=page_size,
         sort_by=sort_by,
         descending=descending,
+    )
+    return arrow_page_response(result)
+
+
+@router.post(
+    "/analyses/{analysis_id}/result/tables/{table_id}/projections/documents/query",
+    response_class=Response,
+    responses={
+        **api_errors(403, 404, 409, 410, 422, 500, 507),
+        **ARROW_STREAM_RESPONSE,
+    },
+)
+async def query_concordance_document_projection(
+    workspace_id: uuid.UUID,
+    analysis_id: uuid.UUID,
+    table_id: str,
+    body: ConcordanceDocumentProjectionQuery,
+    principal: Annotated[SessionPrincipal, Security(get_current_session)],
+    runtime: Runtime = Depends(get_runtime),
+) -> Response:
+    """Filter and page document rows from one immutable Concordance Result."""
+
+    result = await runtime.analysis_result_service.concordance_document_projection_page(
+        principal.user.id,
+        str(workspace_id),
+        str(analysis_id),
+        table_id,
+        body,
     )
     return arrow_page_response(result)
 

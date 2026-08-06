@@ -18,7 +18,9 @@ from ldaca_wordflow.domain.workspace import (
     AnnotationAnalysisRequest,
     AnnotationAnalysisSubmission,
     ConcordanceAnalysisRequest,
-    ConcordanceResultPublicationAnalysisRequest,
+    ConcordanceDocumentPublicationAnalysisRequest,
+    ConcordanceDocumentPublicationSource,
+    ConcordanceMatchPublicationAnalysisRequest,
     ConcordanceRunAllAnalysisRequest,
     Failure,
     Progress,
@@ -144,6 +146,22 @@ def test_topic_modeling_detachment_request_preserves_ordered_sources() -> None:
             selected_columns={first: ["text"]},
             new_node_names={first: "Topics"},
         )
+
+    document_publication = ConcordanceDocumentPublicationAnalysisRequest(
+        sources=[
+            ConcordanceDocumentPublicationSource(
+                source_node_id=first,
+                selected_metadata_columns=["author"],
+                new_node_name="First documents",
+                excluded_matched_texts=["Word"],
+                bin_count=10,
+                selected_bins=[2, 3],
+            )
+        ]
+    )
+    assert TypeAdapter(AnalysisRequest).validate_python(
+        document_publication.model_dump(mode="json")
+    ) == document_publication
     with pytest.raises(ValidationError, match="align"):
         TopicModelingDetachmentAnalysisRequest(
             node_ids=[first, second],
@@ -179,7 +197,7 @@ def test_run_all_and_result_publication_have_distinct_strict_requests() -> None:
             }
         )
 
-    publication = ConcordanceResultPublicationAnalysisRequest(
+    publication = ConcordanceMatchPublicationAnalysisRequest(
         sources=[
             ResultPublicationSource(
                 source_node_id=first,
@@ -198,7 +216,7 @@ def test_run_all_and_result_publication_have_distinct_strict_requests() -> None:
     )
     assert restored == publication
     with pytest.raises(ValidationError, match="unique"):
-        ConcordanceResultPublicationAnalysisRequest(
+        ConcordanceMatchPublicationAnalysisRequest(
             sources=[publication.sources[0], publication.sources[0]]
         )
 

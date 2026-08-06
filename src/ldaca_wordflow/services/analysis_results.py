@@ -18,6 +18,7 @@ from anyio.to_thread import run_sync as run_sync_in_worker_thread
 from pydantic import BaseModel, ValidationError
 
 from ..analysis.concordance_core import compute_node_concordance_page
+from ..analysis.concordance_projection import filter_concordance_documents
 from ..analysis.quotation_core import compute_quotation_page
 from ..analysis.token_cache import tokenize_lazyframe, tokens_cache_path
 from ..analysis.generated_columns import (
@@ -46,6 +47,7 @@ from ..models.analysis_results import (
     AnnotationResultQuery,
     AnnotationRunAllStoredResult,
     ConcordanceResultQuery,
+    ConcordanceDocumentProjectionQuery,
     ConcordanceStoredResult,
     ConcordanceRunAllStoredResult,
     PublishedDataBlockStoredResult,
@@ -329,6 +331,33 @@ class AnalysisResultService:
                 _concordance_density,
                 snapshot.path,
                 source.document_column,
+            )
+        finally:
+            with anyio.CancelScope(shield=True):
+                await snapshot.cleanup()
+
+    async def concordance_document_projection_page(
+        self,
+        user_id: str,
+        workspace_id: str,
+        analysis_id: str,
+        table_id: str,
+        query: ConcordanceDocumentProjectionQuery,
+    ) -> IpcTablePage:
+        snapshot, source, kind = await self._projected_table_snapshot(
+            user_id, workspace_id, analysis_id, table_id
+        )
+        try:
+            if kind != "concordance_run_all":
+                raise AnalysisKindMismatchError(
+                    "Document filtering is available only for Concordance Results"
+                )
+            return await self._run_sync(
+                _concordance_document_projection_page,
+                snapshot.path,
+                source.document_column,
+                source.metadata_columns,
+                query,
             )
         finally:
             with anyio.CancelScope(shield=True):
@@ -784,6 +813,46 @@ def _projected_artifact_page(
 def _projected_artifact_schema(path: Path, kind: str, row_unit: str) -> bytes:
     schema = _projected_artifact_lazyframe(path, kind, row_unit).collect_schema()
     return encode_schema_stream(schema)
+
+
+def _concordance_document_projection_page(
+    path: Path,
+    document_column: str,
+    metadata_columns: list[str],
+    query: ConcordanceDocumentProjectionQuery,
+) -> IpcTablePage:
+    frame = filter_concordance_documents(
+        pl.scan_parquet(path),
+        document_column=document_column,
+        excluded_matched_texts=query.excluded_matched_texts,
+        bin_count=query.bin_count,
+        selected_bins=query.selected_bins,
+    )
+    schema = frame.collect_schema()
+    sortable_columns = {document_column, *metadata_columns}
+    if query.sort_by is not None and query.sort_by not in sortable_columns:
+        raise InvalidInputError("Result sort column not found")
+    order = (
+        [query.sort_by, "__wordflow_source_row_id"]
+        if query.sort_by is not None
+        else ["__wordflow_source_row_id"]
+    )
+    order = [column for column in order if column in schema]
+    frame = frame.sort(
+        order,
+        descending=[query.descending, False]
+        if query.sort_by is not None
+        else False,
+    )
+    total_rows = frame.select(pl.len()).collect().item()
+    page_frame = frame.slice(
+        (query.page - 1) * query.page_size, query.page_size + 1
+    ).collect()
+    return IpcTablePage(
+        content=encode_ipc_stream(page_frame.head(query.page_size)),
+        has_next=page_frame.height > query.page_size,
+        total_rows=total_rows,
+    )
 
 
 def _concordance_density(

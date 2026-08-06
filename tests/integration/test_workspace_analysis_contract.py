@@ -561,7 +561,7 @@ def test_concordance_run_all_group_stores_results_without_publishing_nodes(
                 "execution_scope": "supporting",
                 "parent_analysis_id": group_id,
                 "request": {
-                    "kind": "concordance_result_publication",
+                    "kind": "concordance_match_publication",
                     "sources": [
                         {
                             "source_node_id": first_node_id,
@@ -597,7 +597,7 @@ def test_concordance_run_all_group_stores_results_without_publishing_nodes(
                 "execution_scope": "supporting",
                 "parent_analysis_id": group_id,
                 "request": {
-                    "kind": "concordance_result_publication",
+                    "kind": "concordance_match_publication",
                     "sources": [
                         {
                             "source_node_id": first_node_id,

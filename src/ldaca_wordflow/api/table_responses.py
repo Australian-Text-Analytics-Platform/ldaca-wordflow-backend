@@ -8,6 +8,7 @@ from ..shared.table_transport import (
     ARROW_STREAM_MEDIA_TYPE,
     HAS_NEXT_HEADER,
     IpcTablePage,
+    TOTAL_ROWS_HEADER,
 )
 
 ARROW_STREAM_RESPONSE = {
@@ -31,13 +32,16 @@ def arrow_stream_response(content: bytes) -> Response:
 
 
 def arrow_page_response(page: IpcTablePage) -> Response:
+    headers = {
+        "Cache-Control": "no-store",
+        HAS_NEXT_HEADER: "true" if page.has_next else "false",
+    }
+    if page.total_rows is not None:
+        headers[TOTAL_ROWS_HEADER] = str(page.total_rows)
     return Response(
         content=page.content,
         media_type=ARROW_STREAM_MEDIA_TYPE,
-        headers={
-            "Cache-Control": "no-store",
-            HAS_NEXT_HEADER: "true" if page.has_next else "false",
-        },
+        headers=headers,
     )
 
 

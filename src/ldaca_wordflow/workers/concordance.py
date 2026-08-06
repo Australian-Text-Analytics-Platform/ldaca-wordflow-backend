@@ -192,8 +192,8 @@ def _build_concordance_occurrence_dataframe(
     """Compute flattened occurrence rows for one corpus. Returns (df, output_columns).
 
     Called by:
-    - Concordance Run All Supporting Analyses that recompute a complete staged
-      Data Block from their immutable request and snapshot.
+    - Concordance Run All Supporting Analyses that compute one complete
+      immutable nested Result from their request-owned snapshot.
 
     Flow: normalize aligned input rows, derive concordance occurrences, and
         return the frame and exact output-column order.

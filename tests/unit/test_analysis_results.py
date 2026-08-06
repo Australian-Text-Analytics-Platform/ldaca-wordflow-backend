@@ -1,19 +1,24 @@
 """Typed Analysis Result projection tests."""
 
 from io import BytesIO
+from typing import Literal
 
 import polars as pl
 import pytest
 from pydantic import ValidationError
 
 from ldaca_wordflow.analysis.generated_columns import TOPIC_DISTRIBUTION_COLUMN
-from ldaca_wordflow.models.analysis_results import QuotationResultQuery
+from ldaca_wordflow.models.analysis_results import (
+    ConcordanceDocumentProjectionQuery,
+    QuotationResultQuery,
+)
 from ldaca_wordflow.shared.topic_types import (
     topic_distribution_dtype,
     topic_distribution_storage_dtype,
 )
 from ldaca_wordflow.services.analysis_results import (
     _concordance_density,
+    _concordance_document_projection_page,
     _paged_artifact_page,
     _paged_artifact_schema,
     _projected_artifact_page,
@@ -286,3 +291,148 @@ def test_concordance_density_uses_all_documents_and_exact_match_text(tmp_path) -
     assert [item.label for item in result.series] == ["Alpha", "alpha"]
     assert sum(result.series[0].counts) == 1
     assert sum(result.series[1].counts) == 2
+
+
+def test_concordance_document_projection_filters_before_count_and_paging(
+    tmp_path,
+) -> None:
+    path = tmp_path / "concordance.parquet"
+    pl.DataFrame(
+        {
+            "__wordflow_source_row_id": [2, 7, 8],
+            "text": ["Alpha beta alpha", "Alpha beta alpha", "beta only"],
+            "group": ["first", "duplicate text", "none"],
+            "concordance": [
+                [
+                    {
+                        "CONC_matched_text": "Alpha",
+                        "CONC_start_idx": 0,
+                        "CONC_extraction": " Alpha ",
+                    },
+                    {
+                        "CONC_matched_text": "alpha",
+                        "CONC_start_idx": 11,
+                        "CONC_extraction": "alpha",
+                    },
+                ],
+                [
+                    {
+                        "CONC_matched_text": "alpha",
+                        "CONC_start_idx": 11,
+                        "CONC_extraction": "alpha",
+                    }
+                ],
+                [
+                    {
+                        "CONC_matched_text": "beta",
+                        "CONC_start_idx": 0,
+                        "CONC_extraction": "beta",
+                    }
+                ],
+            ],
+        }
+    ).write_parquet(path)
+
+    result = _concordance_document_projection_page(
+        path,
+        "text",
+        ["group"],
+        ConcordanceDocumentProjectionQuery(
+            page=1,
+            page_size=1,
+            excluded_matched_texts=["Alpha", "beta"],
+            bin_count=4,
+            selected_bins=[2],
+        ),
+    )
+    frame = pl.read_ipc_stream(BytesIO(result.content))
+
+    assert result.total_rows == 2
+    assert result.has_next is True
+    assert frame["__wordflow_source_row_id"].to_list() == [2]
+    assert frame["group"].to_list() == ["first"]
+    assert frame["concordance"].list.len().to_list() == [1]
+    assert frame["concordance"].to_list()[0][0]["CONC_matched_text"] == "alpha"
+
+    sorted_result = _concordance_document_projection_page(
+        path,
+        "text",
+        ["group"],
+        ConcordanceDocumentProjectionQuery(
+            page=1,
+            page_size=10,
+            sort_by="group",
+            excluded_matched_texts=["Alpha", "beta"],
+        ),
+    )
+    sorted_frame = pl.read_ipc_stream(BytesIO(sorted_result.content))
+    assert sorted_frame["__wordflow_source_row_id"].to_list() == [7, 2]
+
+
+@pytest.mark.parametrize("bin_count", [4, 5, 10, 20, 25, 50, 100])
+def test_concordance_document_projection_assigns_every_bin_boundary(
+    tmp_path,
+    bin_count: Literal[4, 5, 10, 20, 25, 50, 100],
+) -> None:
+    path = tmp_path / f"concordance-{bin_count}.parquet"
+    document_length = 1000
+    boundary_starts = [index * document_length // bin_count for index in range(bin_count)]
+    matches = [
+        {
+            "CONC_matched_text": f"term-{index}",
+            "CONC_start_idx": start,
+            "CONC_extraction": f"term-{index}",
+        }
+        for index, start in enumerate(boundary_starts)
+    ]
+    matches.append(
+        {
+            "CONC_matched_text": "last-character",
+            "CONC_start_idx": document_length - 1,
+            "CONC_extraction": "last-character",
+        }
+    )
+    pl.DataFrame(
+        {
+            "__wordflow_source_row_id": [1],
+            "text": ["x" * document_length],
+            "concordance": [matches],
+        }
+    ).write_parquet(path)
+
+    for selected_bin in range(bin_count):
+        result = _concordance_document_projection_page(
+            path,
+            "text",
+            [],
+            ConcordanceDocumentProjectionQuery(
+                bin_count=bin_count,
+                selected_bins=[selected_bin],
+            ),
+        )
+        frame = pl.read_ipc_stream(BytesIO(result.content))
+        filtered_matches = frame["concordance"].to_list()[0]
+        assert filtered_matches[0]["CONC_start_idx"] == boundary_starts[selected_bin]
+        assert all(
+            min(match["CONC_start_idx"] * bin_count // document_length, bin_count - 1)
+            == selected_bin
+            for match in filtered_matches
+        )
+        if selected_bin == bin_count - 1:
+            assert filtered_matches[-1]["CONC_start_idx"] == document_length - 1
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"excluded_matched_texts": ["alpha", "alpha"]},
+        {"bin_count": 4},
+        {"selected_bins": [0]},
+        {"bin_count": 4, "selected_bins": [4]},
+    ],
+)
+def test_concordance_document_projection_query_rejects_invalid_filters(
+    payload: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        ConcordanceDocumentProjectionQuery.model_validate(payload)

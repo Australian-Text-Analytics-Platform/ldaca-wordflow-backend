@@ -13,9 +13,9 @@ CONC_L1_COLUMN = "CONC_l1"
 CONC_R1_COLUMN = "CONC_r1"
 CONC_L1_FREQ_COLUMN = "CONC_l1_freq"
 CONC_R1_FREQ_COLUMN = "CONC_r1_freq"
-# Per-hit raw-window stitch. Same slicing rule the dispersion-detach
-# aggregation uses for the per-document join, exposed per-hit so the user
-# can opt the column into both the table view and the per-hit detach.
+# Per-hit raw-window stitch retained in the immutable nested Result. Match
+# Publication may select it directly; Document Publication normalizes and
+# joins the surviving values after applying the Review filter.
 CONC_EXTRACTION_COLUMN = "CONC_extraction"
 CONC_DOC_HITS_COLUMN = "CONC_doc_hits"
 CONC_HIT_COUNT_COLUMN = "CONC_hit_count"

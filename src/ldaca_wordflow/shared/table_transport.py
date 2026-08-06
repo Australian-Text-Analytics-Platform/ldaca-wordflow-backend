@@ -12,12 +12,16 @@ from .topic_types import TOPIC_DISTRIBUTION_EXTENSION, topic_distribution_dtype
 
 ARROW_STREAM_MEDIA_TYPE = "application/vnd.apache.arrow.stream"
 HAS_NEXT_HEADER = "X-Wordflow-Has-Next"
+TOTAL_ROWS_HEADER = "X-Wordflow-Total-Rows"
+
+
 @dataclass(frozen=True, slots=True)
 class IpcTablePage:
     """One self-contained page and whether another page can exist."""
 
     content: bytes
     has_next: bool
+    total_rows: int | None = None
 
 
 def encode_ipc_stream(frame: pl.DataFrame) -> bytes:
@@ -67,6 +71,7 @@ def materialize_page(
 __all__ = [
     "ARROW_STREAM_MEDIA_TYPE",
     "HAS_NEXT_HEADER",
+    "TOTAL_ROWS_HEADER",
     "IpcTablePage",
     "TOPIC_DISTRIBUTION_EXTENSION",
     "encode_ipc_stream",

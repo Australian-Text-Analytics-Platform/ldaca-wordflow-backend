@@ -257,9 +257,13 @@ class AnnotationDerivation(_StrictModel):
     model: str = Field(min_length=1, max_length=500)
 
 
-class ConcordanceResultPublicationDerivation(_StrictModel):
-    kind: Literal["concordance_result_publication"] = (
-        "concordance_result_publication"
+class ConcordanceMatchPublicationDerivation(_StrictModel):
+    kind: Literal["concordance_match_publication"] = "concordance_match_publication"
+
+
+class ConcordanceDocumentPublicationDerivation(_StrictModel):
+    kind: Literal["concordance_document_publication"] = (
+        "concordance_document_publication"
     )
 
 
@@ -283,7 +287,8 @@ DerivationOperation = Annotated[
     | CastDerivation
     | SqlDerivation
     | AnnotationDerivation
-    | ConcordanceResultPublicationDerivation
+    | ConcordanceMatchPublicationDerivation
+    | ConcordanceDocumentPublicationDerivation
     | QuotationResultPublicationDerivation
     | TopicModelingDetachmentDerivation,
     Field(discriminator="kind"),
@@ -302,7 +307,8 @@ _DERIVATION_OPERATION_TYPES: dict[str, type[_StrictModel]] = {
         CastDerivation,
         SqlDerivation,
         AnnotationDerivation,
-        ConcordanceResultPublicationDerivation,
+        ConcordanceMatchPublicationDerivation,
+        ConcordanceDocumentPublicationDerivation,
         QuotationResultPublicationDerivation,
         TopicModelingDetachmentDerivation,
     )
@@ -486,7 +492,8 @@ def describe_provenance(
             else "expression",
             CastDerivation: "cast",
             AnnotationDerivation: "annotation",
-            ConcordanceResultPublicationDerivation: "concordance Result Publication",
+            ConcordanceMatchPublicationDerivation: "concordance Match Publication",
+            ConcordanceDocumentPublicationDerivation: "concordance Document Publication",
             QuotationResultPublicationDerivation: "quotation Result Publication",
             TopicModelingDetachmentDerivation: "topic modeling detachment",
         }
@@ -504,7 +511,8 @@ __all__ = [
     "ColumnExpression",
     "ConcatDerivation",
     "ConcatStringExpression",
-    "ConcordanceResultPublicationDerivation",
+    "ConcordanceMatchPublicationDerivation",
+    "ConcordanceDocumentPublicationDerivation",
     "DerivationInput",
     "DerivationOperation",
     "DerivationProvenance",

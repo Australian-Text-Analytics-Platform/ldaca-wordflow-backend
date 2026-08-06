@@ -296,7 +296,13 @@ def create_app(
             "X-CSRF-Token",
             "X-Request-ID",
         ],
-        expose_headers=["ETag", "Location", "X-Request-ID", "X-Wordflow-Has-Next"],
+        expose_headers=[
+            "ETag",
+            "Location",
+            "X-Request-ID",
+            "X-Wordflow-Has-Next",
+            "X-Wordflow-Total-Rows",
+        ],
     )
     app.add_middleware(cast(Any, PrivateApiCacheMiddleware))
     # Added last so request identity wraps CORS and every exception response.

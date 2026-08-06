@@ -26,7 +26,8 @@ from ..domain.workspace import (
     AnnotationAnalysisSubmission,
     AnnotationRunAllAnalysisRequest,
     AnnotationRunAllSubmission,
-    ConcordanceResultPublicationAnalysisRequest,
+    ConcordanceDocumentPublicationAnalysisRequest,
+    ConcordanceMatchPublicationAnalysisRequest,
     ConcordanceRunAllAnalysisRequest,
     CorruptAnalysis,
     Failure,
@@ -208,7 +209,8 @@ class AnalysisService:
         return {
             "annotation_run_all": "annotation",
             "concordance_run_all": "concordance",
-            "concordance_result_publication": "concordance",
+            "concordance_match_publication": "concordance",
+            "concordance_document_publication": "concordance",
             "quotation_run_all": "quotation",
             "quotation_result_publication": "quotation",
             "topic_modeling_detachment": "topic_modeling",
@@ -309,7 +311,8 @@ class AnalysisService:
             if isinstance(
                 request,
                 (
-                    ConcordanceResultPublicationAnalysisRequest,
+                    ConcordanceMatchPublicationAnalysisRequest,
+                    ConcordanceDocumentPublicationAnalysisRequest,
                     QuotationResultPublicationAnalysisRequest,
                 ),
             ):
@@ -324,7 +327,11 @@ class AnalysisService:
                 expected_parent_kind = (
                     "concordance_run_all"
                     if isinstance(
-                        request, ConcordanceResultPublicationAnalysisRequest
+                        request,
+                        (
+                            ConcordanceMatchPublicationAnalysisRequest,
+                            ConcordanceDocumentPublicationAnalysisRequest,
+                        ),
                     )
                     else "quotation_run_all"
                 )

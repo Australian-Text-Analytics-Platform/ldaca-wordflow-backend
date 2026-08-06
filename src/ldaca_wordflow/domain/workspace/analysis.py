@@ -328,15 +328,62 @@ class ResultPublicationSource(_StrictModel):
         return self
 
 
-class ConcordanceResultPublicationAnalysisRequest(_StrictModel):
-    kind: Literal["concordance_result_publication"] = "concordance_result_publication"
+class ConcordanceDocumentPublicationSource(_StrictModel):
+    """One source and exact Review filter for document-wise publication."""
+
+    source_node_id: uuid.UUID
+    selected_metadata_columns: list[NonEmptyText] = Field(default_factory=list)
+    new_node_name: NonEmptyText = Field(max_length=500)
+    excluded_matched_texts: list[NonEmptyText] = Field(default_factory=list)
+    bin_count: Literal[4, 5, 10, 20, 25, 50, 100] | None = None
+    selected_bins: list[int] | None = Field(default=None, min_length=1, max_length=100)
+
+    @model_validator(mode="after")
+    def validate_filter(self) -> "ConcordanceDocumentPublicationSource":
+        if len(self.selected_metadata_columns) != len(
+            set(self.selected_metadata_columns)
+        ):
+            raise ValueError("Document Publication metadata columns must be unique")
+        if len(self.excluded_matched_texts) != len(
+            set(self.excluded_matched_texts)
+        ):
+            raise ValueError("Excluded Concordance terms must be unique")
+        if (self.bin_count is None) != (self.selected_bins is None):
+            raise ValueError("Selected bins and bin count must be provided together")
+        if self.selected_bins is not None:
+            if len(self.selected_bins) != len(set(self.selected_bins)):
+                raise ValueError("Selected Concordance bins must be unique")
+            assert self.bin_count is not None
+            if any(index < 0 or index >= self.bin_count for index in self.selected_bins):
+                raise ValueError("Selected Concordance bin is out of range")
+        return self
+
+
+class ConcordanceMatchPublicationAnalysisRequest(_StrictModel):
+    kind: Literal["concordance_match_publication"] = "concordance_match_publication"
     sources: list[ResultPublicationSource] = Field(min_length=1, max_length=2)
 
     @model_validator(mode="after")
-    def validate_sources(self) -> "ConcordanceResultPublicationAnalysisRequest":
+    def validate_sources(self) -> "ConcordanceMatchPublicationAnalysisRequest":
         source_ids = [source.source_node_id for source in self.sources]
         if len(source_ids) != len(set(source_ids)):
             raise ValueError("Result Publication source IDs must be unique")
+        return self
+
+
+class ConcordanceDocumentPublicationAnalysisRequest(_StrictModel):
+    kind: Literal["concordance_document_publication"] = (
+        "concordance_document_publication"
+    )
+    sources: list[ConcordanceDocumentPublicationSource] = Field(
+        min_length=1, max_length=2
+    )
+
+    @model_validator(mode="after")
+    def validate_sources(self) -> "ConcordanceDocumentPublicationAnalysisRequest":
+        source_ids = [source.source_node_id for source in self.sources]
+        if len(source_ids) != len(set(source_ids)):
+            raise ValueError("Document Publication source IDs must be unique")
         return self
 
 
@@ -410,7 +457,8 @@ class TopicModelingDetachmentAnalysisRequest(_StrictModel):
 SupportingAnalysisRequest = Annotated[
     ConcordanceRunAllAnalysisRequest
     | QuotationRunAllAnalysisRequest
-    | ConcordanceResultPublicationAnalysisRequest
+    | ConcordanceMatchPublicationAnalysisRequest
+    | ConcordanceDocumentPublicationAnalysisRequest
     | QuotationResultPublicationAnalysisRequest
     | AnnotationRunAllAnalysisRequest
     | TopicModelingDetachmentAnalysisRequest,
@@ -428,7 +476,8 @@ AnalysisSubmission = Annotated[
     | AnnotationAnalysisSubmission
     | ConcordanceRunAllAnalysisRequest
     | QuotationRunAllAnalysisRequest
-    | ConcordanceResultPublicationAnalysisRequest
+    | ConcordanceMatchPublicationAnalysisRequest
+    | ConcordanceDocumentPublicationAnalysisRequest
     | QuotationResultPublicationAnalysisRequest
     | AnnotationRunAllSubmission
     | TopicModelingDetachmentAnalysisRequest,
@@ -438,7 +487,8 @@ AnalysisSubmission = Annotated[
 SupportingAnalysisSubmission = Annotated[
     ConcordanceRunAllAnalysisRequest
     | QuotationRunAllAnalysisRequest
-    | ConcordanceResultPublicationAnalysisRequest
+    | ConcordanceMatchPublicationAnalysisRequest
+    | ConcordanceDocumentPublicationAnalysisRequest
     | QuotationResultPublicationAnalysisRequest
     | AnnotationRunAllSubmission
     | TopicModelingDetachmentAnalysisRequest,
@@ -464,7 +514,13 @@ def analysis_input_ids(request: AnalysisRequest) -> tuple[uuid.UUID, ...]:
         ),
     ):
         return analysis_input_ids(request.source)
-    if isinstance(request, ConcordanceResultPublicationAnalysisRequest):
+    if isinstance(
+        request,
+        (
+            ConcordanceMatchPublicationAnalysisRequest,
+            ConcordanceDocumentPublicationAnalysisRequest,
+        ),
+    ):
         return tuple(source.source_node_id for source in request.sources)
     if isinstance(request, QuotationResultPublicationAnalysisRequest):
         return (request.source.source_node_id,)
@@ -773,7 +829,9 @@ __all__ = [
     "AnnotationRunAllAnalysisRequest",
     "AnnotationRunAllSubmission",
     "ConcordanceAnalysisRequest",
-    "ConcordanceResultPublicationAnalysisRequest",
+    "ConcordanceDocumentPublicationAnalysisRequest",
+    "ConcordanceDocumentPublicationSource",
+    "ConcordanceMatchPublicationAnalysisRequest",
     "ConcordanceRunAllAnalysisRequest",
     "CorruptAnalysis",
     "Failure",

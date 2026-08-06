@@ -20,8 +20,11 @@ from ..domain.workspace import (
     AnalysisQuerySnapshotRecord,
     AnalysisRecord,
     AnnotationRunAllAnalysisRequest,
-    ConcordanceResultPublicationAnalysisRequest,
-    ConcordanceResultPublicationDerivation,
+    ConcordanceDocumentPublicationAnalysisRequest,
+    ConcordanceDocumentPublicationSource,
+    ConcordanceDocumentPublicationDerivation,
+    ConcordanceMatchPublicationAnalysisRequest,
+    ConcordanceMatchPublicationDerivation,
     DerivationInput,
     DerivationProvenance,
     Node,
@@ -561,7 +564,13 @@ def _validate_published_data_block_identity(
     request = record.request
     parent = workspace.analyses.get(str(record.parent_analysis_id))
     parent_request = parent.request if parent is not None else None
-    if isinstance(request, ConcordanceResultPublicationAnalysisRequest):
+    if isinstance(
+        request,
+        (
+            ConcordanceMatchPublicationAnalysisRequest,
+            ConcordanceDocumentPublicationAnalysisRequest,
+        ),
+    ):
         selection = next(
             (
                 item
@@ -576,10 +585,18 @@ def _validate_published_data_block_identity(
         if selection is None:
             raise ValueError("Concordance Result Publication source is invalid")
         source_node_id = selection.source_node_id
-        operation = ConcordanceResultPublicationDerivation()
+        operation = (
+            ConcordanceMatchPublicationDerivation()
+            if isinstance(request, ConcordanceMatchPublicationAnalysisRequest)
+            else ConcordanceDocumentPublicationDerivation()
+        )
         document = metadata.document
         requested_name = selection.new_node_name
-        selected_columns = selection.selected_columns
+        selected_columns = (
+            [document, "CONC_extraction", *selection.selected_metadata_columns]
+            if isinstance(selection, ConcordanceDocumentPublicationSource)
+            else selection.selected_columns
+        )
     elif isinstance(request, QuotationResultPublicationAnalysisRequest):
         source_node_id = request.source.source_node_id
         operation = QuotationResultPublicationDerivation()
@@ -656,7 +673,13 @@ def _result_publication_source_color(
     parent = workspace.analyses.get(str(record.parent_analysis_id))
     if parent is None or parent.result_payload is None:
         raise ValueError("Result Publication parent is unavailable")
-    if isinstance(record.request, ConcordanceResultPublicationAnalysisRequest):
+    if isinstance(
+        record.request,
+        (
+            ConcordanceMatchPublicationAnalysisRequest,
+            ConcordanceDocumentPublicationAnalysisRequest,
+        ),
+    ):
         group = ConcordanceRunAllStoredResult.model_validate(parent.result_payload)
         if group.sources is None:
             raise ValueError("Concordance Result Publication parent is invalid")
