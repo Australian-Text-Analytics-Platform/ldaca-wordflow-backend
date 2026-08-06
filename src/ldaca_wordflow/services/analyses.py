@@ -26,14 +26,14 @@ from ..domain.workspace import (
     AnnotationAnalysisSubmission,
     AnnotationRunAllAnalysisRequest,
     AnnotationRunAllSubmission,
-    ConcordanceDocumentPublicationAnalysisRequest,
-    ConcordanceMatchPublicationAnalysisRequest,
+    ConcordanceDocumentDataBlockCreationAnalysisRequest,
+    ConcordanceMatchDataBlockCreationAnalysisRequest,
     ConcordanceRunAllAnalysisRequest,
     CorruptAnalysis,
     Failure,
     InvalidAnalysisIntegrity,
     Progress,
-    QuotationResultPublicationAnalysisRequest,
+    QuotationResultDataBlockCreationAnalysisRequest,
     ValidAnalysisIntegrity,
     Workspace,
     analysis_input_ids,
@@ -209,11 +209,11 @@ class AnalysisService:
         return {
             "annotation_run_all": "annotation",
             "concordance_run_all": "concordance",
-            "concordance_match_publication": "concordance",
-            "concordance_document_publication": "concordance",
+            "concordance_match_data_block_creation": "concordance",
+            "concordance_document_data_block_creation": "concordance",
             "quotation_run_all": "quotation",
-            "quotation_result_publication": "quotation",
-            "topic_modeling_detachment": "topic_modeling",
+            "quotation_result_data_block_creation": "quotation",
+            "topic_modeling_data_block_creation": "topic_modeling",
         }.get(kind, kind)
 
     async def submit(
@@ -311,9 +311,9 @@ class AnalysisService:
             if isinstance(
                 request,
                 (
-                    ConcordanceMatchPublicationAnalysisRequest,
-                    ConcordanceDocumentPublicationAnalysisRequest,
-                    QuotationResultPublicationAnalysisRequest,
+                    ConcordanceMatchDataBlockCreationAnalysisRequest,
+                    ConcordanceDocumentDataBlockCreationAnalysisRequest,
+                    QuotationResultDataBlockCreationAnalysisRequest,
                 ),
             ):
                 if (
@@ -322,22 +322,22 @@ class AnalysisService:
                     or parent.state is not AnalysisState.SUCCEEDED
                 ):
                     raise AnalysisParentInvalidError(
-                        "Result Publication requires a successful Run All parent"
+                        "Data Block Creation requires a successful Run All parent"
                     )
                 expected_parent_kind = (
                     "concordance_run_all"
                     if isinstance(
                         request,
                         (
-                            ConcordanceMatchPublicationAnalysisRequest,
-                            ConcordanceDocumentPublicationAnalysisRequest,
+                            ConcordanceMatchDataBlockCreationAnalysisRequest,
+                            ConcordanceDocumentDataBlockCreationAnalysisRequest,
                         ),
                     )
                     else "quotation_run_all"
                 )
                 if parent.request.kind != expected_parent_kind:
                     raise AnalysisParentInvalidError(
-                        "Result Publication parent kind is invalid"
+                        "Data Block Creation parent kind is invalid"
                     )
             supersedes = []
             for analysis_id in command.supersedes_analysis_ids:

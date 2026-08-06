@@ -308,7 +308,7 @@ def compute_concordance_page(
     # so the existing metadata-columns picker offers it as an opt-in toggle,
     # matching the rest of the user-controllable column set. The CONC_
     # prefix makes the source obvious; behaviourally it's "an optional column
-    # you can show / detach if you want it."
+    # you can show or use for Derived Data Block Creation if you want it."
     metadata = _column_metadata(columns, CORE_CONCORDANCE_COLUMNS)
 
     return {

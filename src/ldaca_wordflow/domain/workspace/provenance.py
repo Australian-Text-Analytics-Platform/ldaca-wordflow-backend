@@ -257,22 +257,22 @@ class AnnotationDerivation(_StrictModel):
     model: str = Field(min_length=1, max_length=500)
 
 
-class ConcordanceMatchPublicationDerivation(_StrictModel):
-    kind: Literal["concordance_match_publication"] = "concordance_match_publication"
+class ConcordanceMatchDataBlockCreationDerivation(_StrictModel):
+    kind: Literal["concordance_match_data_block_creation"] = "concordance_match_data_block_creation"
 
 
-class ConcordanceDocumentPublicationDerivation(_StrictModel):
-    kind: Literal["concordance_document_publication"] = (
-        "concordance_document_publication"
+class ConcordanceDocumentDataBlockCreationDerivation(_StrictModel):
+    kind: Literal["concordance_document_data_block_creation"] = (
+        "concordance_document_data_block_creation"
     )
 
 
-class QuotationResultPublicationDerivation(_StrictModel):
-    kind: Literal["quotation_result_publication"] = "quotation_result_publication"
+class QuotationResultDataBlockCreationDerivation(_StrictModel):
+    kind: Literal["quotation_result_data_block_creation"] = "quotation_result_data_block_creation"
 
 
-class TopicModelingDetachmentDerivation(_StrictModel):
-    kind: Literal["topic_modeling_detachment"] = "topic_modeling_detachment"
+class TopicModelingDataBlockCreationDerivation(_StrictModel):
+    kind: Literal["topic_modeling_data_block_creation"] = "topic_modeling_data_block_creation"
     role: Literal["topic_data", "topic_meanings"]
 
 
@@ -287,10 +287,10 @@ DerivationOperation = Annotated[
     | CastDerivation
     | SqlDerivation
     | AnnotationDerivation
-    | ConcordanceMatchPublicationDerivation
-    | ConcordanceDocumentPublicationDerivation
-    | QuotationResultPublicationDerivation
-    | TopicModelingDetachmentDerivation,
+    | ConcordanceMatchDataBlockCreationDerivation
+    | ConcordanceDocumentDataBlockCreationDerivation
+    | QuotationResultDataBlockCreationDerivation
+    | TopicModelingDataBlockCreationDerivation,
     Field(discriminator="kind"),
 ]
 _DERIVATION_OPERATION_ADAPTER = TypeAdapter(DerivationOperation)
@@ -307,10 +307,10 @@ _DERIVATION_OPERATION_TYPES: dict[str, type[_StrictModel]] = {
         CastDerivation,
         SqlDerivation,
         AnnotationDerivation,
-        ConcordanceMatchPublicationDerivation,
-        ConcordanceDocumentPublicationDerivation,
-        QuotationResultPublicationDerivation,
-        TopicModelingDetachmentDerivation,
+        ConcordanceMatchDataBlockCreationDerivation,
+        ConcordanceDocumentDataBlockCreationDerivation,
+        QuotationResultDataBlockCreationDerivation,
+        TopicModelingDataBlockCreationDerivation,
     )
 }
 
@@ -492,10 +492,10 @@ def describe_provenance(
             else "expression",
             CastDerivation: "cast",
             AnnotationDerivation: "annotation",
-            ConcordanceMatchPublicationDerivation: "concordance Match Publication",
-            ConcordanceDocumentPublicationDerivation: "concordance Document Publication",
-            QuotationResultPublicationDerivation: "quotation Result Publication",
-            TopicModelingDetachmentDerivation: "topic modeling detachment",
+            ConcordanceMatchDataBlockCreationDerivation: "concordance Match Data Block Creation",
+            ConcordanceDocumentDataBlockCreationDerivation: "concordance Document Data Block Creation",
+            QuotationResultDataBlockCreationDerivation: "quotation Data Block Creation",
+            TopicModelingDataBlockCreationDerivation: "topic modeling Data Block Creation",
         }
         return f"{labels[type(operation)]} of {inputs[0]}"
 
@@ -511,8 +511,8 @@ __all__ = [
     "ColumnExpression",
     "ConcatDerivation",
     "ConcatStringExpression",
-    "ConcordanceMatchPublicationDerivation",
-    "ConcordanceDocumentPublicationDerivation",
+    "ConcordanceMatchDataBlockCreationDerivation",
+    "ConcordanceDocumentDataBlockCreationDerivation",
     "DerivationInput",
     "DerivationOperation",
     "DerivationProvenance",
@@ -527,8 +527,8 @@ __all__ = [
     "LiteralExpression",
     "NodeProvenance",
     "NodeReference",
-    "QuotationResultPublicationDerivation",
-    "TopicModelingDetachmentDerivation",
+    "QuotationResultDataBlockCreationDerivation",
+    "TopicModelingDataBlockCreationDerivation",
     "ReplaceDerivation",
     "RoundExpression",
     "SliceDerivation",

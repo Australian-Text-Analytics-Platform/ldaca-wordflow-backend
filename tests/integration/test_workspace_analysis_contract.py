@@ -555,13 +555,13 @@ def test_concordance_run_all_group_stores_results_without_publishing_nodes(
             first_node_id,
             second_node_id,
         }
-        invalid_publication = client.post(
+        invalid_creation = client.post(
             f"/api/workspaces/{workspace_id}/tabs/{tab_id}/analyses",
             json={
                 "execution_scope": "supporting",
                 "parent_analysis_id": group_id,
                 "request": {
-                    "kind": "concordance_match_publication",
+                    "kind": "concordance_match_data_block_creation",
                     "sources": [
                         {
                             "source_node_id": first_node_id,
@@ -578,11 +578,11 @@ def test_concordance_run_all_group_stores_results_without_publishing_nodes(
             },
             headers=unsafe,
         )
-        assert invalid_publication.status_code == 201, invalid_publication.text
+        assert invalid_creation.status_code == 201, invalid_creation.text
         invalid_terminal = _wait_analysis(
             client,
             workspace_id,
-            invalid_publication.json()["id"],
+            invalid_creation.json()["id"],
         )
         assert invalid_terminal["state"] == "failed"
         unchanged_nodes = client.get(f"/api/workspaces/{workspace_id}/nodes")
@@ -591,13 +591,13 @@ def test_concordance_run_all_group_stores_results_without_publishing_nodes(
             second_node_id,
         }
 
-        publication = client.post(
+        creation = client.post(
             f"/api/workspaces/{workspace_id}/tabs/{tab_id}/analyses",
             json={
                 "execution_scope": "supporting",
                 "parent_analysis_id": group_id,
                 "request": {
-                    "kind": "concordance_match_publication",
+                    "kind": "concordance_match_data_block_creation",
                     "sources": [
                         {
                             "source_node_id": first_node_id,
@@ -618,11 +618,11 @@ def test_concordance_run_all_group_stores_results_without_publishing_nodes(
             },
             headers=unsafe,
         )
-        assert publication.status_code == 201, publication.text
+        assert creation.status_code == 201, creation.text
         published = _wait_analysis(
             client,
             workspace_id,
-            publication.json()["id"],
+            creation.json()["id"],
         )
         assert published["state"] == "succeeded", published
         output_node_ids = cast(list[str], published["output_node_ids"])

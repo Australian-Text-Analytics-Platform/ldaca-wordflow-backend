@@ -314,7 +314,7 @@ class QuotationRunAllAnalysisRequest(_StrictModel):
     source: QuotationAnalysisRequest
 
 
-class ResultPublicationSource(_StrictModel):
+class DataBlockCreationSource(_StrictModel):
     """One immutable selection for publishing a successful Analysis Result."""
 
     source_node_id: uuid.UUID
@@ -322,14 +322,14 @@ class ResultPublicationSource(_StrictModel):
     new_node_name: NonEmptyText = Field(max_length=500)
 
     @model_validator(mode="after")
-    def validate_columns(self) -> "ResultPublicationSource":
+    def validate_columns(self) -> "DataBlockCreationSource":
         if len(self.selected_columns) != len(set(self.selected_columns)):
-            raise ValueError("Result Publication columns must be unique")
+            raise ValueError("Data Block Creation columns must be unique")
         return self
 
 
-class ConcordanceDocumentPublicationSource(_StrictModel):
-    """One source and exact Review filter for document-wise publication."""
+class ConcordanceDocumentDataBlockCreationSource(_StrictModel):
+    """One source and exact Review filter for document-wise Data Block Creation."""
 
     source_node_id: uuid.UUID
     selected_metadata_columns: list[NonEmptyText] = Field(default_factory=list)
@@ -339,11 +339,11 @@ class ConcordanceDocumentPublicationSource(_StrictModel):
     selected_bins: list[int] | None = Field(default=None, min_length=1, max_length=100)
 
     @model_validator(mode="after")
-    def validate_filter(self) -> "ConcordanceDocumentPublicationSource":
+    def validate_filter(self) -> "ConcordanceDocumentDataBlockCreationSource":
         if len(self.selected_metadata_columns) != len(
             set(self.selected_metadata_columns)
         ):
-            raise ValueError("Document Publication metadata columns must be unique")
+            raise ValueError("Document Data Block Creation metadata columns must be unique")
         if len(self.excluded_matched_texts) != len(
             set(self.excluded_matched_texts)
         ):
@@ -359,37 +359,37 @@ class ConcordanceDocumentPublicationSource(_StrictModel):
         return self
 
 
-class ConcordanceMatchPublicationAnalysisRequest(_StrictModel):
-    kind: Literal["concordance_match_publication"] = "concordance_match_publication"
-    sources: list[ResultPublicationSource] = Field(min_length=1, max_length=2)
+class ConcordanceMatchDataBlockCreationAnalysisRequest(_StrictModel):
+    kind: Literal["concordance_match_data_block_creation"] = "concordance_match_data_block_creation"
+    sources: list[DataBlockCreationSource] = Field(min_length=1, max_length=2)
 
     @model_validator(mode="after")
-    def validate_sources(self) -> "ConcordanceMatchPublicationAnalysisRequest":
+    def validate_sources(self) -> "ConcordanceMatchDataBlockCreationAnalysisRequest":
         source_ids = [source.source_node_id for source in self.sources]
         if len(source_ids) != len(set(source_ids)):
-            raise ValueError("Result Publication source IDs must be unique")
+            raise ValueError("Data Block Creation source IDs must be unique")
         return self
 
 
-class ConcordanceDocumentPublicationAnalysisRequest(_StrictModel):
-    kind: Literal["concordance_document_publication"] = (
-        "concordance_document_publication"
+class ConcordanceDocumentDataBlockCreationAnalysisRequest(_StrictModel):
+    kind: Literal["concordance_document_data_block_creation"] = (
+        "concordance_document_data_block_creation"
     )
-    sources: list[ConcordanceDocumentPublicationSource] = Field(
+    sources: list[ConcordanceDocumentDataBlockCreationSource] = Field(
         min_length=1, max_length=2
     )
 
     @model_validator(mode="after")
-    def validate_sources(self) -> "ConcordanceDocumentPublicationAnalysisRequest":
+    def validate_sources(self) -> "ConcordanceDocumentDataBlockCreationAnalysisRequest":
         source_ids = [source.source_node_id for source in self.sources]
         if len(source_ids) != len(set(source_ids)):
-            raise ValueError("Document Publication source IDs must be unique")
+            raise ValueError("Document Data Block Creation source IDs must be unique")
         return self
 
 
-class QuotationResultPublicationAnalysisRequest(_StrictModel):
-    kind: Literal["quotation_result_publication"] = "quotation_result_publication"
-    source: ResultPublicationSource
+class QuotationResultDataBlockCreationAnalysisRequest(_StrictModel):
+    kind: Literal["quotation_result_data_block_creation"] = "quotation_result_data_block_creation"
+    source: DataBlockCreationSource
 
 
 class AnnotationRunAllAnalysisRequest(_StrictModel):
@@ -424,8 +424,8 @@ class TopicMeaningOverride(_StrictModel):
     words: list[NonEmptyText]
 
 
-class TopicModelingDetachmentAnalysisRequest(_StrictModel):
-    kind: Literal["topic_modeling_detachment"] = "topic_modeling_detachment"
+class TopicModelingDataBlockCreationAnalysisRequest(_StrictModel):
+    kind: Literal["topic_modeling_data_block_creation"] = "topic_modeling_data_block_creation"
     node_ids: list[uuid.UUID] = Field(min_length=1, max_length=2)
     selected_columns: dict[uuid.UUID, list[NonEmptyText]]
     new_node_names: dict[uuid.UUID, NonEmptyText]
@@ -433,17 +433,17 @@ class TopicModelingDetachmentAnalysisRequest(_StrictModel):
     topic_meanings_override: list[TopicMeaningOverride] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def validate_sources_and_topics(self) -> "TopicModelingDetachmentAnalysisRequest":
+    def validate_sources_and_topics(self) -> "TopicModelingDataBlockCreationAnalysisRequest":
         if len(self.node_ids) != len(set(self.node_ids)):
-            raise ValueError("Topic Modeling detachment Data Block IDs must be unique")
+            raise ValueError("Topic Modeling Data Block Creation Data Block IDs must be unique")
         expected = set(self.node_ids)
         if (
             set(self.selected_columns) != expected
             or set(self.new_node_names) != expected
         ):
-            raise ValueError("Topic Modeling detachment source fields must align")
+            raise ValueError("Topic Modeling Data Block Creation source fields must align")
         if any(len(name) > 475 for name in self.new_node_names.values()):
-            raise ValueError("Topic Modeling detached Data Block names are too long")
+            raise ValueError("Topic Modeling Data Block Creation Data Block names are too long")
         if self.topic_ids is not None and len(self.topic_ids) != len(
             set(self.topic_ids)
         ):
@@ -457,11 +457,11 @@ class TopicModelingDetachmentAnalysisRequest(_StrictModel):
 SupportingAnalysisRequest = Annotated[
     ConcordanceRunAllAnalysisRequest
     | QuotationRunAllAnalysisRequest
-    | ConcordanceMatchPublicationAnalysisRequest
-    | ConcordanceDocumentPublicationAnalysisRequest
-    | QuotationResultPublicationAnalysisRequest
+    | ConcordanceMatchDataBlockCreationAnalysisRequest
+    | ConcordanceDocumentDataBlockCreationAnalysisRequest
+    | QuotationResultDataBlockCreationAnalysisRequest
     | AnnotationRunAllAnalysisRequest
-    | TopicModelingDetachmentAnalysisRequest,
+    | TopicModelingDataBlockCreationAnalysisRequest,
     Field(discriminator="kind"),
 ]
 
@@ -476,22 +476,22 @@ AnalysisSubmission = Annotated[
     | AnnotationAnalysisSubmission
     | ConcordanceRunAllAnalysisRequest
     | QuotationRunAllAnalysisRequest
-    | ConcordanceMatchPublicationAnalysisRequest
-    | ConcordanceDocumentPublicationAnalysisRequest
-    | QuotationResultPublicationAnalysisRequest
+    | ConcordanceMatchDataBlockCreationAnalysisRequest
+    | ConcordanceDocumentDataBlockCreationAnalysisRequest
+    | QuotationResultDataBlockCreationAnalysisRequest
     | AnnotationRunAllSubmission
-    | TopicModelingDetachmentAnalysisRequest,
+    | TopicModelingDataBlockCreationAnalysisRequest,
     Field(discriminator="kind"),
 ]
 
 SupportingAnalysisSubmission = Annotated[
     ConcordanceRunAllAnalysisRequest
     | QuotationRunAllAnalysisRequest
-    | ConcordanceMatchPublicationAnalysisRequest
-    | ConcordanceDocumentPublicationAnalysisRequest
-    | QuotationResultPublicationAnalysisRequest
+    | ConcordanceMatchDataBlockCreationAnalysisRequest
+    | ConcordanceDocumentDataBlockCreationAnalysisRequest
+    | QuotationResultDataBlockCreationAnalysisRequest
     | AnnotationRunAllSubmission
-    | TopicModelingDetachmentAnalysisRequest,
+    | TopicModelingDataBlockCreationAnalysisRequest,
     Field(discriminator="kind"),
 ]
 
@@ -517,12 +517,12 @@ def analysis_input_ids(request: AnalysisRequest) -> tuple[uuid.UUID, ...]:
     if isinstance(
         request,
         (
-            ConcordanceMatchPublicationAnalysisRequest,
-            ConcordanceDocumentPublicationAnalysisRequest,
+            ConcordanceMatchDataBlockCreationAnalysisRequest,
+            ConcordanceDocumentDataBlockCreationAnalysisRequest,
         ),
     ):
         return tuple(source.source_node_id for source in request.sources)
-    if isinstance(request, QuotationResultPublicationAnalysisRequest):
+    if isinstance(request, QuotationResultDataBlockCreationAnalysisRequest):
         return (request.source.source_node_id,)
     if isinstance(
         request,
@@ -530,7 +530,7 @@ def analysis_input_ids(request: AnalysisRequest) -> tuple[uuid.UUID, ...]:
             TokenFrequencyAnalysisRequest,
             TopicModelingAnalysisRequest,
             ConcordanceAnalysisRequest,
-            TopicModelingDetachmentAnalysisRequest,
+            TopicModelingDataBlockCreationAnalysisRequest,
         ),
     ):
         return tuple(request.node_ids)
@@ -829,9 +829,9 @@ __all__ = [
     "AnnotationRunAllAnalysisRequest",
     "AnnotationRunAllSubmission",
     "ConcordanceAnalysisRequest",
-    "ConcordanceDocumentPublicationAnalysisRequest",
-    "ConcordanceDocumentPublicationSource",
-    "ConcordanceMatchPublicationAnalysisRequest",
+    "ConcordanceDocumentDataBlockCreationAnalysisRequest",
+    "ConcordanceDocumentDataBlockCreationSource",
+    "ConcordanceMatchDataBlockCreationAnalysisRequest",
     "ConcordanceRunAllAnalysisRequest",
     "CorruptAnalysis",
     "Failure",
@@ -841,15 +841,15 @@ __all__ = [
     "QuotationEngineSelection",
     "QuotationEngineType",
     "QuotationRunAllAnalysisRequest",
-    "QuotationResultPublicationAnalysisRequest",
+    "QuotationResultDataBlockCreationAnalysisRequest",
     "PreviewAnalysisRequest",
     "PreviewAnalysisSubmission",
     "SequentialAnalysisRequest",
-    "ResultPublicationSource",
+    "DataBlockCreationSource",
     "TokenFrequencyAnalysisRequest",
     "TopicModelingAnalysisRequest",
     "TopicSegmentationMethod",
-    "TopicModelingDetachmentAnalysisRequest",
+    "TopicModelingDataBlockCreationAnalysisRequest",
     "TopicMeaningOverride",
     "ValidAnalysisIntegrity",
     "analysis_input_ids",

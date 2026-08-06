@@ -16,10 +16,10 @@ from ldaca_wordflow.analysis.generated_columns import (
 from ldaca_wordflow.domain.workspace import Node, SourceProvenance, Workspace
 from ldaca_wordflow.shared.topic_types import topic_distribution_dtype
 from ldaca_wordflow.workers.input_snapshots import create_worker_input_snapshot
-from ldaca_wordflow.workers.topic_modeling import run_topic_modeling_detachment
+from ldaca_wordflow.workers.topic_modeling import run_topic_modeling_data_block_creation
 
 
-def test_topic_modeling_detachment_publishes_ordered_data_and_meanings(
+def test_topic_modeling_data_block_creation_publishes_ordered_data_and_meanings(
     tmp_path: Path,
 ) -> None:
     first_id = uuid.uuid4()
@@ -88,11 +88,11 @@ def test_topic_modeling_detachment_publishes_ordered_data_and_meanings(
     ).write_parquet(meanings_path)
     progress_updates: list[tuple[float, str]] = []
 
-    result = run_topic_modeling_detachment(
+    result = run_topic_modeling_data_block_creation(
         input_snapshot_dir=str(snapshot_dir),
         output_dir=str(tmp_path / "output"),
         request_payload={
-            "kind": "topic_modeling_detachment",
+            "kind": "topic_modeling_data_block_creation",
             "node_ids": [str(first_id), str(second_id)],
             "selected_columns": {
                 str(first_id): ["text"],

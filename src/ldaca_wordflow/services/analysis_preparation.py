@@ -17,17 +17,17 @@ from ..domain.workspace import (
     AnnotationAnalysisRequest,
     AnnotationRunAllAnalysisRequest,
     ConcordanceAnalysisRequest,
-    ConcordanceDocumentPublicationAnalysisRequest,
-    ConcordanceDocumentPublicationSource,
-    ConcordanceMatchPublicationAnalysisRequest,
+    ConcordanceDocumentDataBlockCreationAnalysisRequest,
+    ConcordanceDocumentDataBlockCreationSource,
+    ConcordanceMatchDataBlockCreationAnalysisRequest,
     ConcordanceRunAllAnalysisRequest,
     QuotationAnalysisRequest,
-    QuotationResultPublicationAnalysisRequest,
+    QuotationResultDataBlockCreationAnalysisRequest,
     QuotationRunAllAnalysisRequest,
     SequentialAnalysisRequest,
     TokenFrequencyAnalysisRequest,
     TopicModelingAnalysisRequest,
-    TopicModelingDetachmentAnalysisRequest,
+    TopicModelingDataBlockCreationAnalysisRequest,
     Workspace,
     analysis_snapshot_input_ids,
 )
@@ -45,11 +45,11 @@ from ..workers.entrypoints import (
     concordance_run_all_process,
     preview_ready_process,
     quotation_run_all_process,
-    result_publication_process,
+    result_data_block_creation_process,
     sequential_process,
     token_frequency_process,
     topic_modeling_process,
-    topic_modeling_detachment_process,
+    topic_modeling_data_block_creation_process,
 )
 from ..workers.input_snapshots import create_worker_input_snapshot
 from .analysis_execution_types import AnalysisInvocation
@@ -249,7 +249,7 @@ class AnalysisExecutionPreparer:
             else None
         )
         parent_request = parent.request if parent is not None else None
-        if isinstance(request, TopicModelingDetachmentAnalysisRequest) and isinstance(
+        if isinstance(request, TopicModelingDataBlockCreationAnalysisRequest) and isinstance(
             parent_request,
             TopicModelingAnalysisRequest,
         ):
@@ -273,7 +273,7 @@ class AnalysisExecutionPreparer:
                 if node.node_id in request.node_ids
             }
             return owned(
-                topic_modeling_detachment_process,
+                topic_modeling_data_block_creation_process,
                 {
                     "input_snapshot_dir": str(snapshot_dir),
                     "output_dir": str(artifact_dir),
@@ -287,9 +287,9 @@ class AnalysisExecutionPreparer:
         if isinstance(
             request,
             (
-                ConcordanceMatchPublicationAnalysisRequest,
-                ConcordanceDocumentPublicationAnalysisRequest,
-                QuotationResultPublicationAnalysisRequest,
+                ConcordanceMatchDataBlockCreationAnalysisRequest,
+                ConcordanceDocumentDataBlockCreationAnalysisRequest,
+                QuotationResultDataBlockCreationAnalysisRequest,
             ),
         ):
             if parent is None or parent.result_payload is None:
@@ -299,8 +299,8 @@ class AnalysisExecutionPreparer:
                 if isinstance(
                     request,
                     (
-                        ConcordanceMatchPublicationAnalysisRequest,
-                        ConcordanceDocumentPublicationAnalysisRequest,
+                        ConcordanceMatchDataBlockCreationAnalysisRequest,
+                        ConcordanceDocumentDataBlockCreationAnalysisRequest,
                     ),
                 )
                 else [request.source]
@@ -310,13 +310,13 @@ class AnalysisExecutionPreparer:
             if isinstance(
                 request,
                 (
-                    ConcordanceMatchPublicationAnalysisRequest,
-                    ConcordanceDocumentPublicationAnalysisRequest,
+                    ConcordanceMatchDataBlockCreationAnalysisRequest,
+                    ConcordanceDocumentDataBlockCreationAnalysisRequest,
                 ),
             ):
                 if not isinstance(parent_request, ConcordanceRunAllAnalysisRequest):
                     raise InvalidInputError(
-                        "Concordance Result Publication parent is invalid"
+                        "Concordance Data Block Creation parent is invalid"
                     )
                 group = ConcordanceRunAllStoredResult.model_validate(
                     parent.result_payload
@@ -328,7 +328,7 @@ class AnalysisExecutionPreparer:
                     descriptor = descriptors.get(selection.source_node_id)
                     if descriptor is None:
                         raise InvalidInputError(
-                            "Result Publication source is unavailable"
+                            "Data Block Creation source is unavailable"
                         )
                     child = workspace.analyses.get(str(descriptor.analysis_id))
                     if child is None or child.result_payload is None:
@@ -343,14 +343,14 @@ class AnalysisExecutionPreparer:
                             "Concordance source Result is unavailable"
                         )
                     if not isinstance(
-                        selection, ConcordanceDocumentPublicationSource
+                        selection, ConcordanceDocumentDataBlockCreationSource
                     ):
-                        _validate_publication_columns(
+                        _validate_data_block_creation_columns(
                             selection.selected_columns,
                             child_result.source,
                         )
                     else:
-                        _validate_document_publication_columns(
+                        _validate_document_data_block_creation_columns(
                             selection.selected_metadata_columns,
                             child_result.source,
                         )
@@ -367,15 +367,15 @@ class AnalysisExecutionPreparer:
             else:
                 if not isinstance(parent_request, QuotationRunAllAnalysisRequest):
                     raise InvalidInputError(
-                        "Quotation Result Publication parent is invalid"
+                        "Quotation Data Block Creation parent is invalid"
                     )
                 stored = QuotationRunAllStoredResult.model_validate(
                     parent.result_payload
                 )
                 selection = request.source
                 if selection.source_node_id != stored.source.node_id:
-                    raise InvalidInputError("Result Publication source is unavailable")
-                _validate_publication_columns(
+                    raise InvalidInputError("Data Block Creation source is unavailable")
+                _validate_data_block_creation_columns(
                     selection.selected_columns,
                     stored.source,
                 )
@@ -390,7 +390,7 @@ class AnalysisExecutionPreparer:
                     stored.source.document_column
                 )
             return owned(
-                result_publication_process,
+                result_data_block_creation_process,
                 {
                     "artifact_dir": str(artifact_dir),
                     "request_payload": request.model_dump(mode="json"),
@@ -405,8 +405,8 @@ class AnalysisExecutionPreparer:
                     if isinstance(
                         request,
                         (
-                            ConcordanceMatchPublicationAnalysisRequest,
-                            ConcordanceDocumentPublicationAnalysisRequest,
+                            ConcordanceMatchDataBlockCreationAnalysisRequest,
+                            ConcordanceDocumentDataBlockCreationAnalysisRequest,
                         ),
                     )
                     else {
@@ -504,7 +504,7 @@ def _analysis_artifact_path(
     ).resolve(strict=True)
 
 
-def _validate_publication_columns(
+def _validate_data_block_creation_columns(
     selected_columns: list[str],
     source: object,
 ) -> None:
@@ -513,18 +513,18 @@ def _validate_publication_columns(
     analysis_columns = getattr(source, "analysis_columns")
     allowed = {document_column, *metadata_columns, *analysis_columns}
     if document_column not in selected_columns:
-        raise InvalidInputError("Result Publication requires the document column")
+        raise InvalidInputError("Data Block Creation requires the document column")
     if any(column not in allowed for column in selected_columns):
-        raise InvalidInputError("Result Publication column is unavailable")
+        raise InvalidInputError("Data Block Creation column is unavailable")
 
 
-def _validate_document_publication_columns(
+def _validate_document_data_block_creation_columns(
     selected_metadata_columns: list[str],
     source: object,
 ) -> None:
     metadata_columns = set(getattr(source, "metadata_columns"))
     if any(column not in metadata_columns for column in selected_metadata_columns):
-        raise InvalidInputError("Document Publication metadata column is unavailable")
+        raise InvalidInputError("Document Data Block Creation metadata column is unavailable")
 
 
 def _remove_execution_staging(path: Path) -> None:

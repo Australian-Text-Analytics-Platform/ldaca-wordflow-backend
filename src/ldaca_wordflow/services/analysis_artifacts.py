@@ -20,19 +20,19 @@ from ..domain.workspace import (
     AnalysisQuerySnapshotRecord,
     AnalysisRecord,
     AnnotationRunAllAnalysisRequest,
-    ConcordanceDocumentPublicationAnalysisRequest,
-    ConcordanceDocumentPublicationSource,
-    ConcordanceDocumentPublicationDerivation,
-    ConcordanceMatchPublicationAnalysisRequest,
-    ConcordanceMatchPublicationDerivation,
+    ConcordanceDocumentDataBlockCreationAnalysisRequest,
+    ConcordanceDocumentDataBlockCreationSource,
+    ConcordanceDocumentDataBlockCreationDerivation,
+    ConcordanceMatchDataBlockCreationAnalysisRequest,
+    ConcordanceMatchDataBlockCreationDerivation,
     DerivationInput,
     DerivationProvenance,
     Node,
-    QuotationResultPublicationAnalysisRequest,
-    QuotationResultPublicationDerivation,
+    QuotationResultDataBlockCreationAnalysisRequest,
+    QuotationResultDataBlockCreationDerivation,
     TopicModelingAnalysisRequest,
-    TopicModelingDetachmentAnalysisRequest,
-    TopicModelingDetachmentDerivation,
+    TopicModelingDataBlockCreationAnalysisRequest,
+    TopicModelingDataBlockCreationDerivation,
     Workspace,
     node_reference,
     referenced_node_ids,
@@ -53,12 +53,12 @@ from ..models.analysis_results import (
     PublishedDataBlockWorkerResult,
     PreviewReadyStoredResult,
     QuotationRunAllStoredResult,
-    ResultPublicationOutput,
-    ResultPublicationStoredResult,
-    ResultPublicationWorkerResult,
-    TopicModelingDetachedOutput,
-    TopicModelingDetachmentStoredResult,
-    TopicModelingDetachmentWorkerResult,
+    DataBlockCreationOutput,
+    DataBlockCreationStoredResult,
+    DataBlockCreationWorkerResult,
+    TopicModelingDataBlockCreationOutput,
+    TopicModelingDataBlockCreationStoredResult,
+    TopicModelingDataBlockCreationWorkerResult,
     stored_result_payload,
 )
 from ..shared.errors import ArtifactGoneError
@@ -147,7 +147,7 @@ class AnalysisArtifactService:
                 artifacts=[],
                 output_node_ids=[],
             )
-        if isinstance(result, TopicModelingDetachmentWorkerResult):
+        if isinstance(result, TopicModelingDataBlockCreationWorkerResult):
             stored = await run_sync_in_worker_thread(
                 partial(
                     _publish_topic_modeling_data_blocks,
@@ -170,10 +170,10 @@ class AnalysisArtifactService:
                 artifacts=[],
                 output_node_ids=stored.output_node_ids,
             )
-        if isinstance(result, ResultPublicationWorkerResult):
+        if isinstance(result, DataBlockCreationWorkerResult):
             stored = await run_sync_in_worker_thread(
                 partial(
-                    _publish_result_publication_data_blocks,
+                    _create_result_data_blocks,
                     lease.path / "analyses" / str(record.id),
                     lease.workspace,
                     lease.path,
@@ -431,9 +431,9 @@ def _publish_topic_modeling_data_blocks(
     workspace: Workspace,
     workspace_path: Path,
     record: AnalysisRecord,
-    result: TopicModelingDetachmentWorkerResult,
+    result: TopicModelingDataBlockCreationWorkerResult,
     max_node_bytes: int,
-) -> TopicModelingDetachmentStoredResult:
+) -> TopicModelingDataBlockCreationStoredResult:
     output_dir = analysis_dir / ".execution" / "output"
     declared_files = {
         _resolve_output_file(output_dir, data.parquet_path)[0]
@@ -443,7 +443,7 @@ def _publish_topic_modeling_data_blocks(
     if len(declared_files) != len(result.outputs) * 2:
         raise ValueError("Topic Modeling output files must be unique")
     created_ids: list[uuid.UUID] = []
-    stored_outputs: list[TopicModelingDetachedOutput] = []
+    stored_outputs: list[TopicModelingDataBlockCreationOutput] = []
     try:
         for output in result.outputs:
             topic_data = _publish_analysis_data_block(
@@ -475,7 +475,7 @@ def _publish_topic_modeling_data_blocks(
             )
             created_ids.extend(topic_meanings.output_node_ids)
             stored_outputs.append(
-                TopicModelingDetachedOutput(
+                TopicModelingDataBlockCreationOutput(
                     source_node_id=output.source_node_id,
                     topic_data_node_id=topic_data.output_node_ids[0],
                     topic_meanings_node_id=topic_meanings.output_node_ids[0],
@@ -492,29 +492,29 @@ def _publish_topic_modeling_data_blocks(
         if created_ids:
             fsync_directory(data_dir)
         raise
-    return TopicModelingDetachmentStoredResult(
+    return TopicModelingDataBlockCreationStoredResult(
         output_node_ids=created_ids,
         outputs=stored_outputs,
     )
 
 
-def _publish_result_publication_data_blocks(
+def _create_result_data_blocks(
     analysis_dir: Path,
     workspace: Workspace,
     workspace_path: Path,
     record: AnalysisRecord,
-    result: ResultPublicationWorkerResult,
+    result: DataBlockCreationWorkerResult,
     max_node_bytes: int,
-) -> ResultPublicationStoredResult:
+) -> DataBlockCreationStoredResult:
     output_dir = analysis_dir / ".execution" / "output"
     declared_files = {
         _resolve_output_file(output_dir, output.data.parquet_path)[0]
         for output in result.outputs
     }
     if len(declared_files) != len(result.outputs):
-        raise ValueError("Result Publication output files must be unique")
+        raise ValueError("Data Block Creation output files must be unique")
     created_ids: list[uuid.UUID] = []
-    stored_outputs: list[ResultPublicationOutput] = []
+    stored_outputs: list[DataBlockCreationOutput] = []
     try:
         for output in result.outputs:
             published = _publish_analysis_data_block(
@@ -533,7 +533,7 @@ def _publish_result_publication_data_blocks(
             output_id = published.output_node_ids[0]
             created_ids.append(output_id)
             stored_outputs.append(
-                ResultPublicationOutput(
+                DataBlockCreationOutput(
                     source_node_id=output.source_node_id,
                     output_node_id=output_id,
                     output_columns=published.output_columns,
@@ -548,7 +548,7 @@ def _publish_result_publication_data_blocks(
         if created_ids:
             fsync_directory(data_dir)
         raise
-    return ResultPublicationStoredResult(
+    return DataBlockCreationStoredResult(
         output_node_ids=created_ids,
         outputs=stored_outputs,
     )
@@ -567,8 +567,8 @@ def _validate_published_data_block_identity(
     if isinstance(
         request,
         (
-            ConcordanceMatchPublicationAnalysisRequest,
-            ConcordanceDocumentPublicationAnalysisRequest,
+            ConcordanceMatchDataBlockCreationAnalysisRequest,
+            ConcordanceDocumentDataBlockCreationAnalysisRequest,
         ),
     ):
         selection = next(
@@ -583,38 +583,38 @@ def _validate_published_data_block_identity(
             None,
         )
         if selection is None:
-            raise ValueError("Concordance Result Publication source is invalid")
+            raise ValueError("Concordance Data Block Creation source is invalid")
         source_node_id = selection.source_node_id
         operation = (
-            ConcordanceMatchPublicationDerivation()
-            if isinstance(request, ConcordanceMatchPublicationAnalysisRequest)
-            else ConcordanceDocumentPublicationDerivation()
+            ConcordanceMatchDataBlockCreationDerivation()
+            if isinstance(request, ConcordanceMatchDataBlockCreationAnalysisRequest)
+            else ConcordanceDocumentDataBlockCreationDerivation()
         )
         document = metadata.document
         requested_name = selection.new_node_name
         selected_columns = (
             [document, "CONC_extraction", *selection.selected_metadata_columns]
-            if isinstance(selection, ConcordanceDocumentPublicationSource)
+            if isinstance(selection, ConcordanceDocumentDataBlockCreationSource)
             else selection.selected_columns
         )
-    elif isinstance(request, QuotationResultPublicationAnalysisRequest):
+    elif isinstance(request, QuotationResultDataBlockCreationAnalysisRequest):
         source_node_id = request.source.source_node_id
-        operation = QuotationResultPublicationDerivation()
+        operation = QuotationResultDataBlockCreationDerivation()
         document = metadata.document
         requested_name = request.source.new_node_name
         selected_columns = request.source.selected_columns
-    elif isinstance(request, TopicModelingDetachmentAnalysisRequest) and isinstance(
+    elif isinstance(request, TopicModelingDataBlockCreationAnalysisRequest) and isinstance(
         parent_request,
         TopicModelingAnalysisRequest,
     ):
         if not isinstance(metadata.provenance, DerivationProvenance):
-            raise ValueError("Topic Modeling detachment provenance is invalid")
+            raise ValueError("Topic Modeling Data Block Creation provenance is invalid")
         references = referenced_node_ids(metadata.provenance)
         operation_value = metadata.provenance.operation
         if len(references) != 1 or not isinstance(
-            operation_value, TopicModelingDetachmentDerivation
+            operation_value, TopicModelingDataBlockCreationDerivation
         ):
-            raise ValueError("Topic Modeling detachment provenance is invalid")
+            raise ValueError("Topic Modeling Data Block Creation provenance is invalid")
         source_id = references[0]
         if operation_value.role == "topic_data":
             source_uuid = uuid.UUID(source_id)
@@ -659,41 +659,41 @@ def _validate_published_data_block_identity(
         or metadata.provenance != expected_provenance
         or metadata.document != document
         or metadata.color
-        != _result_publication_source_color(workspace, record, source_node_id)
+        != _data_block_creation_source_color(workspace, record, source_node_id)
         or str(metadata.id) in workspace.nodes
     ):
         raise ValueError("Child Analysis Data Block metadata is invalid")
 
 
-def _result_publication_source_color(
+def _data_block_creation_source_color(
     workspace: Workspace,
     record: AnalysisRecord,
     source_node_id: uuid.UUID,
 ) -> str | None:
     parent = workspace.analyses.get(str(record.parent_analysis_id))
     if parent is None or parent.result_payload is None:
-        raise ValueError("Result Publication parent is unavailable")
+        raise ValueError("Data Block Creation parent is unavailable")
     if isinstance(
         record.request,
         (
-            ConcordanceMatchPublicationAnalysisRequest,
-            ConcordanceDocumentPublicationAnalysisRequest,
+            ConcordanceMatchDataBlockCreationAnalysisRequest,
+            ConcordanceDocumentDataBlockCreationAnalysisRequest,
         ),
     ):
         group = ConcordanceRunAllStoredResult.model_validate(parent.result_payload)
         if group.sources is None:
-            raise ValueError("Concordance Result Publication parent is invalid")
+            raise ValueError("Concordance Data Block Creation parent is invalid")
         descriptor = next(
             (item for item in group.sources if item.node_id == source_node_id),
             None,
         )
         if descriptor is None:
-            raise ValueError("Concordance Result Publication source is unavailable")
+            raise ValueError("Concordance Data Block Creation source is unavailable")
         return descriptor.color
-    if isinstance(record.request, QuotationResultPublicationAnalysisRequest):
+    if isinstance(record.request, QuotationResultDataBlockCreationAnalysisRequest):
         result = QuotationRunAllStoredResult.model_validate(parent.result_payload)
         return result.source.color
-    raise ValueError("Analysis is not a Result Publication")
+    raise ValueError("Analysis is not a Data Block Creation")
 
 
 def _publish_result(

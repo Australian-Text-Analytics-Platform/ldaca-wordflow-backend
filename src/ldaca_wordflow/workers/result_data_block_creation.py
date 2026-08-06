@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 
 @process_entrypoint
-def run_result_publication(
+def run_result_data_block_creation(
     *,
     artifact_dir: str,
     request_payload: dict[str, Any],
@@ -20,49 +20,49 @@ def run_result_publication(
     source_colors: dict[str, str | None],
     progress_callback: Callable[[float, str], None] | None = None,
 ) -> dict[str, Any]:
-    """Create private output files for one atomic Result Publication."""
+    """Create private output files for one atomic Data Block Creation."""
 
     try:
         import polars as pl
 
         from ..domain.workspace import (
-            ConcordanceDocumentPublicationAnalysisRequest,
-            ConcordanceDocumentPublicationDerivation,
-            ConcordanceDocumentPublicationSource,
-            ConcordanceMatchPublicationAnalysisRequest,
-            ConcordanceMatchPublicationDerivation,
+            ConcordanceDocumentDataBlockCreationAnalysisRequest,
+            ConcordanceDocumentDataBlockCreationDerivation,
+            ConcordanceDocumentDataBlockCreationSource,
+            ConcordanceMatchDataBlockCreationAnalysisRequest,
+            ConcordanceMatchDataBlockCreationDerivation,
             DerivationInput,
             DerivationProvenance,
-            QuotationResultPublicationAnalysisRequest,
-            QuotationResultPublicationDerivation,
+            QuotationResultDataBlockCreationAnalysisRequest,
+            QuotationResultDataBlockCreationDerivation,
             node_reference,
         )
         from ..infrastructure.storage.node_store import write_published_frame
 
         kind = request_payload.get("kind")
-        if kind == "concordance_match_publication":
-            request = ConcordanceMatchPublicationAnalysisRequest.model_validate(
+        if kind == "concordance_match_data_block_creation":
+            request = ConcordanceMatchDataBlockCreationAnalysisRequest.model_validate(
                 request_payload
             )
             selections = request.sources
-            operation = ConcordanceMatchPublicationDerivation()
+            operation = ConcordanceMatchDataBlockCreationDerivation()
             nested_column = "concordance"
-        elif kind == "concordance_document_publication":
-            request = ConcordanceDocumentPublicationAnalysisRequest.model_validate(
+        elif kind == "concordance_document_data_block_creation":
+            request = ConcordanceDocumentDataBlockCreationAnalysisRequest.model_validate(
                 request_payload
             )
             selections = request.sources
-            operation = ConcordanceDocumentPublicationDerivation()
+            operation = ConcordanceDocumentDataBlockCreationDerivation()
             nested_column = None
-        elif kind == "quotation_result_publication":
-            request = QuotationResultPublicationAnalysisRequest.model_validate(
+        elif kind == "quotation_result_data_block_creation":
+            request = QuotationResultDataBlockCreationAnalysisRequest.model_validate(
                 request_payload
             )
             selections = [request.source]
-            operation = QuotationResultPublicationDerivation()
+            operation = QuotationResultDataBlockCreationDerivation()
             nested_column = "quotation"
         else:
-            raise ValueError("Result Publication kind is unsupported")
+            raise ValueError("Data Block Creation kind is unsupported")
 
         outputs: list[dict[str, Any]] = []
         for index, selection in enumerate(selections):
@@ -70,8 +70,8 @@ def run_result_publication(
             path = result_paths.get(source_id)
             document_column = document_columns.get(source_id)
             if path is None or document_column is None:
-                raise ValueError("Result Publication source artifact is unavailable")
-            if isinstance(selection, ConcordanceDocumentPublicationSource):
+                raise ValueError("Data Block Creation source artifact is unavailable")
+            if isinstance(selection, ConcordanceDocumentDataBlockCreationSource):
                 from ..analysis.concordance_projection import (
                     filter_concordance_documents,
                 )
@@ -89,7 +89,7 @@ def run_result_publication(
                     column not in schema
                     for column in selection.selected_metadata_columns
                 ):
-                    raise ValueError("Document Publication metadata is unavailable")
+                    raise ValueError("Document Data Block Creation metadata is unavailable")
                 output_columns = [
                     document_column,
                     CONC_EXTRACTION_COLUMN,
@@ -110,7 +110,7 @@ def run_result_publication(
                 )
             else:
                 if document_column not in selection.selected_columns:
-                    raise ValueError("Result Publication requires the document column")
+                    raise ValueError("Data Block Creation requires the document column")
                 assert nested_column is not None
                 frame = (
                     pl.scan_parquet(path)
@@ -118,7 +118,7 @@ def run_result_publication(
                     .unnest(nested_column)
                 )
                 output_columns = selection.selected_columns
-            if kind == "quotation_result_publication":
+            if kind == "quotation_result_data_block_creation":
                 from ..analysis.generated_columns import QUOTE_COLUMN_NAMES
 
                 frame = frame.rename(
@@ -130,7 +130,7 @@ def run_result_publication(
                 )
             schema = frame.collect_schema()
             if any(column not in schema for column in output_columns):
-                raise ValueError("Result Publication column is unavailable")
+                raise ValueError("Data Block Creation column is unavailable")
             if progress_callback:
                 progress_callback(
                     0.1 + (0.65 * index / max(len(selections), 1)),
@@ -167,15 +167,15 @@ def run_result_publication(
             )
 
         if progress_callback:
-            progress_callback(0.95, "Saving Result Publication...")
+            progress_callback(0.95, "Saving Data Block Creation...")
         return {
             "state": "successful",
             "outputs": outputs,
-            "message": "Result Publication completed successfully",
+            "message": "Data Block Creation completed successfully",
         }
     except Exception:
-        logger.exception("Result Publication failed")
+        logger.exception("Data Block Creation failed")
         raise
 
 
-__all__ = ["run_result_publication"]
+__all__ = ["run_result_data_block_creation"]

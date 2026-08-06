@@ -49,12 +49,12 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "run_topic_modeling_analysis",
-    "run_topic_modeling_detachment",
+    "run_topic_modeling_data_block_creation",
 ]
 
 
 @process_entrypoint
-def run_topic_modeling_detachment(
+def run_topic_modeling_data_block_creation(
     *,
     input_snapshot_dir: str,
     output_dir: str,
@@ -74,11 +74,11 @@ def run_topic_modeling_detachment(
         TOPIC_MEANING_COLUMN,
         TOPIC_TOP1_COLUMN,
     )
-    from ..domain.workspace import TopicModelingDetachmentAnalysisRequest
+    from ..domain.workspace import TopicModelingDataBlockCreationAnalysisRequest
     from ..shared.topic_types import topic_distribution_dtype
     from .input_snapshots import load_snapshot_node
 
-    request = TopicModelingDetachmentAnalysisRequest.model_validate(request_payload)
+    request = TopicModelingDataBlockCreationAnalysisRequest.model_validate(request_payload)
     destination = Path(output_dir)
     destination.mkdir(parents=True, exist_ok=True)
     meanings = pl.read_parquet(topic_meanings_path)
@@ -101,7 +101,7 @@ def run_topic_modeling_detachment(
         schema = source.data.collect_schema()
         missing = [column for column in selected_columns if column not in schema]
         if missing:
-            raise ValueError(f"Topic Modelling detachment columns not found: {missing}")
+            raise ValueError(f"Topic Modelling Data Block Creation columns not found: {missing}")
         assignment_path = assignment_paths.get(source_id)
         if assignment_path is None:
             raise ValueError("Topic Modelling assignment Artifact is unavailable")
@@ -163,7 +163,7 @@ def run_topic_modeling_detachment(
         topic_data_provenance = {
             "type": "derivation",
             "operation": {
-                "kind": "topic_modeling_detachment",
+                "kind": "topic_modeling_data_block_creation",
                 "role": "topic_data",
             },
             "inputs": [
@@ -176,7 +176,7 @@ def run_topic_modeling_detachment(
         topic_meanings_provenance = {
             "type": "derivation",
             "operation": {
-                "kind": "topic_modeling_detachment",
+                "kind": "topic_modeling_data_block_creation",
                 "role": "topic_meanings",
             },
             "inputs": [

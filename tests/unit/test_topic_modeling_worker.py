@@ -396,7 +396,7 @@ def test__compute_topic_modeling_writes_parquet_and_meaning_lists(
     meanings = pl.read_parquet(tmp_path / "tm_test_topic_meanings.parquet")
 
     # The assignment parquet now carries the per-row soft distribution column
-    # used by the detach-time distribution filter.
+    # used by the Data Block Creation distribution filter.
     assert assignments.columns == [
         "__row_nr__",
         "TOPIC_topic",

@@ -438,19 +438,19 @@ class AnnotationRunAllWorkerResult(_StrictModel):
     message: str
 
 
-class TopicModelingDetachmentWorkerOutput(_StrictModel):
+class TopicModelingDataBlockCreationWorkerOutput(_StrictModel):
     source_node_id: uuid.UUID
     topic_data: _PublishedDataBlockWorkerData
     topic_meanings: _PublishedDataBlockWorkerData
 
 
-class TopicModelingDetachmentWorkerResult(_StrictModel):
+class TopicModelingDataBlockCreationWorkerResult(_StrictModel):
     state: Literal["successful"]
-    outputs: list[TopicModelingDetachmentWorkerOutput] = Field(min_length=1)
+    outputs: list[TopicModelingDataBlockCreationWorkerOutput] = Field(min_length=1)
     message: str
 
     @model_validator(mode="after")
-    def validate_outputs(self) -> "TopicModelingDetachmentWorkerResult":
+    def validate_outputs(self) -> "TopicModelingDataBlockCreationWorkerResult":
         source_ids = [item.source_node_id for item in self.outputs]
         output_ids = [
             data.data_block.id
@@ -458,30 +458,30 @@ class TopicModelingDetachmentWorkerResult(_StrictModel):
             for data in (output.topic_data, output.topic_meanings)
         ]
         if len(source_ids) != len(set(source_ids)):
-            raise ValueError("Topic Modeling detached sources must be unique")
+            raise ValueError("Topic Modeling Data Block Creation sources must be unique")
         if len(output_ids) != len(set(output_ids)):
             raise ValueError("Topic Modeling output Data Block IDs must be unique")
         return self
 
 
-class ResultPublicationWorkerOutput(_StrictModel):
+class DataBlockCreationWorkerOutput(_StrictModel):
     source_node_id: uuid.UUID
     data: _PublishedDataBlockWorkerData
 
 
-class ResultPublicationWorkerResult(_StrictModel):
+class DataBlockCreationWorkerResult(_StrictModel):
     state: Literal["successful"]
-    outputs: list[ResultPublicationWorkerOutput] = Field(min_length=1, max_length=2)
+    outputs: list[DataBlockCreationWorkerOutput] = Field(min_length=1, max_length=2)
     message: str
 
     @model_validator(mode="after")
-    def validate_outputs(self) -> "ResultPublicationWorkerResult":
+    def validate_outputs(self) -> "DataBlockCreationWorkerResult":
         source_ids = [item.source_node_id for item in self.outputs]
         output_ids = [item.data.data_block.id for item in self.outputs]
         if len(source_ids) != len(set(source_ids)):
-            raise ValueError("Result Publication sources must be unique")
+            raise ValueError("Data Block Creation sources must be unique")
         if len(output_ids) != len(set(output_ids)):
-            raise ValueError("Result Publication outputs must be unique")
+            raise ValueError("Data Block Creation outputs must be unique")
         return self
 
 
@@ -569,7 +569,7 @@ class AnnotationRunAllResult(AnnotationRunAllStoredResult):
     kind: Literal["annotation_run_all"] = "annotation_run_all"
 
 
-class TopicModelingDetachedOutput(_StrictModel):
+class TopicModelingDataBlockCreationOutput(_StrictModel):
     source_node_id: uuid.UUID
     topic_data_node_id: uuid.UUID
     topic_meanings_node_id: uuid.UUID
@@ -578,12 +578,12 @@ class TopicModelingDetachedOutput(_StrictModel):
     topic_meanings_record_count: int = Field(ge=0)
 
 
-class TopicModelingDetachmentStoredResult(_StrictModel):
+class TopicModelingDataBlockCreationStoredResult(_StrictModel):
     output_node_ids: list[uuid.UUID] = Field(min_length=2)
-    outputs: list[TopicModelingDetachedOutput] = Field(min_length=1)
+    outputs: list[TopicModelingDataBlockCreationOutput] = Field(min_length=1)
 
     @model_validator(mode="after")
-    def validate_output_identity(self) -> "TopicModelingDetachmentStoredResult":
+    def validate_output_identity(self) -> "TopicModelingDataBlockCreationStoredResult":
         expected = [
             node_id
             for output in self.outputs
@@ -599,41 +599,41 @@ class TopicModelingDetachmentStoredResult(_StrictModel):
         return self
 
 
-class TopicModelingDetachmentResult(TopicModelingDetachmentStoredResult):
-    kind: Literal["topic_modeling_detachment"] = "topic_modeling_detachment"
+class TopicModelingDataBlockCreationResult(TopicModelingDataBlockCreationStoredResult):
+    kind: Literal["topic_modeling_data_block_creation"] = "topic_modeling_data_block_creation"
 
 
-class ResultPublicationOutput(_StrictModel):
+class DataBlockCreationOutput(_StrictModel):
     source_node_id: uuid.UUID
     output_node_id: uuid.UUID
     output_columns: list[str]
     record_count: int = Field(ge=0)
 
 
-class ResultPublicationStoredResult(_StrictModel):
+class DataBlockCreationStoredResult(_StrictModel):
     output_node_ids: list[uuid.UUID] = Field(min_length=1, max_length=2)
-    outputs: list[ResultPublicationOutput] = Field(min_length=1, max_length=2)
+    outputs: list[DataBlockCreationOutput] = Field(min_length=1, max_length=2)
 
     @model_validator(mode="after")
-    def validate_output_identity(self) -> "ResultPublicationStoredResult":
+    def validate_output_identity(self) -> "DataBlockCreationStoredResult":
         expected = [output.output_node_id for output in self.outputs]
         if self.output_node_ids != expected:
-            raise ValueError("Result Publication output order is invalid")
+            raise ValueError("Data Block Creation output order is invalid")
         return self
 
 
-class ConcordanceMatchPublicationResult(ResultPublicationStoredResult):
-    kind: Literal["concordance_match_publication"] = "concordance_match_publication"
+class ConcordanceMatchDataBlockCreationResult(DataBlockCreationStoredResult):
+    kind: Literal["concordance_match_data_block_creation"] = "concordance_match_data_block_creation"
 
 
-class ConcordanceDocumentPublicationResult(ResultPublicationStoredResult):
-    kind: Literal["concordance_document_publication"] = (
-        "concordance_document_publication"
+class ConcordanceDocumentDataBlockCreationResult(DataBlockCreationStoredResult):
+    kind: Literal["concordance_document_data_block_creation"] = (
+        "concordance_document_data_block_creation"
     )
 
 
-class QuotationResultPublicationResult(ResultPublicationStoredResult):
-    kind: Literal["quotation_result_publication"] = "quotation_result_publication"
+class QuotationResultDataBlockCreationResult(DataBlockCreationStoredResult):
+    kind: Literal["quotation_result_data_block_creation"] = "quotation_result_data_block_creation"
 
 
 AnalysisResult = Annotated[
@@ -646,10 +646,10 @@ AnalysisResult = Annotated[
     | ConcordanceRunAllResult
     | QuotationRunAllResult
     | AnnotationRunAllResult
-    | TopicModelingDetachmentResult
-    | ConcordanceMatchPublicationResult
-    | ConcordanceDocumentPublicationResult
-    | QuotationResultPublicationResult,
+    | TopicModelingDataBlockCreationResult
+    | ConcordanceMatchDataBlockCreationResult
+    | ConcordanceDocumentDataBlockCreationResult
+    | QuotationResultDataBlockCreationResult,
     Field(discriminator="kind"),
 ]
 
@@ -663,10 +663,10 @@ ANALYSIS_WORKER_RESULT_MODELS: dict[str, type[BaseModel]] = {
     "annotation_run_all": AnnotationRunAllWorkerResult,
     "concordance_run_all": ConcordanceRunAllWorkerResult,
     "quotation_run_all": QuotationRunAllWorkerResult,
-    "topic_modeling_detachment": TopicModelingDetachmentWorkerResult,
-    "concordance_match_publication": ResultPublicationWorkerResult,
-    "concordance_document_publication": ResultPublicationWorkerResult,
-    "quotation_result_publication": ResultPublicationWorkerResult,
+    "topic_modeling_data_block_creation": TopicModelingDataBlockCreationWorkerResult,
+    "concordance_match_data_block_creation": DataBlockCreationWorkerResult,
+    "concordance_document_data_block_creation": DataBlockCreationWorkerResult,
+    "quotation_result_data_block_creation": DataBlockCreationWorkerResult,
 }
 
 ANALYSIS_STORED_RESULT_MODELS: dict[str, type[BaseModel]] = {
@@ -679,10 +679,10 @@ ANALYSIS_STORED_RESULT_MODELS: dict[str, type[BaseModel]] = {
     "annotation_run_all": AnnotationRunAllStoredResult,
     "concordance_run_all": ConcordanceRunAllStoredResult,
     "quotation_run_all": QuotationRunAllStoredResult,
-    "topic_modeling_detachment": TopicModelingDetachmentStoredResult,
-    "concordance_match_publication": ResultPublicationStoredResult,
-    "concordance_document_publication": ResultPublicationStoredResult,
-    "quotation_result_publication": ResultPublicationStoredResult,
+    "topic_modeling_data_block_creation": TopicModelingDataBlockCreationStoredResult,
+    "concordance_match_data_block_creation": DataBlockCreationStoredResult,
+    "concordance_document_data_block_creation": DataBlockCreationStoredResult,
+    "quotation_result_data_block_creation": DataBlockCreationStoredResult,
 }
 
 
@@ -717,8 +717,8 @@ __all__ = [
     "ConcordanceResult",
     "ConcordanceResultQuery",
     "ConcordanceDocumentProjectionQuery",
-    "ConcordanceDocumentPublicationResult",
-    "ConcordanceMatchPublicationResult",
+    "ConcordanceDocumentDataBlockCreationResult",
+    "ConcordanceMatchDataBlockCreationResult",
     "ConcordanceStoredResult",
     "CompleteTableIdentity",
     "ConcordanceRunAllResult",
@@ -727,9 +727,9 @@ __all__ = [
     "PublishedDataBlockMetadata",
     "PublishedDataBlockStoredResult",
     "PublishedDataBlockWorkerResult",
-    "ResultPublicationStoredResult",
-    "ResultPublicationOutput",
-    "ResultPublicationWorkerResult",
+    "DataBlockCreationStoredResult",
+    "DataBlockCreationOutput",
+    "DataBlockCreationWorkerResult",
     "PrivateArtifactPath",
     "ProjectedTableIdentity",
     "ConcordanceDensityResult",
@@ -754,8 +754,8 @@ __all__ = [
     "TopicModelingResultQuery",
     "TopicModelingStoredResult",
     "TopicModelingWorkerResult",
-    "TopicModelingDetachmentResult",
-    "TopicModelingDetachmentStoredResult",
-    "TopicModelingDetachmentWorkerResult",
+    "TopicModelingDataBlockCreationResult",
+    "TopicModelingDataBlockCreationStoredResult",
+    "TopicModelingDataBlockCreationWorkerResult",
     "stored_result_payload",
 ]

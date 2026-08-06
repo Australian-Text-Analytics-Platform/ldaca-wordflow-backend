@@ -42,7 +42,7 @@ class _SampledTopicCorpora:
 
     ``active_corpora_indices`` maps each sampled document back to its original
     node row so the per-node ``__row_nr__`` assignment parquet lines up with the
-    source frame after detaching. ``all_docs`` is the flattened (corpus 0 then
+    source frame during Data Block Creation. ``all_docs`` is the flattened (corpus 0 then
     corpus 1 ...) document list whose order matches the Rust
     ``documents[].doc_index``.
     """

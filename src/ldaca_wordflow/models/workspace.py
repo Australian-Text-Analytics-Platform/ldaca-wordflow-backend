@@ -175,7 +175,7 @@ class WorkspaceArchiveManifest(_StrictModel):
     """Only accepted client workspace archive manifest."""
 
     format: Literal["wordflow-materialized-workspace"]
-    version: Literal[13]
+    version: Literal[14]
     workspace: WorkspaceArchiveMetadata
     nodes: list[WorkspaceArchiveNode]
     tabs: list[Tab]

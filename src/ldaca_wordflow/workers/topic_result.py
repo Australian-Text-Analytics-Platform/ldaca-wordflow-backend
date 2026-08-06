@@ -66,7 +66,7 @@ def _distribution_by_doc_index(
 
     Mirrors :func:`_dominant_topics_by_doc_index` but extracts the soft
     ``topic_distribution`` (``[{topic_id, proportion}, ...]``) so it can be
-    written into the assignment parquet for the detach-time distribution filter.
+    written into the assignment parquet for the Data Block Creation distribution filter.
     Every valid document gets exactly ``[-1, *topic_ids]`` in that order.
 
     Called by:
@@ -227,7 +227,7 @@ def _build_topic_result_payload(
         ]
         payload_words = words[:payload_words_cap]
         payload_representative_words_by_topic.append(payload_words)
-        # Respect the requested display count so the detached Data Block matches
+        # Respect the requested display count so the created Data Block matches
         # the visible result. The default label uses the same narrow slice.
         meaning_words = payload_words[:max_representative_words]
         meaning_words_by_topic.append(meaning_words)

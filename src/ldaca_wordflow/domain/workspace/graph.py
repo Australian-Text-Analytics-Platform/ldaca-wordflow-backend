@@ -231,7 +231,7 @@ class Workspace:
 
         Used by:
         - Backend node-creation helpers (``_create_and_persist_child_node``,
-          clone, detach, and analysis result writers) because a freshly derived
+          clone and analysis Data Block Creation writers) because a freshly derived
           node should appear right under its mother node in the list view
           instead of being appended to the end.
         Why:

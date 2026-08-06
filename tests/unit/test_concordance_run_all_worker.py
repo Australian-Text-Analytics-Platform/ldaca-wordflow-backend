@@ -1,6 +1,6 @@
 import polars as pl
 from ldaca_wordflow.analysis.generated_columns import (
-    DETACHABLE_CONCORDANCE_COLUMNS,
+    CONCORDANCE_DATA_BLOCK_CREATION_COLUMNS,
 )
 from ldaca_wordflow.workers.concordance import run_concordance_run_all
 
@@ -43,7 +43,7 @@ def test_concordance_run_all_writes_complete_analysis_table_artifact(
     assert source["document_column"] == "document"
     assert source["metadata_columns"] == ["metadata"]
     assert source["analysis_columns"] == [
-        *DETACHABLE_CONCORDANCE_COLUMNS,
+        *CONCORDANCE_DATA_BLOCK_CREATION_COLUMNS,
         "CONC_extraction",
     ]
     assert source["table"]["table_id"] == "concordance-run-all"
@@ -66,7 +66,7 @@ def test_concordance_run_all_writes_complete_analysis_table_artifact(
     concordance_fields = {
         field.name for field in concordance_struct.fields
     }
-    assert set(DETACHABLE_CONCORDANCE_COLUMNS).issubset(concordance_fields)
+    assert set(CONCORDANCE_DATA_BLOCK_CREATION_COLUMNS).issubset(concordance_fields)
     assert "__wordflow_source_row_id" in restored_df.columns
     matches = restored_df.get_column("concordance").to_list()[0]
     assert len(matches) == 2
@@ -108,7 +108,7 @@ def test_concordance_run_all_retains_extraction_in_canonical_result(
     assert isinstance(concordance_struct, pl.Struct)
     fields = concordance_struct.fields
     assert [field.name for field in fields] == [
-        *DETACHABLE_CONCORDANCE_COLUMNS,
+        *CONCORDANCE_DATA_BLOCK_CREATION_COLUMNS,
         "CONC_extraction",
     ]
     # Sanity check the slice matches what Run All would have

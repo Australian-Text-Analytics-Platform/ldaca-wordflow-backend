@@ -1,4 +1,4 @@
-"""Concordance Match and Document Publication worker tests."""
+"""Concordance Match and Document Data Block Creation worker tests."""
 
 from __future__ import annotations
 
@@ -7,10 +7,10 @@ from pathlib import Path
 
 import polars as pl
 
-from ldaca_wordflow.workers.result_publication import run_result_publication
+from ldaca_wordflow.workers.result_data_block_creation import run_result_data_block_creation
 
 
-def test_document_publication_keeps_source_rows_and_joins_filtered_extractions(
+def test_document_data_block_creation_keeps_source_rows_and_joins_filtered_extractions(
     tmp_path: Path,
 ) -> None:
     source_id = uuid.uuid4()
@@ -46,10 +46,10 @@ def test_document_publication_keeps_source_rows_and_joins_filtered_extractions(
         }
     ).write_parquet(source_path)
 
-    result = run_result_publication(
+    result = run_result_data_block_creation(
         artifact_dir=str(output_dir),
         request_payload={
-            "kind": "concordance_document_publication",
+            "kind": "concordance_document_data_block_creation",
             "sources": [
                 {
                     "source_node_id": str(source_id),
@@ -77,7 +77,7 @@ def test_document_publication_keeps_source_rows_and_joins_filtered_extractions(
     ]
 
 
-def test_document_publication_allows_schema_only_output(tmp_path: Path) -> None:
+def test_document_data_block_creation_allows_schema_only_output(tmp_path: Path) -> None:
     source_id = uuid.uuid4()
     source_path = tmp_path / "source.parquet"
     output_dir = tmp_path / "output"
@@ -98,10 +98,10 @@ def test_document_publication_allows_schema_only_output(tmp_path: Path) -> None:
         }
     ).write_parquet(source_path)
 
-    result = run_result_publication(
+    result = run_result_data_block_creation(
         artifact_dir=str(output_dir),
         request_payload={
-            "kind": "concordance_document_publication",
+            "kind": "concordance_document_data_block_creation",
             "sources": [
                 {
                     "source_node_id": str(source_id),

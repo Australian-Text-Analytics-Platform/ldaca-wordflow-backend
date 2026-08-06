@@ -49,12 +49,12 @@ def topic_modeling_process(
     )
 
 
-def topic_modeling_detachment_process(
+def topic_modeling_data_block_creation_process(
     *, progress_queue: Queue[Any], **kwargs: Any
 ) -> dict[str, Any]:
-    from .topic_modeling import run_topic_modeling_detachment
+    from .topic_modeling import run_topic_modeling_data_block_creation
 
-    return run_topic_modeling_detachment(
+    return run_topic_modeling_data_block_creation(
         progress_callback=_progress_callback(progress_queue),
         **kwargs,
     )
@@ -101,12 +101,12 @@ def quotation_run_all_process(
     )
 
 
-def result_publication_process(
+def result_data_block_creation_process(
     *, progress_queue: Queue[Any], **kwargs: Any
 ) -> dict[str, Any]:
-    from .result_publication import run_result_publication
+    from .result_data_block_creation import run_result_data_block_creation
 
-    return run_result_publication(
+    return run_result_data_block_creation(
         progress_callback=_progress_callback(progress_queue),
         **kwargs,
     )

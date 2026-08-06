@@ -14,7 +14,7 @@ CONC_R1_COLUMN = "CONC_r1"
 CONC_L1_FREQ_COLUMN = "CONC_l1_freq"
 CONC_R1_FREQ_COLUMN = "CONC_r1_freq"
 # Per-hit raw-window stitch retained in the immutable nested Result. Match
-# Publication may select it directly; Document Publication normalizes and
+# Data Block Creation may select it directly; Document Data Block Creation normalizes and
 # joins the surviving values after applying the Review filter.
 CONC_EXTRACTION_COLUMN = "CONC_extraction"
 CONC_DOC_HITS_COLUMN = "CONC_doc_hits"
@@ -33,7 +33,7 @@ CORE_CONCORDANCE_COLUMNS = (
     CONC_R1_COLUMN,
 )
 
-DETACHABLE_CONCORDANCE_COLUMNS = CORE_CONCORDANCE_COLUMNS + (
+CONCORDANCE_DATA_BLOCK_CREATION_COLUMNS = CORE_CONCORDANCE_COLUMNS + (
     CONC_L1_FREQ_COLUMN,
     CONC_R1_FREQ_COLUMN,
 )
@@ -128,9 +128,9 @@ TOPIC_COLUMN = "TOPIC_topic"
 TOPIC_MEANING_COLUMN = "TOPIC_topic_meaning"
 # Internal-only column on the per-node assignment parquet holding each row's
 # soft topic distribution (list of {topic_id, proportion}). Used by the
-# detach-time distribution filter; never projected into a detached node.
+# Data Block Creation distribution filter; never projected into an output Data Block.
 TOPIC_DISTRIBUTION_COLUMN = "TOPIC_topic_distribution"
-# User-facing detached-node column names: the dominant ("top 1") topic id and
+# User-facing output column names: the dominant ("top 1") topic id and
 # the full soft distribution (rendered as a Topic Distribution proportion bar).
 TOPIC_TOP1_COLUMN = "TOPIC_top1"
 TOPIC_DISTRIBUTION_OUTPUT_COLUMN = "TOPIC_distribution"

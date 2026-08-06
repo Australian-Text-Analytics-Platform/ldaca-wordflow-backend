@@ -372,7 +372,7 @@ def _serialize_grouped_quotation_rows(
 
 
 def flatten_grouped_quotation_dataframe(result_df: pl.DataFrame) -> pl.DataFrame:
-    """Flatten grouped quotation rows into a detach/export friendly dataframe.
+    """Flatten grouped quotation rows for Data Block Creation or export.
 
 
 

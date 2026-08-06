@@ -56,7 +56,7 @@ from ..models.analysis_results import (
     ConcordanceDensityResult,
     PreviewReadyStoredResult,
     RunAllSourceTable,
-    ResultPublicationStoredResult,
+    DataBlockCreationStoredResult,
     SequentialStoredResult,
     PagedTableIdentity,
     ProjectedTableIdentity,
@@ -483,7 +483,7 @@ class AnalysisResultService:
                     stored,
                     ConcordanceRunAllStoredResult
                     | QuotationRunAllStoredResult
-                    | ResultPublicationStoredResult,
+                    | DataBlockCreationStoredResult,
                 ):
                     if query is not None:
                         raise AnalysisKindMismatchError(

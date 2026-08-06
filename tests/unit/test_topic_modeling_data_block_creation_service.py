@@ -17,16 +17,16 @@ from ldaca_wordflow.domain.workspace import (
     Node,
     SourceProvenance,
     TopicModelingAnalysisRequest,
-    TopicModelingDetachmentAnalysisRequest,
-    TopicModelingDetachmentDerivation,
+    TopicModelingDataBlockCreationAnalysisRequest,
+    TopicModelingDataBlockCreationDerivation,
     Tab,
     Workspace,
     node_reference,
 )
 from ldaca_wordflow.models.analysis_results import (
     PublishedDataBlockMetadata,
-    TopicModelingDetachmentWorkerOutput,
-    TopicModelingDetachmentWorkerResult,
+    TopicModelingDataBlockCreationWorkerOutput,
+    TopicModelingDataBlockCreationWorkerResult,
 )
 from ldaca_wordflow.services.analysis_artifacts import (
     _publish_topic_modeling_data_blocks,
@@ -35,13 +35,13 @@ from ldaca_wordflow.services.workspace_sql import _query_page
 from ldaca_wordflow.shared.topic_types import topic_distribution_dtype
 
 
-def _publication_fixture(
+def _data_block_creation_fixture(
     tmp_path: Path,
     *,
     invalid_meanings_count: bool = False,
-) -> tuple[Workspace, AnalysisRecord, TopicModelingDetachmentWorkerResult, uuid.UUID]:
+) -> tuple[Workspace, AnalysisRecord, TopicModelingDataBlockCreationWorkerResult, uuid.UUID]:
     source_id = uuid.uuid4()
-    workspace = Workspace(name="topic publication")
+    workspace = Workspace(name="topic Data Block Creation")
     workspace.add_node(
         Node(
             id=str(source_id),
@@ -73,10 +73,10 @@ def _publication_fixture(
         result_payload={"kind": "topic_modeling"},
     )
     workspace.add_analysis(root)
-    request = TopicModelingDetachmentAnalysisRequest(
+    request = TopicModelingDataBlockCreationAnalysisRequest(
         node_ids=[source_id],
         selected_columns={source_id: ["text"]},
-        new_node_names={source_id: "Detached topics"},
+        new_node_names={source_id: "Topic data"},
     )
     child = AnalysisRecord.create(
         request,
@@ -114,29 +114,29 @@ def _publication_fixture(
         schema={"TOPIC_topic": pl.Int64, "TOPIC_topic_meaning": pl.List(pl.String)},
     ).write_parquet(meanings_path)
     topic_provenance = DerivationProvenance(
-        operation=TopicModelingDetachmentDerivation(role="topic_data"),
+        operation=TopicModelingDataBlockCreationDerivation(role="topic_data"),
         inputs=[
             DerivationInput(role="source", value=node_reference(str(source_id)))
         ],
     )
     meanings_provenance = DerivationProvenance(
-        operation=TopicModelingDetachmentDerivation(role="topic_meanings"),
+        operation=TopicModelingDataBlockCreationDerivation(role="topic_meanings"),
         inputs=[
             DerivationInput(
                 role="source", value=node_reference(str(topic_data_id))
             )
         ],
     )
-    result = TopicModelingDetachmentWorkerResult(
+    result = TopicModelingDataBlockCreationWorkerResult(
         state="successful",
         message="done",
         outputs=[
-            TopicModelingDetachmentWorkerOutput(
+            TopicModelingDataBlockCreationWorkerOutput(
                 source_node_id=source_id,
                 topic_data={
                     "data_block": PublishedDataBlockMetadata(
                         id=topic_data_id,
-                        name="Detached topics",
+                        name="Topic data",
                         provenance=topic_provenance,
                         document="text",
                         color="#112233",
@@ -152,7 +152,7 @@ def _publication_fixture(
                 topic_meanings={
                     "data_block": PublishedDataBlockMetadata(
                         id=meanings_id,
-                        name="Detached topics topic meanings",
+                        name="Topic data topic meanings",
                         provenance=meanings_provenance,
                         color="#112233",
                     ),
@@ -166,10 +166,10 @@ def _publication_fixture(
     return workspace, child, result, source_id
 
 
-def test_topic_modeling_publication_preserves_semantic_pair_and_parent_order(
+def test_topic_modeling_data_block_creation_preserves_semantic_pair_and_parent_order(
     tmp_path: Path,
 ) -> None:
-    workspace, child, result, source_id = _publication_fixture(tmp_path)
+    workspace, child, result, source_id = _data_block_creation_fixture(tmp_path)
 
     stored = _publish_topic_modeling_data_blocks(
         tmp_path / "analyses" / str(child.id),
@@ -208,10 +208,10 @@ def test_topic_modeling_publication_preserves_semantic_pair_and_parent_order(
     assert ipc_dtype.ext_name() == "org.ldaca.wordflow.topic_distribution.v1"
 
 
-def test_topic_modeling_publication_rolls_back_every_output_on_failure(
+def test_topic_modeling_data_block_creation_rolls_back_every_output_on_failure(
     tmp_path: Path,
 ) -> None:
-    workspace, child, result, source_id = _publication_fixture(
+    workspace, child, result, source_id = _data_block_creation_fixture(
         tmp_path,
         invalid_meanings_count=True,
     )

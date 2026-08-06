@@ -18,9 +18,9 @@ from ldaca_wordflow.domain.workspace import (
     AnnotationAnalysisRequest,
     AnnotationAnalysisSubmission,
     ConcordanceAnalysisRequest,
-    ConcordanceDocumentPublicationAnalysisRequest,
-    ConcordanceDocumentPublicationSource,
-    ConcordanceMatchPublicationAnalysisRequest,
+    ConcordanceDocumentDataBlockCreationAnalysisRequest,
+    ConcordanceDocumentDataBlockCreationSource,
+    ConcordanceMatchDataBlockCreationAnalysisRequest,
     ConcordanceRunAllAnalysisRequest,
     Failure,
     Progress,
@@ -28,10 +28,10 @@ from ldaca_wordflow.domain.workspace import (
     TokenFrequencyAnalysisRequest,
     ValidAnalysisIntegrity,
     Workspace,
-    TopicModelingDetachmentAnalysisRequest,
+    TopicModelingDataBlockCreationAnalysisRequest,
     QuotationAnalysisRequest,
-    QuotationResultPublicationAnalysisRequest,
-    ResultPublicationSource,
+    QuotationResultDataBlockCreationAnalysisRequest,
+    DataBlockCreationSource,
     persisted_submission,
     public_analysis,
 )
@@ -73,6 +73,27 @@ def test_analysis_request_union_is_strict_and_discriminated() -> None:
     with pytest.raises(ValidationError):
         TypeAdapter(AnalysisRequest).validate_python(
             {**request.model_dump(mode="json"), "unknown": True}
+        )
+
+
+def test_data_block_creation_kind_strictly_replaces_result_data_block_creation() -> None:
+    source_id = uuid.uuid4()
+    payload = {
+        "kind": "concordance_match_data_block_creation",
+        "sources": [
+            {
+                "source_node_id": str(source_id),
+                "selected_columns": ["text", "CONC_matched_text"],
+                "new_node_name": "Concordance matches",
+            }
+        ],
+    }
+
+    restored = TypeAdapter(AnalysisRequest).validate_python(payload)
+    assert restored.kind == "concordance_match_data_block_creation"
+    with pytest.raises(ValidationError):
+        TypeAdapter(AnalysisRequest).validate_python(
+            {**payload, "kind": "concordance_match_publication"}
         )
 
 
@@ -119,10 +140,10 @@ def test_tokenizer_mappings_follow_each_analysis_mode_contract() -> None:
     assert set(tokens_request.node_tokenizer_models) == {first, second}
 
 
-def test_topic_modeling_detachment_request_preserves_ordered_sources() -> None:
+def test_topic_modeling_data_block_creation_request_preserves_ordered_sources() -> None:
     first = uuid.uuid4()
     second = uuid.uuid4()
-    request = TopicModelingDetachmentAnalysisRequest(
+    request = TopicModelingDataBlockCreationAnalysisRequest(
         node_ids=[first, second],
         selected_columns={first: ["text"], second: []},
         new_node_names={first: "First topics", second: "Second topics"},
@@ -141,15 +162,15 @@ def test_topic_modeling_detachment_request_preserves_ordered_sources() -> None:
     assert restored.selected_columns[second] == []
 
     with pytest.raises(ValidationError, match="unique"):
-        TopicModelingDetachmentAnalysisRequest(
+        TopicModelingDataBlockCreationAnalysisRequest(
             node_ids=[first, first],
             selected_columns={first: ["text"]},
             new_node_names={first: "Topics"},
         )
 
-    document_publication = ConcordanceDocumentPublicationAnalysisRequest(
+    document_creation = ConcordanceDocumentDataBlockCreationAnalysisRequest(
         sources=[
-            ConcordanceDocumentPublicationSource(
+            ConcordanceDocumentDataBlockCreationSource(
                 source_node_id=first,
                 selected_metadata_columns=["author"],
                 new_node_name="First documents",
@@ -160,10 +181,10 @@ def test_topic_modeling_detachment_request_preserves_ordered_sources() -> None:
         ]
     )
     assert TypeAdapter(AnalysisRequest).validate_python(
-        document_publication.model_dump(mode="json")
-    ) == document_publication
+        document_creation.model_dump(mode="json")
+    ) == document_creation
     with pytest.raises(ValidationError, match="align"):
-        TopicModelingDetachmentAnalysisRequest(
+        TopicModelingDataBlockCreationAnalysisRequest(
             node_ids=[first, second],
             selected_columns={first: ["text"]},
             new_node_names={first: "Topics", second: "Other topics"},
@@ -176,7 +197,7 @@ def test_topic_modeling_detachment_request_preserves_ordered_sources() -> None:
         )
 
 
-def test_run_all_and_result_publication_have_distinct_strict_requests() -> None:
+def test_run_all_and_data_block_creation_have_distinct_strict_requests() -> None:
     first = uuid.uuid4()
     second = uuid.uuid4()
     source = ConcordanceAnalysisRequest(
@@ -197,14 +218,14 @@ def test_run_all_and_result_publication_have_distinct_strict_requests() -> None:
             }
         )
 
-    publication = ConcordanceMatchPublicationAnalysisRequest(
+    creation = ConcordanceMatchDataBlockCreationAnalysisRequest(
         sources=[
-            ResultPublicationSource(
+            DataBlockCreationSource(
                 source_node_id=first,
                 selected_columns=["text", "CONC_matched_text"],
                 new_node_name="First concordance",
             ),
-            ResultPublicationSource(
+            DataBlockCreationSource(
                 source_node_id=second,
                 selected_columns=["body"],
                 new_node_name="Second concordance",
@@ -212,17 +233,17 @@ def test_run_all_and_result_publication_have_distinct_strict_requests() -> None:
         ]
     )
     restored = TypeAdapter(AnalysisRequest).validate_python(
-        publication.model_dump(mode="json")
+        creation.model_dump(mode="json")
     )
-    assert restored == publication
+    assert restored == creation
     with pytest.raises(ValidationError, match="unique"):
-        ConcordanceMatchPublicationAnalysisRequest(
-            sources=[publication.sources[0], publication.sources[0]]
+        ConcordanceMatchDataBlockCreationAnalysisRequest(
+            sources=[creation.sources[0], creation.sources[0]]
         )
 
     quotation_source = QuotationAnalysisRequest(node_id=first, column="text")
-    quotation_run_all = QuotationResultPublicationAnalysisRequest(
-        source=ResultPublicationSource(
+    quotation_run_all = QuotationResultDataBlockCreationAnalysisRequest(
+        source=DataBlockCreationSource(
             source_node_id=quotation_source.node_id,
             selected_columns=["text", "QUOTE_quote"],
             new_node_name="Quotations",

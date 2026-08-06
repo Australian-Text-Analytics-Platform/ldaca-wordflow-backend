@@ -31,7 +31,7 @@ from ..analysis.generated_columns import (
     CONC_RIGHT_CONTEXT_COLUMN,
     CONC_START_IDX_COLUMN,
     CORE_CONCORDANCE_COLUMNS,
-    DETACHABLE_CONCORDANCE_COLUMNS,
+    CONCORDANCE_DATA_BLOCK_CREATION_COLUMNS,
     concordance_extraction_expr,
     concordance_struct_projection,
 )
@@ -509,12 +509,12 @@ def run_concordance_run_all(
             for column in output_columns
             if column
             not in {
-                *DETACHABLE_CONCORDANCE_COLUMNS,
+                *CONCORDANCE_DATA_BLOCK_CREATION_COLUMNS,
                 CONC_EXTRACTION_COLUMN,
             }
         ]
         analysis_columns = [
-            *DETACHABLE_CONCORDANCE_COLUMNS,
+            *CONCORDANCE_DATA_BLOCK_CREATION_COLUMNS,
             CONC_EXTRACTION_COLUMN,
         ]
         result = result.group_by(SOURCE_ROW_ID_COLUMN, maintain_order=True).agg(
@@ -555,7 +555,7 @@ def run_concordance_run_all(
                     not in {
                         SOURCE_ROW_ID_COLUMN,
                         document_column,
-                        *DETACHABLE_CONCORDANCE_COLUMNS,
+                        *CONCORDANCE_DATA_BLOCK_CREATION_COLUMNS,
                         CONC_EXTRACTION_COLUMN,
                     }
                 ],
