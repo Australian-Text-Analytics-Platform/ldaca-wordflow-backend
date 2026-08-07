@@ -248,7 +248,7 @@ def test_workspace_delete_is_empty_204_and_removed_action_routes_stay_absent(
         assert client.get(f"/api/workspaces/{workspace_id}/graph").status_code == 404
 
 
-def test_corrupt_workspace_is_omitted_but_directly_reported_and_deletable(
+def test_corrupt_workspace_is_catalogued_but_directly_reported_and_deletable(
     tmp_path: Path,
 ) -> None:
     with _client(tmp_path) as client:
@@ -267,7 +267,16 @@ def test_corrupt_workspace_is_omitted_but_directly_reported_and_deletable(
 
         listed = client.get("/api/workspaces")
         assert listed.status_code == 200
-        assert listed.json() == []
+        assert listed.json() == [
+            {
+                "availability": "unavailable",
+                "id": workspace_id,
+                "reason": "corrupt_snapshot",
+                "message": "Workspace data is corrupt.",
+                "stored_schema_version": None,
+                "supported_schema_version": None,
+            }
+        ]
 
         direct = client.get(f"/api/workspaces/{workspace_id}")
         assert direct.status_code == 500

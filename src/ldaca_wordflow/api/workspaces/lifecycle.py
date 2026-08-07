@@ -9,13 +9,20 @@ from fastapi import APIRouter, Depends, Request, Response, status
 
 from ...models.session import SessionUser
 from ...models.workspace import (
+    AvailableWorkspaceListItem,
+    UnavailableWorkspaceListItem,
     WorkspaceCreateRequest,
+    WorkspaceListItem,
     WorkspaceNodeReorderRequest,
     WorkspaceResource,
     WorkspaceUpdateRequest,
 )
 from ...runtime import Runtime, get_runtime, get_workspace_service
-from ...services.workspace import WorkspaceRecord, WorkspaceService
+from ...services.workspace import (
+    UnavailableWorkspaceRecord,
+    WorkspaceRecord,
+    WorkspaceService,
+)
 from ..responses import api_errors, route_path, workspace_etag
 from ..security import get_current_user
 
@@ -30,15 +37,21 @@ def _resource(record: WorkspaceRecord) -> WorkspaceResource:
     return WorkspaceResource.model_validate(asdict(record))
 
 
-@router.get("", response_model=list[WorkspaceResource])
+def _list_item(record: WorkspaceRecord | UnavailableWorkspaceRecord) -> WorkspaceListItem:
+    if isinstance(record, WorkspaceRecord):
+        return AvailableWorkspaceListItem.model_validate(asdict(record))
+    return UnavailableWorkspaceListItem.model_validate(asdict(record))
+
+
+@router.get("", response_model=list[WorkspaceListItem])
 async def list_workspaces(
     current_user: SessionUser = Depends(get_current_user),
     workspace_service: WorkspaceService = Depends(get_workspace_service),
-) -> list[WorkspaceResource]:
+) -> list[WorkspaceListItem]:
     """List fresh persisted metadata without opening any Workspace."""
 
     records = await workspace_service.list_workspaces(current_user.id)
-    return [_resource(record) for record in records]
+    return [_list_item(record) for record in records]
 
 
 @router.post(

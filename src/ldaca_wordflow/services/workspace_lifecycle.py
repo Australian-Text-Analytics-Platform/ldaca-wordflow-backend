@@ -47,7 +47,11 @@ class WorkspaceLifecycleService:
             await self._workspaces.get_workspace(user_id, workspace_id)
             siblings = await self._workspaces.list_workspaces(user_id)
             for sibling in siblings:
-                if sibling.id == workspace_id or sibling.runtime_state != "open":
+                if (
+                    not isinstance(sibling, WorkspaceRecord)
+                    or sibling.id == workspace_id
+                    or sibling.runtime_state != "open"
+                ):
                     continue
                 await self._workspaces.request_close(
                     user_id,

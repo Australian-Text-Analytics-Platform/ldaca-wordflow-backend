@@ -24,7 +24,11 @@ from ldaca_wordflow.infrastructure.storage.workspace_access import (
     write_workspace_owner,
 )
 from ldaca_wordflow.infrastructure.storage.workspace_store import WorkspaceStore
-from ldaca_wordflow.services.workspace import WorkspaceService
+from ldaca_wordflow.services.workspace import (
+    UnavailableWorkspaceRecord,
+    WorkspaceRecord,
+    WorkspaceService,
+)
 from ldaca_wordflow.services.events import EventHub
 from ldaca_wordflow.infrastructure.storage.layout import (
     user_root,
@@ -113,7 +117,7 @@ async def test_workspace_discovery_revalidates_ownership_without_a_catalogue_cac
 
 
 @pytest.mark.anyio
-async def test_corrupt_owned_workspace_isolated_from_listing_and_remains_deletable(
+async def test_corrupt_owned_workspace_is_exposed_and_remains_deletable(
     tmp_path: Path,
 ) -> None:
     service = _service(tmp_path)
@@ -124,9 +128,14 @@ async def test_corrupt_owned_workspace_isolated_from_listing_and_remains_deletab
     write_workspace_owner(corrupt, "owner")
     (corrupt / "workspace.json").write_text("not json", encoding="utf-8")
 
-    assert [record.id for record in await service.list_workspaces("owner")] == [
-        valid.id
-    ]
+    records = await service.list_workspaces("owner")
+    assert [record.id for record in records] == [valid.id, corrupt_id]
+    assert isinstance(records[0], WorkspaceRecord)
+    assert records[1] == UnavailableWorkspaceRecord(
+        id=corrupt_id,
+        reason="corrupt_snapshot",
+        message="Workspace data is corrupt.",
+    )
     with pytest.raises(WorkspaceCorruptError) as exc_info:
         await service.get_workspace("owner", corrupt_id)
     assert exc_info.value.details == {"workspace_id": corrupt_id}
@@ -134,6 +143,65 @@ async def test_corrupt_owned_workspace_isolated_from_listing_and_remains_deletab
     async with service.deletion_context("owner", corrupt_id):
         pass
     assert not corrupt.exists()
+
+
+@pytest.mark.anyio
+async def test_incompatible_workspace_versions_are_distinct_catalogue_entries(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    valid = await service.create_workspace("owner", "Valid")
+    incompatible_ids = [
+        _publish_workspace(service, owner_id="owner", name=f"Schema {version}")
+        for version in (13, 14)
+    ]
+    for workspace_id, version in zip(incompatible_ids, (13, 14), strict=True):
+        snapshot_path = workspaces_root(service.settings) / workspace_id / "workspace.json"
+        payload = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        payload["workspace_metadata"]["version"] = version
+        snapshot_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    records = await service.list_workspaces("owner")
+
+    assert isinstance(records[0], WorkspaceRecord)
+    assert records[0].id == valid.id
+    unavailable = records[1:]
+    assert [record.id for record in unavailable] == sorted(incompatible_ids)
+    assert {
+        (record.stored_schema_version, record.supported_schema_version)
+        for record in unavailable
+        if isinstance(record, UnavailableWorkspaceRecord)
+    } == {(13, 15), (14, 15)}
+    assert all(
+        isinstance(record, UnavailableWorkspaceRecord)
+        and record.reason == "incompatible_format"
+        for record in unavailable
+    )
+
+
+@pytest.mark.anyio
+async def test_over_limit_workspace_has_a_distinct_catalogue_reason(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    created = await service.create_workspace("owner", "Over limit")
+    await service.open_workspace("owner", created.id)
+    async with service.mutation_context("owner", created.id) as lease:
+        lease.workspace.add_node(
+            Node(data=pl.DataFrame({"value": [1]}).lazy(), name="First")
+        )
+        lease.workspace.add_node(
+            Node(data=pl.DataFrame({"value": [2]}).lazy(), name="Second")
+        )
+    service._store = WorkspaceStore(max_nodes=1, max_snapshot_bytes=8 * 1024 * 1024)
+
+    assert await service.list_workspaces("owner") == [
+        UnavailableWorkspaceRecord(
+            id=created.id,
+            reason="configured_limit",
+            message="Workspace exceeds the configured limits.",
+        )
+    ]
 
 
 @pytest.mark.anyio

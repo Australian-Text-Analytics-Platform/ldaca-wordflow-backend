@@ -194,6 +194,19 @@ def test_storage_policy_is_a_strict_discriminated_resource() -> None:
     assert resource["discriminator"]["propertyName"] == "policy"
 
 
+def test_workspace_catalogue_is_a_discriminated_union() -> None:
+    schema = app.openapi()
+    collection = schema["paths"]["/api/workspaces"]["get"]["responses"]["200"]
+    item = collection["content"]["application/json"]["schema"]["items"]
+
+    assert item["discriminator"]["propertyName"] == "availability"
+    assert item["discriminator"]["mapping"] == {
+        "available": "#/components/schemas/AvailableWorkspaceListItem",
+        "unavailable": "#/components/schemas/UnavailableWorkspaceListItem",
+    }
+    assert len(item["oneOf"]) == 2
+
+
 def test_tab_resources_are_exact_and_the_collection_is_unpaginated() -> None:
     schema = app.openapi()
     tab = schema["components"]["schemas"]["Tab"]

@@ -35,6 +35,7 @@ from ..infrastructure.storage.workspace_store import (
     TabSnapshotInvalidError,
     WorkspaceCapacityError,
     WorkspaceRevisionConflictError,
+    WorkspaceSchemaVersionError,
     WorkspaceSerializationError,
     WorkspaceSnapshotInfo,
     WorkspaceSnapshotInvalidError,
@@ -103,6 +104,24 @@ class WorkspaceRecord:
     leaf_nodes: int
     revision: int
     runtime_state: Literal["closed", "open", "closing"]
+
+
+@dataclass(frozen=True, slots=True)
+class UnavailableWorkspaceRecord:
+    """Safely attributable catalogue entry that cannot currently be opened."""
+
+    id: str
+    reason: Literal[
+        "incompatible_format",
+        "corrupt_snapshot",
+        "configured_limit",
+    ]
+    message: str
+    stored_schema_version: int | None = None
+    supported_schema_version: int | None = None
+
+
+WorkspaceListRecord = WorkspaceRecord | UnavailableWorkspaceRecord
 
 
 @dataclass(slots=True)
@@ -468,10 +487,11 @@ class WorkspaceService:
             paths.append((owner_id, candidate))
         return paths
 
-    def _scan_records_sync(self, user_id: str) -> list[WorkspaceRecord]:
-        """Materialize valid owned records from one isolated catalogue scan."""
+    def _scan_records_sync(self, user_id: str) -> list[WorkspaceListRecord]:
+        """Materialize available and safely attributable unavailable entries."""
 
         records: list[WorkspaceRecord] = []
+        unavailable: list[UnavailableWorkspaceRecord] = []
         for owner_id, candidate in self._scan_owned_paths_sync():
             if owner_id != user_id:
                 continue
@@ -481,12 +501,57 @@ class WorkspaceService:
                     raise WorkspaceSnapshotInvalidError(
                         "Workspace directory and snapshot IDs differ"
                     )
-            except WorkspaceSnapshotInvalidError, WorkspaceCapacityError:
-                logger.error(
-                    "Ignoring corrupt owned Workspace workspace_id=%s owner_id=%s",
+            except WorkspaceSchemaVersionError as exc:
+                logger.info(
+                    "Catalogue found incompatible owned Workspace "
+                    "workspace_id=%s owner_id=%s stored_schema=%s supported_schema=%s",
+                    candidate.name,
+                    owner_id,
+                    exc.stored_version,
+                    exc.supported_version,
+                )
+                unavailable.append(
+                    UnavailableWorkspaceRecord(
+                        id=candidate.name,
+                        reason="incompatible_format",
+                        message=(
+                            f"Workspace format {exc.stored_version} is incompatible "
+                            f"with supported format {exc.supported_version}."
+                        ),
+                        stored_schema_version=exc.stored_version,
+                        supported_schema_version=exc.supported_version,
+                    )
+                )
+                continue
+            except WorkspaceCapacityError:
+                logger.warning(
+                    "Catalogue found over-limit owned Workspace "
+                    "workspace_id=%s owner_id=%s",
                     candidate.name,
                     owner_id,
                     exc_info=True,
+                )
+                unavailable.append(
+                    UnavailableWorkspaceRecord(
+                        id=candidate.name,
+                        reason="configured_limit",
+                        message="Workspace exceeds the configured limits.",
+                    )
+                )
+                continue
+            except WorkspaceSnapshotInvalidError:
+                logger.error(
+                    "Catalogue found corrupt owned Workspace workspace_id=%s owner_id=%s",
+                    candidate.name,
+                    owner_id,
+                    exc_info=True,
+                )
+                unavailable.append(
+                    UnavailableWorkspaceRecord(
+                        id=candidate.name,
+                        reason="corrupt_snapshot",
+                        message="Workspace data is corrupt.",
+                    )
                 )
                 continue
             records.append(
@@ -505,7 +570,8 @@ class WorkspaceService:
             )
         records.sort(key=lambda record: record.id)
         records.sort(key=lambda record: record.modified_at or "", reverse=True)
-        return records
+        unavailable.sort(key=lambda record: record.id)
+        return [*records, *unavailable]
 
     def _resolve_owned_path_sync(
         self,
@@ -1436,23 +1502,27 @@ class WorkspaceService:
             snapshot = await self._run_io(self._inspect_sync, path)
             return self._record_from_snapshot(snapshot, self._runtime_state(slot))
 
-    async def list_workspaces(self, user_id: str) -> list[WorkspaceRecord]:
+    async def list_workspaces(self, user_id: str) -> list[WorkspaceListRecord]:
         """Freshly scan metadata and overlay only transient runtime state."""
 
         records = await self._run_io(self._scan_records_sync, user_id)
         states = await self._runtime_states()
         return [
-            WorkspaceRecord(
-                id=record.id,
-                name=record.name,
-                description=record.description,
-                created_at=record.created_at,
-                modified_at=record.modified_at,
-                total_nodes=record.total_nodes,
-                root_nodes=record.root_nodes,
-                leaf_nodes=record.leaf_nodes,
-                revision=record.revision,
-                runtime_state=states.get(record.id, "closed"),
+            (
+                WorkspaceRecord(
+                    id=record.id,
+                    name=record.name,
+                    description=record.description,
+                    created_at=record.created_at,
+                    modified_at=record.modified_at,
+                    total_nodes=record.total_nodes,
+                    root_nodes=record.root_nodes,
+                    leaf_nodes=record.leaf_nodes,
+                    revision=record.revision,
+                    runtime_state=states.get(record.id, "closed"),
+                )
+                if isinstance(record, WorkspaceRecord)
+                else record
             )
             for record in records
         ]

@@ -27,6 +27,7 @@ from ldaca_wordflow.domain.workspace import (
 from ldaca_wordflow.domain.workspace.provenance import CloneDerivation
 from ldaca_wordflow.infrastructure.storage.workspace_store import (
     WorkspaceCapacityError,
+    WorkspaceSchemaVersionError,
     WorkspaceSnapshotInvalidError,
     WorkspaceStore,
 )
@@ -124,8 +125,10 @@ def test_native_round_trip_preserves_tokenizer_and_rejects_previous_schema(
         path,
         lambda payload: payload["workspace_metadata"].update({"version": 14}),
     )
-    with pytest.raises(WorkspaceSnapshotInvalidError):
+    with pytest.raises(WorkspaceSchemaVersionError) as exc_info:
         store.load(path)
+    assert exc_info.value.stored_version == 14
+    assert exc_info.value.supported_version == 15
 
 
 @pytest.mark.parametrize("invalid_graph", ["missing", "self", "cycle", "duplicate"])

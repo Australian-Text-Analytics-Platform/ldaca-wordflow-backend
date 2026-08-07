@@ -8,7 +8,7 @@ import pytest
 
 from ldaca_wordflow.infrastructure.storage.workspace_store import WorkspaceStore
 from ldaca_wordflow.services.events import EventHub
-from ldaca_wordflow.services.workspace import WorkspaceService
+from ldaca_wordflow.services.workspace import WorkspaceRecord, WorkspaceService
 from ldaca_wordflow.services.workspace_lifecycle import WorkspaceLifecycleService
 from ldaca_wordflow.settings import Settings
 from ldaca_wordflow.shared.errors import WorkspaceNotFoundError
@@ -149,7 +149,11 @@ async def test_concurrent_open_requests_never_leave_two_open_workspaces(
         task_group.start_soon(lifecycle.open, "owner", second.id)
 
     records = await workspaces.list_workspaces("owner")
-    assert sum(record.runtime_state == "open" for record in records) == 1
+    assert sum(
+        record.runtime_state == "open"
+        for record in records
+        if isinstance(record, WorkspaceRecord)
+    ) == 1
 
 
 async def test_open_lifecycle_is_independent_between_users(tmp_path: Path) -> None:

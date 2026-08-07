@@ -63,6 +63,18 @@ class WorkspaceSnapshotInvalidError(WorkspaceStoreError):
     """The persisted workspace snapshot is absent, corrupt, or unsupported."""
 
 
+class WorkspaceSchemaVersionError(WorkspaceSnapshotInvalidError):
+    """The persisted native Workspace schema is not supported by this build."""
+
+    def __init__(self, stored_version: int, supported_version: int) -> None:
+        super().__init__(
+            "Workspace schema version "
+            f"{stored_version} is incompatible with supported version {supported_version}"
+        )
+        self.stored_version = stored_version
+        self.supported_version = supported_version
+
+
 class TabSnapshotInvalidError(WorkspaceStoreError):
     """One Workspace-referenced Tab record is missing or invalid."""
 
@@ -796,23 +808,27 @@ def _read_workspace_metadata(path: str | Path) -> dict[str, Any]:
         payload = json.load(f)
     if not isinstance(payload, dict):
         raise ValueError("Workspace metadata must be an object")
+    workspace_metadata = payload.get("workspace_metadata")
+    if not isinstance(workspace_metadata, dict):
+        raise ValueError("Workspace metadata envelope is invalid")
+    stored_version = workspace_metadata.get("version")
+    if type(stored_version) is int and stored_version != WORKSPACE_SCHEMA_VERSION:
+        raise WorkspaceSchemaVersionError(stored_version, WORKSPACE_SCHEMA_VERSION)
     if set(payload) != _WORKSPACE_ENVELOPE_FIELDS:
         raise ValueError("Workspace metadata envelope fields are invalid")
-    workspace_metadata = payload.get("workspace_metadata")
     nodes = payload.get("nodes")
     tabs = payload.get("tabs")
     analyses = payload.get("analyses")
     if (
-        not isinstance(workspace_metadata, dict)
-        or not isinstance(nodes, list)
+        not isinstance(nodes, list)
         or not isinstance(tabs, list)
         or not isinstance(analyses, list)
     ):
         raise ValueError("Workspace metadata envelope is invalid")
     if set(workspace_metadata) != _WORKSPACE_METADATA_FIELDS:
         raise ValueError("Workspace metadata fields are invalid")
-    if workspace_metadata.get("version") != WORKSPACE_SCHEMA_VERSION:
-        raise ValueError("Unsupported workspace schema version")
+    if stored_version != WORKSPACE_SCHEMA_VERSION:
+        raise ValueError("Workspace schema version is invalid")
     if not isinstance(workspace_metadata.get("id"), str) or not isinstance(
         workspace_metadata.get("name"), str
     ):

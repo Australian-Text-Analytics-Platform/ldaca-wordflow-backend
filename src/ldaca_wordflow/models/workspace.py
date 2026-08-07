@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import (
     AwareDatetime,
@@ -70,6 +70,43 @@ class WorkspaceResource(_StrictModel):
     runtime_state: Literal["closed", "open", "closing"]
 
 
+class AvailableWorkspaceListItem(WorkspaceResource):
+    """Available Workspace entry returned by catalogue discovery."""
+
+    availability: Literal["available"] = "available"
+
+
+class UnavailableWorkspaceListItem(_StrictModel):
+    """ID-only catalogue entry for an owned Workspace that cannot open."""
+
+    availability: Literal["unavailable"] = "unavailable"
+    id: uuid.UUID
+    reason: Literal[
+        "incompatible_format",
+        "corrupt_snapshot",
+        "configured_limit",
+    ]
+    message: str
+    stored_schema_version: int | None = None
+    supported_schema_version: int | None = None
+
+    @model_validator(mode="after")
+    def validate_schema_versions(self) -> "UnavailableWorkspaceListItem":
+        versions = (self.stored_schema_version, self.supported_schema_version)
+        if self.reason == "incompatible_format":
+            if any(version is None for version in versions):
+                raise ValueError("Incompatible Workspace formats require both versions")
+        elif any(version is not None for version in versions):
+            raise ValueError("Only incompatible Workspace formats expose versions")
+        return self
+
+
+WorkspaceListItem = Annotated[
+    AvailableWorkspaceListItem | UnavailableWorkspaceListItem,
+    Field(discriminator="availability"),
+]
+
+
 class WorkspaceNodeReorderRequest(_StrictModel):
     """Complete desired workspace node order."""
 
@@ -99,7 +136,7 @@ class WorkspaceUpdateRequest(_StrictModel):
 
 
 class WorkspaceArchiveMetadata(_StrictModel):
-    """Safe portable workspace metadata stored in archive manifest version 10."""
+    """Safe portable workspace metadata stored in archive manifest version 14."""
 
     id: uuid.UUID
     name: str = Field(min_length=1, max_length=500)
