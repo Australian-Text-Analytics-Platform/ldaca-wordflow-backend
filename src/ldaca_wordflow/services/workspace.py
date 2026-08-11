@@ -1169,6 +1169,34 @@ class WorkspaceService:
                     request.annotation_correction_columns
                 )
                 changed = True
+            if request.stop_words is not None:
+                if tab.kind not in {
+                    AnalysisKind.TOKEN_FREQUENCY,
+                    AnalysisKind.TOPIC_MODELING,
+                }:
+                    raise InvalidInputError(
+                        "Stop words belong only to Token Frequency and Topic Modelling Tabs"
+                    )
+                if tab.stop_words != request.stop_words:
+                    tab.stop_words = request.stop_words
+                    changed = True
+            if "topic_modeling_words_per_topic" in request.model_fields_set:
+                if tab.kind is not AnalysisKind.TOPIC_MODELING:
+                    raise InvalidInputError(
+                        "Words per topic belongs only to Topic Modelling Tabs"
+                    )
+                if request.topic_modeling_words_per_topic is None:
+                    raise InvalidInputError(
+                        "Topic Modelling Tabs require a word display count"
+                    )
+                if (
+                    tab.topic_modeling_words_per_topic
+                    != request.topic_modeling_words_per_topic
+                ):
+                    tab.topic_modeling_words_per_topic = (
+                        request.topic_modeling_words_per_topic
+                    )
+                    changed = True
             if changed:
                 tab.modified_at = datetime.now(UTC)
                 tab.revision += 1

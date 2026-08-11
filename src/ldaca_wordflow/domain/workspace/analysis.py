@@ -101,7 +101,6 @@ class TokenFrequencyAnalysisRequest(_StrictModel):
     kind: Literal["token_frequency"] = "token_frequency"
     node_ids: list[uuid.UUID] = Field(min_length=1, max_length=2)
     node_columns: dict[uuid.UUID, NonEmptyText]
-    stop_words: list[str] = Field(default_factory=list)
     token_limit: int = Field(default=25, ge=1, le=5000)
     node_tokenizer_models: dict[uuid.UUID, NonEmptyText]
 
@@ -125,7 +124,6 @@ class TopicModelingAnalysisRequest(_StrictModel):
     node_columns: dict[uuid.UUID, NonEmptyText]
     min_topic_size: int = Field(default=10, ge=2)
     random_seed: int = 0
-    representative_words_count: int = Field(default=5, ge=1, le=100)
     sample_fractions: list[float | None] | None = None
     segmentation_method: TopicSegmentationMethod = TopicSegmentationMethod.AUTOMATIC
     max_segment_tokens: int = Field(default=256, ge=32, le=510)

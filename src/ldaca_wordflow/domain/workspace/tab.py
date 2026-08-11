@@ -15,6 +15,7 @@ from pydantic import (
     ConfigDict,
     Field,
     StringConstraints,
+    model_validator,
 )
 
 
@@ -55,9 +56,27 @@ class Tab(BaseModel):
     annotation_correction_columns: dict[uuid.UUID, TabName] = Field(
         default_factory=dict
     )
+    stop_words: list[str] = Field(default_factory=list)
+    topic_modeling_words_per_topic: int | None = Field(default=None, ge=3, le=100)
     created_at: AwareDatetime
     modified_at: AwareDatetime
     revision: int = Field(ge=1)
+
+    @model_validator(mode="after")
+    def validate_presentation_settings(self) -> "Tab":
+        if self.stop_words and self.kind not in {
+            AnalysisKind.TOKEN_FREQUENCY,
+            AnalysisKind.TOPIC_MODELING,
+        }:
+            raise ValueError(
+                "Stop words belong only to Token Frequency and Topic Modelling Tabs"
+            )
+        if self.kind is AnalysisKind.TOPIC_MODELING:
+            if self.topic_modeling_words_per_topic is None:
+                raise ValueError("Topic Modelling Tabs require a word display count")
+        elif self.topic_modeling_words_per_topic is not None:
+            raise ValueError("Words per topic belongs only to Topic Modelling Tabs")
+        return self
 
     @classmethod
     def create(
@@ -73,6 +92,10 @@ class Tab(BaseModel):
             name=name,
             analysis_ids=[],
             annotation_correction_columns={},
+            stop_words=[],
+            topic_modeling_words_per_topic=(
+                15 if kind is AnalysisKind.TOPIC_MODELING else None
+            ),
             created_at=timestamp,
             modified_at=timestamp,
             revision=1,

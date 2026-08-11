@@ -27,11 +27,9 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .topic_pipeline import (
-    _resolve_top_n_words,
     _resolve_vectorizer_model,
     _run_rust_topic_modeling,
     _sample_corpora_for_topic_modeling,
-    _stopwords_for_lang,
 )
 from .topic_result import (
     _build_empty_topic_payload,
@@ -336,7 +334,6 @@ def _compute_topic_payload(
     artifact_root: Path,
     artifact_prefix: str,
     random_seed: int,
-    representative_words_count: int,
     progress_callback: Callable[[float, str], None] | None,
     sample_fractions: list[float | None] | None,
     min_topic_size: int,
@@ -348,7 +345,7 @@ def _compute_topic_payload(
     Called by:
     - ``run_topic_modeling_analysis`` (this module).
 
-    Flow: sample each corpus, pick the c-TF-IDF vectorizer/stopwords from the
+    Flow: sample each corpus, pick the c-TF-IDF vectorizer from the
     document script mix, call the Rust pipeline (chunk -> ORT embed -> PaCMAP
     -> HDBSCAN -> c-TF-IDF, plus optional merge for target/exact modes), and turn
     its JSON result into the wire payload. For ``exact`` mode it also persists a
@@ -371,10 +368,9 @@ def _compute_topic_payload(
         raise ValueError("All corpora must contain at least one document.")
 
     random_state = int(random_seed)
-    max_representative_words = max(1, int(representative_words_count))
     min_cluster_size = max(2, int(min_topic_size))
 
-    vectorizer_model, stopwords_lang = _resolve_vectorizer_model(sampled.all_docs)
+    vectorizer_model = _resolve_vectorizer_model(sampled.all_docs)
 
     logger.info(
         "[Worker %d] Running Rust topic-modeling pipeline (%d docs, min_cluster_size=%d)",
@@ -388,10 +384,8 @@ def _compute_topic_payload(
     rust_result = _run_rust_topic_modeling(
         all_docs=sampled.all_docs,
         seed=random_state,
-        top_k=_resolve_top_n_words(representative_words_count),
         min_cluster_size=min_cluster_size,
         vectorizer_model=vectorizer_model,
-        stopwords=_stopwords_for_lang(stopwords_lang),
         embedder_model=_DEFAULT_EMBEDDER_MODEL,
         embedding_cache=embedding_cache_path,
         segmentation_method=segmentation_method,
@@ -406,7 +400,6 @@ def _compute_topic_payload(
         node_infos=node_infos,
         corpus_sizes=sampled.corpus_sizes,
         active_corpora_indices=sampled.active_corpora_indices,
-        max_representative_words=max_representative_words,
         artifact_prefix=artifact_prefix,
         artifact_root=artifact_root,
     )
@@ -418,7 +411,6 @@ def _compute_topic_payload(
             "embedding_model": _DEFAULT_EMBEDDER_MODEL,
             "embedding_backend": "ort",
             "min_topic_size": min_cluster_size,
-            "representative_words_count": max_representative_words,
             "random_state": random_state,
             "vectorizer_model": vectorizer_model,
             "n_chunks": int(rust_result.get("n_chunks") or 0),
@@ -452,7 +444,6 @@ def _compute_topic_modeling(
     input_snapshot_dir: str | None = None,
     corpora: list[list[str]] | None = None,
     random_seed: int = 0,
-    representative_words_count: int = 5,
     segmentation_method: str = "automatic",
     max_segment_tokens: int = 256,
     progress_callback: Callable[[float, str], None] | None = None,
@@ -506,7 +497,6 @@ def _compute_topic_modeling(
             artifact_root=prepared_payload.artifact_root,
             artifact_prefix=artifact_prefix,
             random_seed=random_seed,
-            representative_words_count=representative_words_count,
             progress_callback=progress_callback,
             sample_fractions=sample_fractions,
             min_topic_size=min_topic_size,
@@ -548,7 +538,6 @@ def run_topic_modeling_analysis(
     embedding_cache_path: str,
     min_topic_size: int = 10,
     random_seed: int = 0,
-    representative_words_count: int = 5,
     segmentation_method: str = "automatic",
     max_segment_tokens: int = 256,
     progress_callback: Callable[[float, str], None] | None = None,
@@ -565,7 +554,6 @@ def run_topic_modeling_analysis(
         input_snapshot_dir=input_snapshot_dir,
         corpora=None,
         random_seed=random_seed,
-        representative_words_count=representative_words_count,
         segmentation_method=segmentation_method,
         max_segment_tokens=max_segment_tokens,
         progress_callback=progress_callback,

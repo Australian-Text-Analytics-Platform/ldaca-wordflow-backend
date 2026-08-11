@@ -32,6 +32,10 @@ _STAGE_TIMINGS = [
 ]
 
 
+def _terms(*words: str) -> list[dict[str, Any]]:
+    return [{"word": word, "occurrence_count": 1} for word in words]
+
+
 @pytest.mark.parametrize(
     "entries",
     [
@@ -150,7 +154,13 @@ def _fake_topic_modeling_expr_factory(
                     pl.Struct({"topic_id": pl.Int32, "proportion": pl.Float32})
                 ),
             ),
-            pl.Series("representative_words", words, dtype=pl.List(pl.String)),
+            pl.Series(
+                "representative_words",
+                [[{"word": word, "occurrence_count": 1} for word in row] for row in words],
+                dtype=pl.List(
+                    pl.Struct({"word": pl.String, "occurrence_count": pl.UInt64})
+                ),
+            ),
             pl.Series("x", xs, dtype=pl.Float32),
             pl.Series("y", ys, dtype=pl.Float32),
             pl.Series("n_topics", [0] * n, dtype=pl.UInt32),
@@ -199,10 +209,8 @@ def test_run_rust_topic_modeling_reconstructs_result_dict(monkeypatch):
     result = topic_pipeline._run_rust_topic_modeling(
         all_docs=["d0", "d1", "d2", "d3"],
         seed=0,
-        top_k=50,
         min_cluster_size=10,
         vectorizer_model="native:plain_words_en",
-        stopwords=["the"],
         embedder_model="fake-model",
     )
 
@@ -253,8 +261,8 @@ def test_run_rust_topic_modeling_reconstructs_result_dict(monkeypatch):
     # Outlier topic (-1) is excluded; topics are sorted by id and carry the
     # replicated representative words and coordinates.
     assert result["topics"] == [
-        {"id": 0, "representative_words": ["alpha", "beta"], "x": 1.0, "y": 3.0},
-        {"id": 1, "representative_words": ["gamma"], "x": 2.0, "y": 4.0},
+        {"id": 0, "representative_words": _terms("alpha", "beta"), "x": 1.0, "y": 3.0},
+        {"id": 1, "representative_words": _terms("gamma"), "x": 2.0, "y": 4.0},
     ]
     # n_topics is the count of topics with at least one dominant document, not
     # the (zeroed) replicated field.
@@ -286,10 +294,8 @@ def test_run_rust_topic_modeling_forwards_segmentation_and_reports_truncation(
     result = topic_pipeline._run_rust_topic_modeling(
         all_docs=["one document"],
         seed=0,
-        top_k=10,
         min_cluster_size=2,
         vectorizer_model="native:plain_words_en",
-        stopwords=[],
         segmentation_method="paragraph",
         max_segment_tokens=64,
     )
@@ -362,13 +368,13 @@ def test__compute_topic_modeling_writes_parquet_and_meaning_lists(
             topics=[
                 {
                     "id": 0,
-                    "representative_words": ["alpha", "beta", "gamma"],
+                    "representative_words": _terms("alpha", "beta", "gamma"),
                     "x": 1.5,
                     "y": -2.0,
                 },
                 {
                     "id": 1,
-                    "representative_words": ["delta"],
+                    "representative_words": _terms("delta"),
                     "x": 2.5,
                     "y": 3.0,
                 },
@@ -385,7 +391,6 @@ def test__compute_topic_modeling_writes_parquet_and_meaning_lists(
         node_infos=[_node_info()],
         artifact_dir=str(tmp_path),
         artifact_prefix="tm_test",
-        representative_words_count=3,
         segmentation_method="paragraph",
         max_segment_tokens=64,
         embedding_cache_path=str(embedding_cache_path),
@@ -431,8 +436,8 @@ def test__compute_topic_modeling_writes_parquet_and_meaning_lists(
     ]
 
     topic = result["topics"][0]
-    assert topic["representative_words"] == ["alpha", "beta", "gamma"]
-    assert topic["label"] == "alpha | beta | gamma"
+    assert topic["representative_words"] == _terms("alpha", "beta", "gamma")
+    assert "label" not in topic
     assert topic["x"] == pytest.approx(1.5)
     assert topic["y"] == pytest.approx(-2.0)
     assert topic["size"] == [2]
@@ -450,18 +455,17 @@ def test__compute_topic_modeling_writes_parquet_and_meaning_lists(
     assert all(0.0 <= fraction < 1.0 for fraction, _message in progress)
 
 
-def test__compute_topic_modeling_payload_caps_words_but_keeps_headroom(
+def test__compute_topic_modeling_payload_keeps_all_ranked_candidates(
     tmp_path, monkeypatch
 ):
-    """The payload carries up to the headroom cap; the meaning column respects
-    the user's small display count."""
+    """The payload and meaning artifact keep all ranked candidates."""
 
     many_words = [f"w{i}" for i in range(60)]
 
     def fake_run(**_kwargs):
         return _canned_rust_result(
             documents=[{"doc_index": 0, "dominant_topic": 0}],
-            topics=[{"id": 0, "representative_words": many_words, "x": 0.0, "y": 0.0}],
+            topics=[{"id": 0, "representative_words": _terms(*many_words), "x": 0.0, "y": 0.0}],
         )
 
     monkeypatch.setattr(topic_modeling, "_run_rust_topic_modeling", fake_run)
@@ -473,14 +477,11 @@ def test__compute_topic_modeling_payload_caps_words_but_keeps_headroom(
         artifact_dir=str(tmp_path),
         artifact_prefix="tm_cap",
         embedding_cache_path=str(tmp_path / "embeddings.duckdb"),
-        representative_words_count=5,
     )
 
-    # Payload keeps the generous headroom (max(50, 2*5) = 50).
-    assert result["topics"][0]["representative_words"] == many_words[:50]
-    # The meaning parquet respects the requested display count.
+    assert result["topics"][0]["representative_words"] == _terms(*many_words)
     meanings = pl.read_parquet(tmp_path / "tm_cap_topic_meanings.parquet")
-    assert meanings.to_dicts()[0]["TOPIC_topic_meaning"] == many_words[:5]
+    assert meanings.to_dicts()[0]["TOPIC_topic_meaning"] == many_words
 
 
 def test__compute_topic_modeling_sampling_records_before_after_sizes(
@@ -495,7 +496,7 @@ def test__compute_topic_modeling_sampling_records_before_after_sizes(
         ]
         return _canned_rust_result(
             documents=documents,
-            topics=[{"id": 0, "representative_words": ["x"], "x": 0.0, "y": 0.0}],
+            topics=[{"id": 0, "representative_words": _terms("x"), "x": 0.0, "y": 0.0}],
         )
 
     monkeypatch.setattr(topic_modeling, "_run_rust_topic_modeling", fake_run)
@@ -531,8 +532,8 @@ def test__compute_topic_modeling_passes_min_topic_size_as_cluster_size(
                 {"doc_index": 1, "dominant_topic": 1},
             ],
             topics=[
-                {"id": 0, "representative_words": ["a"], "x": 0.0, "y": 0.0},
-                {"id": 1, "representative_words": ["b"], "x": 1.0, "y": 1.0},
+                {"id": 0, "representative_words": _terms("a"), "x": 0.0, "y": 0.0},
+                {"id": 1, "representative_words": _terms("b"), "x": 1.0, "y": 1.0},
             ],
         )
 

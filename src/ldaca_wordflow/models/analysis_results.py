@@ -203,10 +203,14 @@ class TokenFrequencyResult(_TokenFrequencyBody):
     tables: _TokenTableResources
 
 
+class RepresentativeWord(_StrictModel):
+    word: str
+    occurrence_count: int = Field(gt=0)
+
+
 class TopicItem(_StrictModel):
     id: int
-    label: str
-    representative_words: list[str]
+    representative_words: list[RepresentativeWord]
     size: list[int]
     total_size: int = Field(ge=0)
     x: float
@@ -254,7 +258,6 @@ class TopicMetadata(_StrictModel):
     embedding_model: str | None = None
     embedding_backend: str | None = None
     min_topic_size: int | None = Field(default=None, ge=1)
-    representative_words_count: int | None = Field(default=None, ge=1)
     random_state: int | None = None
     vectorizer_model: str | None = None
     n_chunks: int | None = Field(default=None, ge=0)

@@ -136,7 +136,7 @@ class WorkspaceUpdateRequest(_StrictModel):
 
 
 class WorkspaceArchiveMetadata(_StrictModel):
-    """Safe portable workspace metadata stored in archive manifest version 14."""
+    """Safe portable workspace metadata stored in archive manifest version 15."""
 
     id: uuid.UUID
     name: str = Field(min_length=1, max_length=500)
@@ -212,7 +212,7 @@ class WorkspaceArchiveManifest(_StrictModel):
     """Only accepted client workspace archive manifest."""
 
     format: Literal["wordflow-materialized-workspace"]
-    version: Literal[14]
+    version: Literal[15]
     workspace: WorkspaceArchiveMetadata
     nodes: list[WorkspaceArchiveNode]
     tabs: list[Tab]

@@ -84,6 +84,8 @@ def test_tabs_are_open_workspace_children_with_exact_resources(tmp_path: Path) -
             "name",
             "analysis_ids",
             "annotation_correction_columns",
+            "stop_words",
+            "topic_modeling_words_per_topic",
             "created_at",
             "modified_at",
             "revision",
@@ -92,6 +94,8 @@ def test_tabs_are_open_workspace_children_with_exact_resources(tmp_path: Path) -
         assert tab["name"] == "Shared name"
         assert tab["analysis_ids"] == []
         assert tab["annotation_correction_columns"] == {}
+        assert tab["stop_words"] == []
+        assert tab["topic_modeling_words_per_topic"] is None
         assert tab["created_at"] == tab["modified_at"]
         assert tab["revision"] == 1
         assert first.headers["Location"] == (
@@ -179,6 +183,55 @@ def test_tab_validation_and_addressable_deletion_are_strict(tmp_path: Path) -> N
         assert repeated.json()["code"] == "tab_not_found"
 
 
+def test_tab_presentation_settings_are_normalized_and_kind_scoped(tmp_path: Path) -> None:
+    with _client(tmp_path) as client:
+        unsafe = _unsafe_headers(client)
+        workspace_id, _ = _create_open_workspace(client, unsafe)
+        collection = f"/api/workspaces/{workspace_id}/tabs"
+        topic = client.post(
+            collection,
+            json={"kind": "topic_modeling", "name": "Topics"},
+            headers=unsafe,
+        ).json()
+        assert topic["topic_modeling_words_per_topic"] == 15
+
+        updated = client.patch(
+            f"{collection}/{topic['id']}",
+            json={
+                "stop_words": [" The ", "and", "THE", ""],
+                "topic_modeling_words_per_topic": 32,
+            },
+            headers=unsafe,
+        )
+        assert updated.status_code == 200
+        assert updated.json()["stop_words"] == ["the", "and"]
+        assert updated.json()["topic_modeling_words_per_topic"] == 32
+        cleared = client.delete(
+            f"{collection}/{topic['id']}/analyses",
+            headers=unsafe,
+        )
+        assert cleared.status_code == 204
+        preserved = client.get(f"{collection}/{topic['id']}").json()
+        assert preserved["stop_words"] == ["the", "and"]
+        assert preserved["topic_modeling_words_per_topic"] == 32
+
+        concordance = client.post(
+            collection,
+            json={"kind": "concordance", "name": "Concordance"},
+            headers=unsafe,
+        ).json()
+        assert client.patch(
+            f"{collection}/{concordance['id']}",
+            json={"stop_words": []},
+            headers=unsafe,
+        ).status_code == 400
+        assert client.patch(
+            f"{collection}/{concordance['id']}",
+            json={"topic_modeling_words_per_topic": 15},
+            headers=unsafe,
+        ).status_code == 400
+
+
 def test_tab_persists_across_close_and_invalid_record_is_isolated(tmp_path: Path) -> None:
     with _client(tmp_path) as client:
         unsafe = _unsafe_headers(client)
@@ -233,6 +286,8 @@ def test_workspace_archive_round_trip_preserves_tabs(tmp_path: Path) -> None:
                 "name": "Portable tab",
                 "analysis_ids": [],
                 "annotation_correction_columns": {},
+                "stop_words": [],
+                "topic_modeling_words_per_topic": None,
                 "created_at": original["created_at"],
                 "modified_at": original["modified_at"],
                 "revision": 1,

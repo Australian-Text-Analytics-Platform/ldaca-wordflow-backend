@@ -10,7 +10,6 @@ from pathlib import Path
 import anyio
 from anyio.to_thread import run_sync as run_sync_in_worker_thread
 
-from ..analysis.request_normalization import sanitize_stop_words
 from ..analysis.token_cache import tokens_cache_path
 from ..domain.workspace import (
     AnalysisRecord,
@@ -182,7 +181,6 @@ class AnalysisExecutionPreparer:
                     "scratch_dir": str(scratch_dir),
                     "artifact_prefix": "token_frequency",
                     "token_limit": request.token_limit,
-                    "stop_words": sanitize_stop_words(request.stop_words),
                     "node_tokenizer_models": tokenizer_models,
                     "token_cache_path": str(
                         tokens_cache_path(self._cache_root(user_id))
@@ -207,7 +205,6 @@ class AnalysisExecutionPreparer:
                     "artifact_prefix": "topic_modeling",
                     "min_topic_size": request.min_topic_size,
                     "random_seed": request.random_seed,
-                    "representative_words_count": request.representative_words_count,
                     "sample_fractions": request.sample_fractions,
                     "segmentation_method": request.segmentation_method.value,
                     "max_segment_tokens": request.max_segment_tokens,

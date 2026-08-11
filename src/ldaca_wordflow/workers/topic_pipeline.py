@@ -112,28 +112,6 @@ def _sample_corpora_for_topic_modeling(
     )
 
 
-def _resolve_top_n_words(representative_words_count: int | None) -> int:
-    """Pick the Rust c-TF-IDF ``top_k`` from the user-requested display cap.
-
-    When the user picks a small "Words per topic" and toggles on the frontend
-    stopword filter, computing only that many raw words would let the filter
-    drop most of them, leaving the user with fewer words than requested. We
-    pre-compute a generous headroom so the post-filter slice still has enough
-    material:
-
-    - At least 50 candidates, so even a tiny request like 5 has a healthy
-      buffer for the stopword filter.
-    - Otherwise 2x the requested cap.
-
-    Called by:
-    - ``_compute_topic_payload`` in ``topic_modeling`` (Rust ``top_k``).
-    - ``_build_topic_result_payload`` for the wire-payload word cap.
-    - Tests that verify the headroom arithmetic.
-    """
-    requested = int(representative_words_count or 0)
-    return max(50, requested * 2) if requested > 0 else 50
-
-
 def _count_cjk_chars(text: str) -> tuple[int, int, int]:
     """Count (han, kana, hangul) codepoints in ``text``.
 
@@ -157,19 +135,13 @@ def _count_cjk_chars(text: str) -> tuple[int, int, int]:
     return han, kana, hangul
 
 
-def _resolve_vectorizer_model(
-    docs: list[str], *, sample_limit: int = 200
-) -> tuple[str, str | None]:
-    """Choose the Rust c-TF-IDF vectorizer + stopword language from corpus script.
+def _resolve_vectorizer_model(docs: list[str], *, sample_limit: int = 200) -> str:
+    """Choose the Rust c-TF-IDF vectorizer from corpus script.
 
     The Rust pipeline tokenizes topic text itself for c-TF-IDF, so this boundary
     only needs to select the segmenter. Space-delimited languages use the
-    built-in ``native:plain_words_en`` word splitter (English stopwords applied);
+    built-in ``native:plain_words_en`` word splitter;
     CJK scripts need a lindera dictionary because there are no word boundaries.
-
-    Returns ``(vectorizer_model_id, stopwords_lang)`` where ``stopwords_lang`` is
-    ``"en"`` for the plain-words path (so the caller loads English stopwords) and
-    ``None`` for CJK (lindera handles segmentation; stopwording is left to it).
 
     Heuristic: sample up to ``sample_limit`` documents and, if CJK codepoints are
     a meaningful share (>=20%) of the letters seen, pick the dominant CJK script's
@@ -192,32 +164,15 @@ def _resolve_vectorizer_model(
 
     cjk = han + kana + hangul
     if letters == 0 or cjk / letters < 0.20:
-        return _PLAIN_WORDS_EN_VECTORIZER, "en"
+        return _PLAIN_WORDS_EN_VECTORIZER
 
     # CJK-dominant: disambiguate by script. Kana present -> Japanese; Hangul
     # dominant -> Korean; otherwise Han-only -> Chinese.
     if kana > 0:
-        return _LINDERA_JA_VECTORIZER, None
+        return _LINDERA_JA_VECTORIZER
     if hangul > han:
-        return _LINDERA_KO_VECTORIZER, None
-    return _LINDERA_ZH_VECTORIZER, None
-
-
-def _stopwords_for_lang(lang: str | None) -> list[str]:
-    """Return the stopword list for ``lang`` passed to the Rust pipeline.
-
-    English uses scikit-learn's built-in stoplist (already a dependency) so
-    generic function words ("the", "a", "is") don't leak into c-TF-IDF labels;
-    CJK / unknown languages return ``[]`` and rely on the lindera segmenter.
-
-    Called by:
-    - ``_compute_topic_payload`` in ``topic_modeling``.
-    """
-    if lang == "en":
-        from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS
-
-        return sorted(ENGLISH_STOP_WORDS)
-    return []
+        return _LINDERA_KO_VECTORIZER
+    return _LINDERA_ZH_VECTORIZER
 
 
 def _automatic_segment_overlap(max_segment_tokens: int) -> int:
@@ -230,10 +185,8 @@ def _run_rust_topic_modeling(
     *,
     all_docs: list[str],
     seed: int,
-    top_k: int,
     min_cluster_size: int,
     vectorizer_model: str | None,
-    stopwords: list[str],
     segmentation_method: str = "automatic",
     max_segment_tokens: int = 256,
     embedder_model: str | None = None,
@@ -282,11 +235,9 @@ def _run_rust_topic_modeling(
                 max_tokens=max_segment_tokens,
                 overlap=_automatic_segment_overlap(max_segment_tokens),
                 seed=int(seed),
-                top_k=int(top_k),
                 min_cluster_size=int(min_cluster_size),
                 vectorizer_model=vectorizer_model,
                 lowercase=True,
-                stopwords=stopwords or None,
             )
             .alias("__topic__")
         )

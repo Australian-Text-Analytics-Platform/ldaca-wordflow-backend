@@ -26,6 +26,7 @@ from ldaca_wordflow.domain.workspace import (
     Progress,
     Tab,
     TokenFrequencyAnalysisRequest,
+    TopicModelingAnalysisRequest,
     ValidAnalysisIntegrity,
     Workspace,
     TopicModelingDataBlockCreationAnalysisRequest,
@@ -74,6 +75,26 @@ def test_analysis_request_union_is_strict_and_discriminated() -> None:
         TypeAdapter(AnalysisRequest).validate_python(
             {**request.model_dump(mode="json"), "unknown": True}
         )
+
+
+def test_presentation_fields_are_rejected_from_analysis_requests() -> None:
+    node_id = uuid.uuid4()
+    token_payload = {
+        "node_ids": [node_id],
+        "node_columns": {node_id: "text"},
+        "node_tokenizer_models": {node_id: "native:plain_words_en"},
+        "stop_words": ["the"],
+    }
+    topic_payload = {
+        "node_ids": [node_id],
+        "node_columns": {node_id: "text"},
+        "representative_words_count": 15,
+    }
+
+    with pytest.raises(ValidationError):
+        TokenFrequencyAnalysisRequest.model_validate(token_payload)
+    with pytest.raises(ValidationError):
+        TopicModelingAnalysisRequest.model_validate(topic_payload)
 
 
 def test_data_block_creation_kind_strictly_replaces_result_data_block_creation() -> None:

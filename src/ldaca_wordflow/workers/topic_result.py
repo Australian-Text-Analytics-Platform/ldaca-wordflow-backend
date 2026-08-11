@@ -26,9 +26,6 @@ from ..analysis.generated_columns import (
     TOPIC_MEANING_COLUMN,
 )
 from ..shared.topic_types import topic_distribution_dtype
-from .topic_pipeline import (
-    _resolve_top_n_words,
-)
 from .topic_types import _SampledTopicCorpora
 
 logger = logging.getLogger(__name__)
@@ -111,7 +108,6 @@ def _build_topic_result_payload(
     node_infos: list[dict[str, Any]],
     corpus_sizes: list[int],
     active_corpora_indices: list[list[int]],
-    max_representative_words: int,
     artifact_prefix: str,
     artifact_root: Any,
 ) -> dict[str, Any]:
@@ -206,11 +202,9 @@ def _build_topic_result_payload(
             counts[topic_id] = counts.get(topic_id, 0) + 1
         per_corpus_topic_counts.append(counts)
 
-    payload_words_cap = _resolve_top_n_words(max_representative_words)
     topic_ids: list[int] = []
-    payload_representative_words_by_topic: list[list[str]] = []
+    payload_representative_words_by_topic: list[list[dict[str, Any]]] = []
     meaning_words_by_topic: list[list[str]] = []
-    labels: list[str] = []
     coords_by_topic: dict[int, tuple[float, float]] = {}
     for topic in rust_topics:
         try:
@@ -220,19 +214,24 @@ def _build_topic_result_payload(
         if topic_id < 0:
             continue
         topic_ids.append(topic_id)
-        words = [
-            word
-            for word in topic.get("representative_words") or []
-            if isinstance(word, str) and word
-        ]
-        payload_words = words[:payload_words_cap]
-        payload_representative_words_by_topic.append(payload_words)
-        # Respect the requested display count so the created Data Block matches
-        # the visible result. The default label uses the same narrow slice.
-        meaning_words = payload_words[:max_representative_words]
-        meaning_words_by_topic.append(meaning_words)
-        labels.append(
-            " | ".join(meaning_words) if meaning_words else f"Topic {topic_id}"
+        representative_words: list[dict[str, Any]] = []
+        for candidate in topic.get("representative_words") or []:
+            if not isinstance(candidate, dict):
+                continue
+            word = candidate.get("word")
+            occurrence_count = candidate.get("occurrence_count")
+            if (
+                isinstance(word, str)
+                and word
+                and isinstance(occurrence_count, int)
+                and occurrence_count > 0
+            ):
+                representative_words.append(
+                    {"word": word, "occurrence_count": occurrence_count}
+                )
+        payload_representative_words_by_topic.append(representative_words)
+        meaning_words_by_topic.append(
+            [candidate["word"] for candidate in representative_words]
         )
         coords_by_topic[topic_id] = (
             float(topic.get("x") or 0.0),
@@ -249,7 +248,6 @@ def _build_topic_result_payload(
         topic_payloads.append(
             {
                 "id": topic_id,
-                "label": labels[i] if i < len(labels) else f"Topic {topic_id}",
                 "representative_words": payload_representative_words_by_topic[i]
                 if i < len(payload_representative_words_by_topic)
                 else [],

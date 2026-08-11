@@ -32,7 +32,7 @@ dependencies = [
     "pydantic-settings>=2.0.0",
     "python-multipart>=0.0.20",                 # OAuth form callbacks
     "psutil>=6.1.0",                            # Process management for proper cleanup of child processes
-    "polars-text>=0.4.0",
+    "polars-text>=0.5.0",
     "polars-source-utils>=0.2.0",
     "tbb>=2022.3.1 ; sys_platform != 'darwin'",
     "tzdata>=2025.2 ; sys_platform == 'win32'",
@@ -40,7 +40,6 @@ dependencies = [
     "anthropic>=0.40.0",                        # AsyncAnthropic: server-side Claude annotation calls
     "google-genai>=1.0.0",                      # google-genai aio: server-side Gemini annotation calls
     "spacy>=3.7.0",
-    "scikit-learn>=1.5.0",          # ENGLISH_STOP_WORDS for the Rust c-TF-IDF stoplist
     "rtoml>=0.12.0",
     "uvicorn[standard]>=0.35.0",
 ]
