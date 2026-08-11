@@ -51,7 +51,9 @@ def test_annotation_preview_is_durable_and_run_all_edits_the_source(
 ) -> None:
     run_all_retry_limits: list[int] = []
     run_all_batch_sizes: list[int] = []
+    run_all_examples: list[list[tuple[str, str]]] = []
     preview_retry_limits: list[int] = []
+    preview_examples: list[list[tuple[str, str]]] = []
 
     async def fake_annotate_all(
         request,
@@ -61,6 +63,9 @@ def test_annotation_preview_is_durable_and_run_all_edits_the_source(
     ):
         run_all_retry_limits.append(request.source.max_retries_per_batch)
         run_all_batch_sizes.append(request.batch_size)
+        run_all_examples.append(
+            [(example.text, example.label) for example in kwargs["examples"]]
+        )
         progress_callback = kwargs["progress_callback"]
         progress_callback(len(texts), len(texts), 1 if texts else 0)
         labels = [None if text == "document-2379" else "support" for text in texts]
@@ -79,9 +84,12 @@ def test_annotation_preview_is_durable_and_run_all_edits_the_source(
         request,
         _api_key,
         texts,
-        _examples,
+        examples,
     ):
         preview_retry_limits.append(request.max_retries_per_batch)
+        preview_examples.append(
+            [(example.text, example.label) for example in examples]
+        )
         return ["support" for _ in texts]
 
     monkeypatch.setattr(
@@ -140,6 +148,18 @@ def test_annotation_preview_is_durable_and_run_all_edits_the_source(
                 "classes.csv",
                 b"class,description\nsupport,supports the claim\ncritical,criticises the claim\n",
             ),
+            (
+                "examples.csv",
+                b"text,class\n"
+                b"support one,support\n"
+                b"support two,support\n"
+                b"support three,support\n"
+                b"critical one,critical\n"
+                b"critical two,critical\n"
+                b"outside one,outside-codebook\n"
+                b"blank label, \n"
+                b" ,support\n",
+            ),
         ):
             assert (
                 client.post(
@@ -187,6 +207,11 @@ def test_annotation_preview_is_durable_and_run_all_edits_the_source(
             json={"kind": "file", "file_path": "classes.csv"},
             headers=unsafe,
         ).json()["id"]
+        example_id = client.post(
+            f"/api/workspaces/{workspace_id}/nodes",
+            json={"kind": "file", "file_path": "examples.csv"},
+            headers=unsafe,
+        ).json()["id"]
         configuration = client.post(
             "/api/provider-credentials/annotation-providers",
             json={"name": "OpenAI", "provider": "openai", "api_key": "provider-secret"},
@@ -206,6 +231,12 @@ def test_annotation_preview_is_durable_and_run_all_edits_the_source(
             "class_node_id": class_id,
             "class_column": "class",
             "description_column": "description",
+            "example_node_id": example_id,
+            "example_text_column": "text",
+            "example_annotation_column": "class",
+            "max_examples_per_class": 2,
+            "example_sampling_method": "random",
+            "example_random_seed": 0,
             "classes": [
                 {"name": "support", "description": "supports the claim"},
                 {"name": "critical", "description": "criticises the claim"},
@@ -249,6 +280,13 @@ def test_annotation_preview_is_durable_and_run_all_edits_the_source(
         assert second_page.status_code == 200, second_page.text
         assert first_page.json()["rows"] == second_page.json()["rows"]
         assert preview_retry_limits == [4, 4]
+        assert preview_examples[0] == preview_examples[1]
+        assert len(preview_examples[0]) == 5
+        assert {label for _, label in preview_examples[0]} == {
+            "support",
+            "critical",
+            "outside-codebook",
+        }
 
         run_all = client.post(
             f"/api/workspaces/{workspace_id}/tabs/{tab_id}/analyses",
@@ -268,6 +306,7 @@ def test_annotation_preview_is_durable_and_run_all_edits_the_source(
         assert child["state"] == "succeeded", child
         assert run_all_retry_limits == [4]
         assert run_all_batch_sizes == [17]
+        assert run_all_examples == [preview_examples[0]]
         assert child["output_node_ids"] == []
         run_all_result = client.get(
             f"/api/workspaces/{workspace_id}/analyses/{child['id']}/result"
@@ -321,6 +360,7 @@ def test_annotation_preview_is_durable_and_run_all_edits_the_source(
         assert (
             _wait(client, workspace_id, restarted.json()["id"])["state"] == "succeeded"
         )
+        assert run_all_examples == [preview_examples[0], preview_examples[0]]
         reviewed_after_restart = client.post(
             f"/api/workspaces/{workspace_id}/sql",
             json={

@@ -18,6 +18,7 @@ from anyio.to_thread import run_sync as run_sync_in_worker_thread
 from pydantic import BaseModel, ValidationError
 
 from ..analysis.concordance_core import compute_node_concordance_page
+from ..analysis.annotation_examples import prepare_annotation_examples
 from ..analysis.concordance_projection import filter_concordance_documents
 from ..analysis.quotation_core import compute_quotation_page
 from ..analysis.token_cache import tokenize_lazyframe, tokens_cache_path
@@ -38,7 +39,6 @@ from ..domain.workspace import (
 from ..infrastructure.providers.quotation_client import QuotationProviderClient
 from ..infrastructure.providers.annotation_ai import (
     AnnotationAiError,
-    AnnotationExample,
     annotate_preview,
 )
 from ..models.analysis_results import (
@@ -1065,7 +1065,7 @@ async def _query_annotation_snapshot(
         str(value) if value is not None else ""
         for value in page.get_column(request.text_column).to_list()
     ]
-    examples: list[AnnotationExample] = []
+    examples = []
     if request.example_node_id is not None:
         assert request.example_text_column is not None
         assert request.example_annotation_column is not None
@@ -1074,16 +1074,12 @@ async def _query_annotation_snapshot(
             request.example_text_column,
             request.example_annotation_column,
         ).collect()
-        for text, label in example_frame.iter_rows():
-            normalized_text = str(text).strip() if text is not None else ""
-            normalized_label = str(label).strip() if label is not None else ""
-            if normalized_text and normalized_label:
-                examples.append(
-                    AnnotationExample(
-                        text=normalized_text,
-                        label=normalized_label,
-                    )
-                )
+        examples = prepare_annotation_examples(
+            example_frame.iter_rows(),
+            max_examples_per_class=request.max_examples_per_class,
+            sampling_method=request.example_sampling_method,
+            random_seed=request.example_random_seed,
+        )
     try:
         labels = await annotate_preview(
             request,

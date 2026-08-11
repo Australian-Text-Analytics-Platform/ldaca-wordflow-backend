@@ -57,6 +57,57 @@ def test_analysis_request_rejects_duplicate_class_names() -> None:
         )
 
 
+def test_analysis_request_defaults_example_sampling_settings() -> None:
+    request = AnnotationAnalysisRequest(
+        node_id=uuid.uuid4(),
+        text_column="text",
+        annotation_column="class",
+        class_node_id=uuid.uuid4(),
+        class_column="class",
+        description_column="description",
+        classes=[DomainAnnotationClass(name="Relevant")],
+        provider_configuration_id=uuid.uuid4(),
+        provider="openai",
+        model="model",
+        instruction="Classify the text",
+    )
+
+    assert request.max_examples_per_class == 10
+    assert request.example_sampling_method == "random"
+    assert request.example_random_seed == 0
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("max_examples_per_class", 0),
+        ("example_sampling_method", "middle_n"),
+        ("example_random_seed", -1),
+    ],
+)
+def test_analysis_request_rejects_invalid_example_sampling_settings(
+    field: str,
+    value: object,
+) -> None:
+    payload = {
+        "node_id": uuid.uuid4(),
+        "text_column": "text",
+        "annotation_column": "class",
+        "class_node_id": uuid.uuid4(),
+        "class_column": "class",
+        "description_column": "description",
+        "classes": [DomainAnnotationClass(name="Relevant")],
+        "provider_configuration_id": uuid.uuid4(),
+        "provider": "openai",
+        "model": "model",
+        "instruction": "Classify the text",
+        field: value,
+    }
+
+    with pytest.raises(ValidationError):
+        AnnotationAnalysisRequest.model_validate(payload)
+
+
 @pytest.mark.parametrize("correction_column", ["text", "class"])
 def test_analysis_request_rejects_overlapping_correction_column(
     correction_column: str,
@@ -95,6 +146,9 @@ def test_annotation_submission_persists_only_the_safe_provider_snapshot() -> Non
         model="local-model",
         instruction="Classify the text",
         max_retries_per_batch=4,
+        max_examples_per_class=7,
+        example_sampling_method="last_n",
+        example_random_seed=42,
         api_key="request-secret",
     )
 
@@ -106,6 +160,9 @@ def test_annotation_submission_persists_only_the_safe_provider_snapshot() -> Non
     assert persisted.provider_base_url == "http://localhost:8080/v1"
     assert persisted.correction_column == "reviewed_class"
     assert persisted.max_retries_per_batch == 4
+    assert persisted.max_examples_per_class == 7
+    assert persisted.example_sampling_method == "last_n"
+    assert persisted.example_random_seed == 42
     assert "request-secret" not in persisted.model_dump_json()
 
 

@@ -184,7 +184,7 @@ def _valid_archive(
     name: str = "Imported",
     tabs: list[dict[str, Any]] | None = None,
     analyses: list[dict[str, Any]] | None = None,
-    version: int = 15,
+    version: int = 16,
 ) -> bytes:
     node_id = str(uuid.uuid4())
     manifest = {
@@ -333,7 +333,7 @@ async def test_archive_round_trip_preserves_terminal_analysis_result_and_tab(
     _create_workspace_export(source, tmp_path, exported, 1024 * 1024)
     with zipfile.ZipFile(exported) as archive:
         manifest = json.loads(archive.read("workspace/workspace.json"))
-    assert manifest["version"] == 15
+    assert manifest["version"] == 16
     assert len(manifest["analyses"]) == 1
 
     storage = FakeWorkspaceStorage(tmp_path / "installed")

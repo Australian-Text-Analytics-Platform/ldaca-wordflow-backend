@@ -10,12 +10,15 @@ from typing import Any
 
 import polars as pl
 
+from ..analysis.annotation_examples import (
+    AnnotationExample,
+    prepare_annotation_examples,
+)
 from ..domain.workspace import (
     AnnotationAnalysisRequest,
     AnnotationRunAllAnalysisRequest,
 )
 from ..infrastructure.providers.annotation_ai import (
-    AnnotationExample,
     annotate_all,
 )
 from ..infrastructure.storage.durable_fs import atomic_output_path
@@ -148,6 +151,12 @@ def _load_examples(
     request: AnnotationAnalysisRequest,
     input_snapshot_dir: str,
 ) -> list[AnnotationExample]:
+    """Load and select the Run All examples once before provider batching.
+
+    Called by ``run_annotation_analysis`` so every initial batch, retry, and
+    recursive split receives the same normalized subset from the input snapshot.
+    """
+
     if request.example_node_id is None:
         return []
     assert request.example_text_column is not None
@@ -157,15 +166,12 @@ def _load_examples(
         request.example_text_column,
         request.example_annotation_column,
     ).collect(engine="streaming")
-    pairs: list[AnnotationExample] = []
-    for text, label in frame.iter_rows():
-        normalized_text = str(text).strip() if text is not None else ""
-        normalized_label = str(label).strip() if label is not None else ""
-        if normalized_text and normalized_label:
-            pairs.append(
-                AnnotationExample(text=normalized_text, label=normalized_label)
-            )
-    return pairs
+    return prepare_annotation_examples(
+        frame.iter_rows(),
+        max_examples_per_class=request.max_examples_per_class,
+        sampling_method=request.example_sampling_method,
+        random_seed=request.example_random_seed,
+    )
 
 
 __all__ = ["run_annotation_analysis"]

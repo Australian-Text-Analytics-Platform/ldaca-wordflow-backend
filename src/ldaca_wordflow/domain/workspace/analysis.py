@@ -19,7 +19,11 @@ from pydantic import (
 )
 
 from ...shared.json_data import JsonData
-from ..annotation import AnnotationClass, AnnotationProviderSnapshot
+from ..annotation import (
+    AnnotationClass,
+    AnnotationExampleSamplingMethod,
+    AnnotationProviderSnapshot,
+)
 from ..background import BackgroundState, Failure, Progress
 
 
@@ -232,6 +236,9 @@ class _AnnotationInferenceFields(AnnotationProviderSnapshot):
     example_node_id: uuid.UUID | None = None
     example_text_column: NonEmptyText | None = Field(default=None, max_length=500)
     example_annotation_column: NonEmptyText | None = Field(default=None, max_length=500)
+    max_examples_per_class: int = Field(default=10, ge=1)
+    example_sampling_method: AnnotationExampleSamplingMethod = "random"
+    example_random_seed: int = Field(default=0, ge=0)
     classes: list[AnnotationClass] = Field(min_length=1, max_length=200)
     model: NonEmptyText = Field(max_length=500)
     instruction: NonEmptyText = Field(max_length=20_000)

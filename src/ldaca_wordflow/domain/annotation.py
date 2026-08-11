@@ -23,6 +23,8 @@ AnnotationProvider = Literal[
     "custom",
 ]
 
+AnnotationExampleSamplingMethod = Literal["random", "first_n", "last_n"]
+
 AnnotationClassName = Annotated[
     str,
     StringConstraints(strip_whitespace=True, min_length=1),
@@ -81,6 +83,7 @@ class AnnotationProviderSnapshot(BaseModel):
 
 __all__ = [
     "AnnotationClass",
+    "AnnotationExampleSamplingMethod",
     "AnnotationProvider",
     "AnnotationProviderSnapshot",
     "normalize_annotation_provider_base_url",

@@ -30,6 +30,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal, cast
 
+from ...analysis.annotation_examples import AnnotationExample
 from ...domain.annotation import AnnotationClass
 from ...domain.workspace.analysis import (
     AnnotationAnalysisRequest,
@@ -179,12 +180,6 @@ def _max_completion_tokens(config: InferenceConfig) -> int:
     if not config.reasoning_enabled:
         return ANSWER_TOKEN_HEADROOM
     return _reasoning_budget_tokens(config.reasoning_effort) + ANSWER_TOKEN_HEADROOM
-
-
-@dataclass(frozen=True)
-class AnnotationExample:
-    text: str
-    label: str
 
 
 @dataclass(frozen=True)
