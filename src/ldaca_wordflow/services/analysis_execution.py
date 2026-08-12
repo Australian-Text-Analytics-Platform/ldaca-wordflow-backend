@@ -6,11 +6,14 @@ import logging
 import shutil
 from datetime import datetime
 from functools import partial
+from typing import cast
 
 import anyio
 from anyio.abc import TaskGroup
 from anyio.to_thread import run_sync as run_sync_in_worker_thread
+from pydantic import ValidationError
 
+from ..models.analysis_results import AnalysisWorkerFailure
 from ..shared.errors import AppError
 from .analyses import AnalysisService
 from .analysis_execution_types import (
@@ -233,7 +236,30 @@ class AnalysisExecutionRuntime(AnalysisExecutionControl):
             )
             await service.fail_execution(item.key)
         else:
-            await service.complete_execution(item.key, result)
+            result_mapping = (
+                cast(dict[str, object], result)
+                if isinstance(result, dict)
+                else None
+            )
+            if result_mapping is not None and result_mapping.get("state") == "failed":
+                try:
+                    failure = AnalysisWorkerFailure.model_validate(result_mapping)
+                except ValidationError:
+                    logger.error(
+                        "Analysis returned an invalid failure envelope "
+                        "analysis_id=%s user_id=%s",
+                        item.key.analysis_id,
+                        item.key.user_id,
+                    )
+                    await service.fail_execution(item.key)
+                else:
+                    await service.fail_execution(
+                        item.key,
+                        code=failure.failure.code,
+                        message=failure.failure.message,
+                    )
+            else:
+                await service.complete_execution(item.key, result)
         finally:
             await self._cleanup_invocation(invocation.storage_roots)
 

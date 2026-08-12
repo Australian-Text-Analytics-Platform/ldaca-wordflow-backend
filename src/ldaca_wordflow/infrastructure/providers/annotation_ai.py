@@ -31,7 +31,11 @@ from dataclasses import dataclass
 from typing import Literal, cast
 
 from ...analysis.annotation_examples import AnnotationExample
-from ...domain.annotation import AnnotationClass
+from ...domain.annotation import (
+    ANNOTATION_PROVIDER_SAFE_MESSAGES,
+    AnnotationClass,
+    AnnotationProviderFailureCode,
+)
 from ...domain.workspace.analysis import (
     AnnotationAnalysisRequest,
     AnnotationRunAllAnalysisRequest,
@@ -59,30 +63,56 @@ _CONTEXT_LIMIT_ERROR_MARKERS = (
 )
 
 AnnotationChatStyle = Literal["openai", "anthropic", "google"]
-
-
 class AnnotationAiError(Exception):
-    """A provider/LLM call failed (auth, rate limit, network, bad response).
+    """One classified provider failure with private and public representations.
 
-    Preview translates this into one safe ``BadGatewayError``. Run All records
-    it as one failed terminal batch so other batches can still be published.
+    Provider adapters retain the raw SDK description in ``Exception.args`` for
+    correlated logs. HTTP and Analysis boundaries consume only ``code`` and
+    ``safe_message``, so SDK bodies, URLs, and credentials never become public.
     """
 
-    def __init__(self, message: str, *, retryable: bool = True) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: AnnotationProviderFailureCode = "annotation_provider_failed",
+        retryable: bool = False,
+    ) -> None:
         super().__init__(message)
+        self.code = code
+        self.safe_message = ANNOTATION_PROVIDER_SAFE_MESSAGES[code]
         self.retryable = retryable
 
 
 class AnnotationContextLimitError(AnnotationAiError):
     """A provider rejected one prompt because it exceeded the model context."""
 
+    def __init__(self, message: str) -> None:
+        super().__init__(
+            message,
+            code="annotation_provider_context_limit",
+            retryable=False,
+        )
+
 
 class AnnotationResponseError(AnnotationAiError):
     """A provider returned an incomplete or invalid successful response."""
 
+    def __init__(self, message: str) -> None:
+        super().__init__(
+            message,
+            code="annotation_provider_invalid_response",
+            retryable=True,
+        )
+
 
 def _completion_error(error: Exception, fallback: str) -> AnnotationAiError:
-    """Classify provider context-window failures without provider-specific state."""
+    """Normalize common SDK status and transport shapes into stable categories.
+
+    Called by every completion adapter and model discovery. Classification uses
+    status metadata first and conservative exception-type markers for transport
+    failures; unknown errors use the non-retryable safe fallback.
+    """
 
     message = str(error) or fallback
     details = " ".join(
@@ -94,11 +124,43 @@ def _completion_error(error: Exception, fallback: str) -> AnnotationAiError:
     ).casefold()
     if any(marker in details for marker in _CONTEXT_LIMIT_ERROR_MARKERS):
         return AnnotationContextLimitError(message)
-    status = getattr(error, "status_code", getattr(error, "code", None))
-    retryable = (
-        not isinstance(status, int) or status in {408, 409, 429} or status >= 500
+    status = getattr(error, "status_code", None)
+    if not isinstance(status, int):
+        response = getattr(error, "response", None)
+        status = getattr(response, "status_code", None)
+    if not isinstance(status, int):
+        candidate = getattr(error, "code", None)
+        status = candidate if isinstance(candidate, int) else None
+    if status == 401:
+        code: AnnotationProviderFailureCode = (
+            "annotation_provider_authentication_failed"
+        )
+    elif status == 403:
+        code = "annotation_provider_access_denied"
+    elif status == 429:
+        code = "annotation_provider_rate_limited"
+    elif status in {408} or (isinstance(status, int) and status >= 500):
+        code = "annotation_provider_unavailable"
+    elif isinstance(status, int) and 400 <= status < 500:
+        code = "annotation_provider_request_rejected"
+    else:
+        error_name = type(error).__name__.casefold()
+        if isinstance(error, (ConnectionError, TimeoutError)) or any(
+            marker in error_name
+            for marker in ("connection", "connect", "network", "timeout")
+        ):
+            code = "annotation_provider_unavailable"
+        else:
+            code = "annotation_provider_failed"
+    return AnnotationAiError(
+        message,
+        code=code,
+        retryable=code
+        in {
+            "annotation_provider_rate_limited",
+            "annotation_provider_unavailable",
+        },
     )
-    return AnnotationAiError(message, retryable=retryable)
 
 
 @dataclass(frozen=True)
@@ -184,9 +246,10 @@ def _max_completion_tokens(config: InferenceConfig) -> int:
 
 @dataclass(frozen=True)
 class AnnotationAllResult:
-    """Row-aligned Run All labels plus terminal batch outcome counts."""
+    """Row-aligned labels and failure mask plus terminal outcome counts."""
 
     labels: list[str | None]
+    failed_rows: list[bool]
     failed_batch_count: int
     failed_row_count: int
 
@@ -499,9 +562,15 @@ async def _annotate_batch(
     if not texts:
         return []
     if wire.chat_style == "anthropic" and api_key is None:
-        raise AnnotationAiError("Anthropic requires an API key", retryable=False)
+        raise AnnotationAiError(
+            "Anthropic requires an API key",
+            code="annotation_provider_authentication_failed",
+        )
     if wire.chat_style == "google" and api_key is None:
-        raise AnnotationAiError("Google requires an API key", retryable=False)
+        raise AnnotationAiError(
+            "Google requires an API key",
+            code="annotation_provider_authentication_failed",
+        )
     system = build_annotation_system_prompt(instruction, classes, examples)
     user = build_annotation_user_prompt(texts)
     known_labels = [option.name for option in classes]
@@ -563,11 +632,11 @@ async def annotate_all(
     """Classify a complete Run All input with row order preserved.
 
     Context-limit and invalid-response failures recursively split only the
-    affected chunk. Other exhausted provider failures become aligned null labels
-    so successful chunks remain publishable.
+    affected chunk until an irreducible row is marked failed. Every provider-wide
+    failure propagates so the worker can fail without publishing partial output.
     """
     if not texts:
-        return AnnotationAllResult([], 0, 0)
+        return AnnotationAllResult([], [], 0, 0)
     source = request.source
     wire = resolve_provider_wire(source.provider, source.provider_base_url)
     config = _inference_config(source)
@@ -589,7 +658,7 @@ async def annotate_all(
         if progress_callback is not None:
             progress_callback(completed_rows, len(texts), failed_batch_count)
 
-    async def run(chunk: list[str]) -> list[str | None]:
+    async def run(chunk: list[str]) -> tuple[list[str | None], list[bool]]:
         try:
             async with semaphore:
                 labels = await _annotate_batch(
@@ -606,22 +675,20 @@ async def annotate_all(
         except AnnotationContextLimitError, AnnotationResponseError:
             if len(chunk) == 1:
                 record_terminal_batch(1, failed=True)
-                return [None]
+                return [None], [True]
             midpoint = len(chunk) // 2
             left, right = await asyncio.gather(
                 run(chunk[:midpoint]),
                 run(chunk[midpoint:]),
             )
-            return [*left, *right]
-        except AnnotationAiError:
-            record_terminal_batch(len(chunk), failed=True)
-            return [None] * len(chunk)
+            return [*left[0], *right[0]], [*left[1], *right[1]]
         record_terminal_batch(len(chunk), failed=False)
-        return labels
+        return labels, [False] * len(labels)
 
     batches = await asyncio.gather(*(run(chunk) for chunk in chunks))
     return AnnotationAllResult(
-        labels=[label for batch in batches for label in batch],
+        labels=[label for batch, _failed in batches for label in batch],
+        failed_rows=[failed for _batch, failures in batches for failed in failures],
         failed_batch_count=failed_batch_count,
         failed_row_count=failed_row_count,
     )
@@ -646,7 +713,10 @@ async def list_models(wire: ProviderWire, api_key: str | None) -> list[str]:
     try:
         if wire.chat_style == "anthropic":
             if api_key is None:
-                raise AnnotationAiError("Anthropic requires an API key")
+                raise AnnotationAiError(
+                    "Anthropic requires an API key",
+                    code="annotation_provider_authentication_failed",
+                )
             from anthropic import AsyncAnthropic
 
             anthropic_client = AsyncAnthropic(
@@ -659,7 +729,10 @@ async def list_models(wire: ProviderWire, api_key: str | None) -> list[str]:
                     ids.add(model.id)
         elif wire.chat_style == "google":
             if api_key is None:
-                raise AnnotationAiError("Google requires an API key")
+                raise AnnotationAiError(
+                    "Google requires an API key",
+                    code="annotation_provider_authentication_failed",
+                )
             from google import genai
             from google.genai import types
 
@@ -691,5 +764,5 @@ async def list_models(wire: ProviderWire, api_key: str | None) -> list[str]:
     except AnnotationAiError:
         raise
     except Exception as error:  # noqa: BLE001 - normalise every SDK failure shape
-        raise AnnotationAiError(str(error) or "Model listing failed") from error
+        raise _completion_error(error, "Model listing failed") from error
     return sorted(ids, key=str.lower)

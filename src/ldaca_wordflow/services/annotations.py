@@ -8,7 +8,7 @@ from ..infrastructure.providers.annotation_ai import (
     resolve_provider_wire,
 )
 from ..shared.errors import (
-    BadGatewayError,
+    AnnotationProviderError,
 )
 from ..models.annotations import (
     AnnotationModelsRequest,
@@ -43,7 +43,7 @@ class AnnotationService:
                 api_key,
             )
         except AnnotationAiError as exc:
-            raise BadGatewayError("Annotation provider request failed") from exc
+            raise AnnotationProviderError(exc.code, exc.safe_message) from exc
         return AnnotationModelsResource(
             provider_configuration_id=request.provider_configuration_id,
             provider=request.provider,

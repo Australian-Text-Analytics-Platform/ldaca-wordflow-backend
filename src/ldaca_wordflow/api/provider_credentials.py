@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, Response, Security, status
 
 from ..models.provider_credentials import (
     AnnotationProviderConfigurationCreate,
-    AnnotationProviderConfigurationRename,
+    AnnotationProviderConfigurationUpdate,
     AnnotationProviderConfigurationResource,
     DataPortalCredentialPatch,
     ProviderCredentialSummary,
@@ -83,13 +83,13 @@ async def clear_annotation_provider_configurations(
     response_model=AnnotationProviderConfigurationResource,
     responses=api_errors(400, 403, 404, 422, 500),
 )
-async def rename_annotation_provider_configuration(
+async def update_annotation_provider_configuration(
     configuration_id: uuid.UUID,
-    command: AnnotationProviderConfigurationRename,
+    command: AnnotationProviderConfigurationUpdate,
     _principal: Annotated[SessionPrincipal, Security(get_current_session)],
     runtime: Runtime = Depends(get_runtime),
 ) -> AnnotationProviderConfigurationResource:
-    return await runtime.provider_credential_store.rename_annotation_provider(
+    return await runtime.provider_credential_store.update_annotation_provider(
         configuration_id,
         command,
     )

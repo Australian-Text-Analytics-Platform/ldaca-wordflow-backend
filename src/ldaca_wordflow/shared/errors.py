@@ -363,6 +363,22 @@ class BadGatewayError(AppError):
     code = "bad_gateway"
 
 
+class AnnotationProviderError(BadGatewayError):
+    """Expose one fixed provider-failure category without leaking SDK details.
+
+    Used by synchronous model discovery and Preview services after the provider
+    adapter has classified an SDK exception. The original exception remains in
+    the cause chain for correlated backend logging, while only this stable code
+    and safe message cross the HTTP boundary.
+    """
+
+    expose_message = True
+
+    def __init__(self, code: str, message: str) -> None:
+        self.code = code
+        super().__init__(message)
+
+
 class UserPreferencesCorruptError(AppError):
     """One user's canonical preference file cannot be validated."""
 

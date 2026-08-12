@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import secrets
 import uuid
 from collections.abc import Callable
 from functools import partial
@@ -19,7 +18,7 @@ from ..infrastructure.storage.durable_fs import atomic_output_path
 from ..infrastructure.storage.layout import user_provider_credentials_path
 from ..models.provider_credentials import (
     AnnotationProviderConfigurationCreate,
-    AnnotationProviderConfigurationRename,
+    AnnotationProviderConfigurationUpdate,
     AnnotationProviderConfigurationResource,
     DataPortalCredentialPatch,
     ProviderCredentialSummary,
@@ -33,7 +32,6 @@ from ..shared.errors import (
     NotFoundError,
     ProviderCredentialMissingError,
     ProviderCredentialsCorruptError,
-    ResourceConflictError,
 )
 from .sessions import SINGLE_USER
 
@@ -81,13 +79,6 @@ class ProviderCredentialStore:
                 base_url=command.base_url,
                 api_key=command.api_key,
             )
-            if any(
-                _same_configuration_identity(configuration, existing)
-                for existing in stored.annotation_providers
-            ):
-                raise ResourceConflictError(
-                    "An Annotation provider with this identity is already configured"
-                )
             updated = stored.model_copy(
                 update={
                     "annotation_providers": [
@@ -99,24 +90,46 @@ class ProviderCredentialStore:
             await self._run_io(_write_credentials, self._path(), updated)
         return _configuration_resource(configuration)
 
-    async def rename_annotation_provider(
+    async def update_annotation_provider(
         self,
         configuration_id: uuid.UUID,
-        command: AnnotationProviderConfigurationRename,
+        command: AnnotationProviderConfigurationUpdate,
     ) -> AnnotationProviderConfigurationResource:
+        """Update one saved slot while preserving its UUID, locator, and order.
+
+        Called by the PATCH route in backend-owned deployments. The request
+        model has already separated omission from explicit credential removal;
+        rebuilding the stored model revalidates the complete candidate before
+        the single atomic file replacement.
+        """
+
         self._require_backend_storage()
         async with self._lock:
             stored = await self._load()
             configurations = list(stored.annotation_providers)
             for index, configuration in enumerate(configurations):
                 if configuration.id == configuration_id:
-                    renamed = configuration.model_copy(update={"name": command.name})
-                    configurations[index] = renamed
+                    name = configuration.name
+                    if "name" in command.model_fields_set:
+                        assert command.name is not None
+                        name = command.name
+                    updated_configuration = StoredAnnotationProviderConfiguration(
+                        id=configuration.id,
+                        name=name,
+                        provider=configuration.provider,
+                        base_url=configuration.base_url,
+                        api_key=(
+                            command.api_key
+                            if "api_key" in command.model_fields_set
+                            else configuration.api_key
+                        ),
+                    )
+                    configurations[index] = updated_configuration
                     updated = stored.model_copy(
                         update={"annotation_providers": configurations}
                     )
                     await self._run_io(_write_credentials, self._path(), updated)
-                    return _configuration_resource(renamed)
+                    return _configuration_resource(updated_configuration)
         raise NotFoundError("Annotation provider configuration not found")
 
     async def delete_annotation_provider(
@@ -206,7 +219,12 @@ class ProviderCredentialStore:
             raise InvalidInputError(
                 "Annotation provider configuration does not match the request"
             )
-        return _secret_value(configuration.api_key)
+        credential = _secret_value(configuration.api_key)
+        if configuration.provider != "custom" and credential is None:
+            raise ProviderCredentialMissingError(
+                f"No credential is configured for {configuration.provider}"
+            )
+        return credential
 
     async def data_portal_credential(
         self,
@@ -357,19 +375,6 @@ def _configuration_resource(
         base_url=configuration.base_url,
         has_api_key=configuration.api_key is not None,
     )
-
-
-def _same_configuration_identity(
-    left: StoredAnnotationProviderConfiguration,
-    right: StoredAnnotationProviderConfiguration,
-) -> bool:
-    if left.provider != right.provider:
-        return False
-    if left.provider == "custom" and left.base_url != right.base_url:
-        return False
-    left_key = _secret_value(left.api_key) or ""
-    right_key = _secret_value(right.api_key) or ""
-    return secrets.compare_digest(left_key, right_key)
 
 
 __all__ = ["ProviderCredentialStore"]

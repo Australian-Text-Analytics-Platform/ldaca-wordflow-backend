@@ -71,6 +71,7 @@ def test_annotation_preview_is_durable_and_run_all_edits_the_source(
         labels = [None if text == "document-2379" else "support" for text in texts]
         return AnnotationAllResult(
             labels=labels,
+            failed_rows=[text == "document-2379" for text in texts],
             failed_batch_count=1 if texts else 0,
             failed_row_count=1 if texts else 0,
         )

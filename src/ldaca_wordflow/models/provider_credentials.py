@@ -69,16 +69,9 @@ class _AnnotationProviderConfigurationFields(_StrictModel):
 
 
 class AnnotationProviderConfigurationCreate(_AnnotationProviderConfigurationFields):
-    """Create command containing one write-only provider credential."""
+    """Create one stable provider connection with an optional credential."""
 
     api_key: CredentialValue | None = None
-
-    @model_validator(mode="after")
-    def require_builtin_credential(self) -> "AnnotationProviderConfigurationCreate":
-        if self.provider != "custom" and self.api_key is None:
-            raise ValueError("Built-in providers require an API key")
-        return self
-
 
 class AnnotationProviderConfigurationResource(_AnnotationProviderConfigurationFields):
     """Safe provider-configuration metadata returned to clients."""
@@ -87,8 +80,24 @@ class AnnotationProviderConfigurationResource(_AnnotationProviderConfigurationFi
     has_api_key: bool
 
 
-class AnnotationProviderConfigurationRename(_StrictModel):
-    name: ProviderConfigurationName
+class AnnotationProviderConfigurationUpdate(_StrictModel):
+    """Patch mutable connection details without accepting immutable locators.
+
+    Used by the provider-credential route in single-user mode. Omission keeps a
+    value unchanged, while an explicit null credential removes the saved key.
+    Names cannot be cleared and an empty object is never a meaningful update.
+    """
+
+    name: ProviderConfigurationName | None = None
+    api_key: CredentialValue | None = None
+
+    @model_validator(mode="after")
+    def validate_patch(self) -> "AnnotationProviderConfigurationUpdate":
+        if not self.model_fields_set:
+            raise ValueError("At least one provider configuration field is required")
+        if "name" in self.model_fields_set and self.name is None:
+            raise ValueError("Provider configuration name cannot be null")
+        return self
 
 
 class DataPortalCredentialStatus(_StrictModel):
@@ -112,12 +121,6 @@ class StoredAnnotationProviderConfiguration(_AnnotationProviderConfigurationFiel
     id: uuid.UUID
     api_key: SecretStr | None = None
 
-    @model_validator(mode="after")
-    def require_builtin_credential(self) -> "StoredAnnotationProviderConfiguration":
-        if self.provider != "custom" and self.api_key is None:
-            raise ValueError("Built-in providers require an API key")
-        return self
-
 
 class StoredProviderCredentials(_StrictModel):
     """Private representation persisted in the per-user TOML file."""
@@ -131,32 +134,21 @@ class StoredProviderCredentials(_StrictModel):
     )
 
     @model_validator(mode="after")
-    def unique_annotation_provider_configurations(
+    def unique_annotation_provider_configuration_ids(
         self,
     ) -> "StoredProviderCredentials":
         seen_ids: set[uuid.UUID] = set()
-        identities: set[tuple[str, str | None, str]] = set()
         for configuration in self.annotation_providers:
             if configuration.id in seen_ids:
                 raise ValueError("Annotation provider configuration IDs must be unique")
             seen_ids.add(configuration.id)
-            identity = (
-                configuration.provider,
-                configuration.base_url if configuration.provider == "custom" else None,
-                configuration.api_key.get_secret_value()
-                if configuration.api_key is not None
-                else "",
-            )
-            if identity in identities:
-                raise ValueError("Annotation provider configuration identities must be unique")
-            identities.add(identity)
         return self
 
 
 __all__ = [
     "AnnotationProvider",
     "AnnotationProviderConfigurationCreate",
-    "AnnotationProviderConfigurationRename",
+    "AnnotationProviderConfigurationUpdate",
     "AnnotationProviderConfigurationResource",
     "CredentialStorage",
     "DataPortalCredentialPatch",
