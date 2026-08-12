@@ -13,7 +13,7 @@ from anyio.to_thread import run_sync as run_sync_in_worker_thread
 from ..infrastructure.storage.data_loading import (
     DataFileLoadError,
     detect_file_type,
-    load_data_file,
+    load_data_file_preview,
     validate_spreadsheet_container,
 )
 from ..models.files import FileWorksheetsResource
@@ -114,6 +114,12 @@ class FileReadService:
 
 
 def _file_lazyframe(path: Path, sheet_name: str | None) -> pl.LazyFrame:
+    """Build the preview-specific lazy frame consumed by page and schema reads.
+
+    CSV/TSV fields remain raw strings while JSON-family types come from full
+    inference. Deferred collection errors are translated by the materializing
+    caller because constructing a lazy scanner does not necessarily parse data.
+    """
     file_type = detect_file_type(path.name)
     try:
         if file_type == "excel":
@@ -122,7 +128,7 @@ def _file_lazyframe(path: Path, sheet_name: str | None) -> pl.LazyFrame:
             if selected not in sheets:
                 raise InvalidInputError("Excel sheet not found")
             sheet_name = selected
-        loaded = load_data_file(path, sheet_name)
+        loaded = load_data_file_preview(path, sheet_name)
         return loaded if isinstance(loaded, pl.LazyFrame) else loaded.lazy()
     except InvalidInputError:
         raise
@@ -136,15 +142,27 @@ def _materialize_file_page(
     page_size: int,
     sheet_name: str | None,
 ) -> IpcTablePage:
-    return materialize_page(
-        _file_lazyframe(path, sheet_name),
-        page=page,
-        page_size=page_size,
-    )
+    """Materialize one raw-value preview page and classify parser failures."""
+    try:
+        return materialize_page(
+            _file_lazyframe(path, sheet_name),
+            page=page,
+            page_size=page_size,
+        )
+    except InvalidInputError:
+        raise
+    except (DataFileLoadError, pl.exceptions.PolarsError) as exc:
+        raise InvalidInputError("File preview could not be generated") from exc
 
 
 def _file_schema(path: Path, sheet_name: str | None) -> bytes:
-    return encode_schema_stream(_file_lazyframe(path, sheet_name).collect_schema())
+    """Materialize the preview policy's schema and classify parser failures."""
+    try:
+        return encode_schema_stream(_file_lazyframe(path, sheet_name).collect_schema())
+    except InvalidInputError:
+        raise
+    except (DataFileLoadError, pl.exceptions.PolarsError) as exc:
+        raise InvalidInputError("File preview could not be generated") from exc
 
 
 def _excel_worksheets(path: Path) -> list[str]:

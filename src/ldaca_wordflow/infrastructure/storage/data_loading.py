@@ -1,8 +1,9 @@
 """File-type detection, bounded data loading, and dtype normalization.
 
 ``NodeService`` uses this module to turn a validated user-file path into a
-Polars frame before staging an immutable source Data Block. File preview uses
-the same type vocabulary so preview and ingestion cannot disagree.
+fully inferred Polars frame before staging an immutable source Data Block.
+File preview instead preserves raw CSV/TSV lexemes as strings; JSON-family
+previews use the same full-file inference as source creation.
 """
 
 import stat
@@ -67,19 +68,70 @@ def load_data_file(
     file_path: Path,
     sheet_name: str | None = None,
 ) -> pl.LazyFrame | pl.DataFrame:
-    """Load one supported user file into a Polars frame."""
+    """Build the authoritative loader for one supported user file.
+
+    Used by ``materialize_data_file`` and direct loader tests. Row-oriented
+    formats inspect the complete bounded source when establishing their schema,
+    so values after Polars' default inference window cannot invalidate a type
+    selected from only the first 100 rows.
+    """
     try:
         return _load_data_file(file_path, sheet_name)
-    except (
-        OSError,
-        UnicodeError,
-        ValueError,
-        zipfile.BadZipFile,
-        zipfile.LargeZipFile,
-        fastexcel.FastExcelError,
-        pl.exceptions.PolarsError,
-    ) as exc:
+    except _DATA_FILE_LOAD_EXCEPTIONS as exc:
         raise DataFileLoadError("Data file could not be loaded") from exc
+
+
+def materialize_data_file(
+    file_path: Path,
+    sheet_name: str | None = None,
+) -> pl.DataFrame:
+    """Materialize an authoritative source frame under one error boundary.
+
+    Called by ``NodeService`` at the source-file I/O boundary before canonical
+    dtype normalization and Parquet staging. Both loader construction and lazy
+    collection are translated to ``DataFileLoadError`` so deferred Polars parse
+    failures have the same service contract as eager reader failures.
+    """
+    try:
+        loaded = load_data_file(file_path, sheet_name)
+        return loaded.collect() if isinstance(loaded, pl.LazyFrame) else loaded
+    except DataFileLoadError:
+        raise
+    except _DATA_FILE_LOAD_EXCEPTIONS as exc:
+        raise DataFileLoadError("Data file could not be loaded") from exc
+
+
+def load_data_file_preview(
+    file_path: Path,
+    sheet_name: str | None = None,
+) -> pl.LazyFrame | pl.DataFrame:
+    """Build the value-inspection loader used by ``FileReadService``.
+
+    CSV and TSV previews disable inference so every field, including lexemes
+    such as ``001``, is exposed as a string. JSON-family previews retain full
+    inference because those formats encode value types directly; all remaining
+    formats keep their authoritative loader behavior.
+    """
+    file_type = detect_file_type(file_path.name)
+    try:
+        if file_type == "csv":
+            return pl.scan_csv(file_path, infer_schema=False)
+        if file_type == "tsv":
+            return pl.scan_csv(file_path, separator="\t", infer_schema=False)
+        return _load_data_file(file_path, sheet_name)
+    except _DATA_FILE_LOAD_EXCEPTIONS as exc:
+        raise DataFileLoadError("Data file could not be loaded") from exc
+
+
+_DATA_FILE_LOAD_EXCEPTIONS = (
+    OSError,
+    UnicodeError,
+    ValueError,
+    zipfile.BadZipFile,
+    zipfile.LargeZipFile,
+    fastexcel.FastExcelError,
+    pl.exceptions.PolarsError,
+)
 
 
 def _load_data_file(
@@ -89,7 +141,7 @@ def _load_data_file(
     file_type = detect_file_type(file_path.name)
 
     if file_type == "csv":
-        return pl.scan_csv(file_path)
+        return pl.scan_csv(file_path, infer_schema_length=None)
     if file_type == "parquet":
         return pl.scan_parquet(file_path)
     if file_type == "avro":
@@ -97,11 +149,11 @@ def _load_data_file(
     if file_type == "ipc":
         return pl.scan_ipc(file_path)
     if file_type == "json":
-        return pl.read_json(file_path)
+        return pl.read_json(file_path, infer_schema_length=None)
     if file_type == "jsonl":
-        return pl.scan_ndjson(file_path)
+        return pl.scan_ndjson(file_path, infer_schema_length=None)
     if file_type == "tsv":
-        return pl.scan_csv(file_path, separator="\t")
+        return pl.scan_csv(file_path, separator="\t", infer_schema_length=None)
     if file_type == "excel":
         validate_spreadsheet_container(file_path)
         result = (

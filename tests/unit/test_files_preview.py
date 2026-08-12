@@ -4,8 +4,18 @@ from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
 from zipfile import ZipFile
+import json
 
 import polars as pl
+
+
+def _preview_schema(client, path: str) -> pl.Schema:
+    response = client.get(
+        "/api/user-files/preview/schema",
+        params={"path": path},
+    )
+    assert response.status_code == 200, response.text
+    return pl.read_ipc_stream(BytesIO(response.content)).schema
 
 
 def _write_stub_xlsx(path: Path) -> None:
@@ -38,7 +48,105 @@ def test_csv_preview_supported_types_and_preview(files_test_client, tmp_path):
     )
     assert resp.headers["x-wordflow-has-next"] == "true"
     frame = pl.read_ipc_stream(BytesIO(resp.content))
-    assert frame.to_dict(as_series=False) == {"a": [1, 2], "b": ["x", "y"]}
+    assert frame.to_dict(as_series=False) == {"a": ["1", "2"], "b": ["x", "y"]}
+
+
+def test_delimited_preview_pages_and_schema_preserve_raw_text(
+    files_test_client,
+    tmp_path,
+) -> None:
+    """Early and deep CSV/TSV pages follow the raw-value preview policy."""
+    user_root = tmp_path / "users" / "root" / "files"
+    rows = [(f"{value:03d}", str(value)) for value in range(102)]
+    for extension, separator in (("csv", ","), ("tsv", "\t")):
+        path = user_root / f"raw.{extension}"
+        path.write_text(
+            "identifier{0}value\n".format(separator)
+            + "".join(f"{identifier}{separator}{value}\n" for identifier, value in rows),
+            encoding="utf-8",
+        )
+
+        early = files_test_client.get(
+            "/api/user-files/preview",
+            params={"path": path.name, "page": 1, "page_size": 10},
+        )
+        deep = files_test_client.get(
+            "/api/user-files/preview",
+            params={"path": path.name, "page": 11, "page_size": 10},
+        )
+
+        assert early.status_code == 200, early.text
+        assert deep.status_code == 200, deep.text
+        assert pl.read_ipc_stream(BytesIO(early.content)).to_dicts()[0] == {
+            "identifier": "000",
+            "value": "0",
+        }
+        assert pl.read_ipc_stream(BytesIO(deep.content)).to_dicts() == [
+            {"identifier": "100", "value": "100"},
+            {"identifier": "101", "value": "101"},
+        ]
+        assert _preview_schema(files_test_client, path.name) == pl.Schema(
+            {"identifier": pl.String, "value": pl.String}
+        )
+
+
+def test_json_family_preview_pages_and_schema_use_full_inference(
+    files_test_client,
+    tmp_path,
+) -> None:
+    user_root = tmp_path / "users" / "root" / "files"
+    rows = [{"value": value} for value in range(101)] + [{"value": "late text"}]
+    for extension in ("json", "jsonl", "ndjson"):
+        path = user_root / f"mixed.{extension}"
+        if extension == "json":
+            path.write_text(json.dumps(rows), encoding="utf-8")
+        else:
+            path.write_text(
+                "\n".join(json.dumps(row) for row in rows) + "\n",
+                encoding="utf-8",
+            )
+
+        response = files_test_client.get(
+            "/api/user-files/preview",
+            params={"path": path.name, "page": 1, "page_size": 200},
+        )
+
+        assert response.status_code == 200, response.text
+        frame = pl.read_ipc_stream(BytesIO(response.content))
+        assert frame.schema == {"value": pl.String}
+        assert frame["value"].tail(1).item() == "late text"
+        assert _preview_schema(files_test_client, path.name) == frame.schema
+
+
+def test_preview_parser_failures_return_safe_invalid_input(
+    files_test_client,
+    tmp_path,
+) -> None:
+    user_root = tmp_path / "users" / "root" / "files"
+    malformed = {
+        "invalid.csv": b"value\nvalid\n\xff\n",
+        "invalid.json": b'[{"value": 1},',
+        "invalid.jsonl": b'{"value": 1}\n{"value":\n',
+        "invalid.ndjson": b'{"value": 1}\n{"value":\n',
+    }
+    for filename, content in malformed.items():
+        (user_root / filename).write_bytes(content)
+
+        page = files_test_client.get(
+            "/api/user-files/preview",
+            params={"path": filename, "page": 1, "page_size": 10},
+        )
+        schema = files_test_client.get(
+            "/api/user-files/preview/schema",
+            params={"path": filename},
+        )
+
+        assert page.status_code == 400, page.text
+        assert page.json()["code"] == "invalid_input"
+        assert page.json()["message"] == "File preview could not be generated"
+        if filename.endswith((".json", ".jsonl", ".ndjson")):
+            assert schema.status_code == 400, schema.text
+            assert schema.json()["code"] == "invalid_input"
 
 
 def test_zip_preview_uses_the_canonical_document_table(files_test_client, tmp_path):
