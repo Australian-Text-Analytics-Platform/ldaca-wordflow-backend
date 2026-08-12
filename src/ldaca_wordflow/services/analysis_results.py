@@ -280,6 +280,7 @@ class AnalysisResultService:
                 row_unit,
                 source.document_column,
                 source.metadata_columns,
+                source.analysis_columns,
                 page,
                 page_size,
                 sort_by,
@@ -774,16 +775,41 @@ def _projected_artifact_page(
     row_unit: str,
     document_column: str,
     metadata_columns: list[str],
+    analysis_columns: list[str],
     page: int,
     page_size: int,
     sort_by: str | None,
     descending: bool,
 ) -> IpcTablePage:
+    """Return one document or match page from a materialized Result artifact.
+
+    Used by: ``AnalysisResultService.projected_table_page`` for Concordance and
+    Quotation Review tables. Concordance match rows may sort by any public scalar
+    artifact field because Run All has already materialized the complete Result;
+    the other projections retain their narrower source-column contract.
+
+    Flow: validate the requested public sort field, apply either that direct sort
+    or the projection's deterministic default order, then collect one Arrow page.
+    """
+
     if page < 1 or page_size < 1:
         raise InvalidInputError("Page and page size must be positive")
     frame = _projected_artifact_lazyframe(path, kind, row_unit)
     schema = frame.collect_schema()
-    sortable_columns = {document_column, *metadata_columns}
+    concordance_match_projection = (
+        kind == "concordance_run_all" and row_unit == "matches"
+    )
+    sortable_columns = (
+        {
+            column
+            for column in {document_column, *metadata_columns, *analysis_columns}
+            if column in schema
+            and not schema[column].is_nested()
+            and schema[column] != pl.Object
+        }
+        if concordance_match_projection
+        else {document_column, *metadata_columns}
+    )
     if sort_by is not None and sort_by not in sortable_columns:
         raise InvalidInputError("Result sort column not found")
 
@@ -794,14 +820,20 @@ def _projected_artifact_page(
             if kind == "concordance_run_all"
             else QUOTE_ROW_IDX_COLUMN
         )
-    order = [sort_by, *stable_columns] if sort_by is not None else stable_columns
-    order = [column for column in order if column in schema]
-    frame = frame.sort(
-        order,
-        descending=[descending, *([False] * (len(order) - 1))]
-        if sort_by is not None
-        else False,
-    )
+    if sort_by is not None and concordance_match_projection:
+        # Review deliberately exposes Polars' direct, case-sensitive scalar
+        # ordering. Equal-key order is unspecified; no hidden secondary keys are
+        # added to the user's requested sort.
+        frame = frame.sort(sort_by, descending=descending)
+    else:
+        order = [sort_by, *stable_columns] if sort_by is not None else stable_columns
+        order = [column for column in order if column in schema]
+        frame = frame.sort(
+            order,
+            descending=[descending, *([False] * (len(order) - 1))]
+            if sort_by is not None
+            else False,
+        )
     page_frame = frame.slice((page - 1) * page_size, page_size + 1).collect()
     has_next = page_frame.height > page_size
     return IpcTablePage(

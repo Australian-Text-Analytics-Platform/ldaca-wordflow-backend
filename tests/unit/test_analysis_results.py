@@ -1,5 +1,6 @@
 """Typed Analysis Result projection tests."""
 
+from datetime import date, datetime
 from io import BytesIO
 from typing import Literal
 
@@ -157,6 +158,7 @@ def test_concordance_result_supports_document_and_match_pages(tmp_path) -> None:
                 "documents",
                 "text",
                 ["group"],
+                ["CONC_matched_text", "CONC_start_idx"],
                 1,
                 1,
                 None,
@@ -172,6 +174,7 @@ def test_concordance_result_supports_document_and_match_pages(tmp_path) -> None:
                 "matches",
                 "text",
                 ["group"],
+                ["CONC_matched_text", "CONC_start_idx"],
                 1,
                 2,
                 None,
@@ -215,6 +218,7 @@ def test_quotation_result_supports_document_and_match_pages(tmp_path) -> None:
                 "documents",
                 "text",
                 ["group"],
+                ["QUOTE_quote", "QUOTE_quote_row_idx"],
                 1,
                 10,
                 None,
@@ -230,6 +234,7 @@ def test_quotation_result_supports_document_and_match_pages(tmp_path) -> None:
                 "matches",
                 "text",
                 ["group"],
+                ["QUOTE_quote", "QUOTE_quote_row_idx"],
                 1,
                 10,
                 None,
@@ -243,17 +248,158 @@ def test_quotation_result_supports_document_and_match_pages(tmp_path) -> None:
     assert matches["QUOTE_quote_row_idx"].to_list() == [0, 1]
 
 
-def test_projected_result_rejects_generated_sort_columns(tmp_path) -> None:
+def _concordance_sort_artifact(tmp_path):
+    """Build a materialized match artifact used by Review sort-contract tests."""
+
     path = tmp_path / "concordance.parquet"
     pl.DataFrame(
         {
-            "__wordflow_source_row_id": [0],
-            "text": ["alpha"],
+            "__wordflow_source_row_id": [3, 2, 1, 0],
+            "text": ["doc 3", "doc 2", "doc 1", "doc 0"],
+            "group": [2, 1, 2, 1],
+            "reviewed": [True, False, True, False],
+            "published": [
+                datetime(2026, 1, 4),
+                datetime(2026, 1, 3),
+                datetime(2026, 1, 2),
+                datetime(2026, 1, 1),
+            ],
+            "day": [date(2026, 1, 4), date(2026, 1, 3), date(2026, 1, 2), None],
+            "nested_list": [[3], [2], [1], [0]],
+            "nested_struct": [{"value": 3}, {"value": 2}, {"value": 1}, {"value": 0}],
             "concordance": [
-                [{"CONC_matched_text": "alpha", "CONC_start_idx": 0}]
+                [
+                    {
+                        "CONC_matched_text": "the",
+                        "CONC_start_idx": 30,
+                        "CONC_l1": "the",
+                        "CONC_r1": "z",
+                        "CONC_l1_freq": 4,
+                        "CONC_r1_freq": 1,
+                    }
+                ],
+                [
+                    {
+                        "CONC_matched_text": "apple",
+                        "CONC_start_idx": 20,
+                        "CONC_l1": "Zebra",
+                        "CONC_r1": "A",
+                        "CONC_l1_freq": 3,
+                        "CONC_r1_freq": 2,
+                    }
+                ],
+                [
+                    {
+                        "CONC_matched_text": "Zebra",
+                        "CONC_start_idx": 10,
+                        "CONC_l1": "apple",
+                        "CONC_r1": "b",
+                        "CONC_l1_freq": 2,
+                        "CONC_r1_freq": 3,
+                    }
+                ],
+                [
+                    {
+                        "CONC_matched_text": "The",
+                        "CONC_start_idx": 0,
+                        "CONC_l1": "The",
+                        "CONC_r1": "M",
+                        "CONC_l1_freq": 1,
+                        "CONC_r1_freq": 4,
+                    }
+                ],
             ],
         }
     ).write_parquet(path)
+    return path
+
+
+CONCORDANCE_SORT_ANALYSIS_COLUMNS = [
+    "CONC_matched_text",
+    "CONC_start_idx",
+    "CONC_l1",
+    "CONC_r1",
+    "CONC_l1_freq",
+    "CONC_r1_freq",
+]
+
+
+def _read_projected_sort(
+    path, sort_by: str | None, descending: bool = False
+) -> pl.DataFrame:
+    """Read a complete Concordance match page for one requested Review sort."""
+
+    page = _projected_artifact_page(
+        path,
+        "concordance_run_all",
+        "matches",
+        "text",
+        ["group", "reviewed", "published", "day", "nested_list", "nested_struct"],
+        CONCORDANCE_SORT_ANALYSIS_COLUMNS,
+        1,
+        10,
+        sort_by,
+        descending,
+    )
+    return pl.read_ipc_stream(BytesIO(page.content))
+
+
+@pytest.mark.parametrize(
+    ("sort_by", "descending", "expected"),
+    [
+        ("CONC_l1", False, ["The", "Zebra", "apple", "the"]),
+        ("CONC_l1", True, ["the", "apple", "Zebra", "The"]),
+        ("CONC_r1", False, ["A", "M", "b", "z"]),
+        ("CONC_matched_text", False, ["The", "Zebra", "apple", "the"]),
+        ("CONC_l1_freq", True, [4, 3, 2, 1]),
+        ("CONC_r1_freq", False, [1, 2, 3, 4]),
+        ("CONC_start_idx", False, [0, 10, 20, 30]),
+        ("text", False, ["doc 0", "doc 1", "doc 2", "doc 3"]),
+        ("group", False, [1, 1, 2, 2]),
+        ("reviewed", False, [False, False, True, True]),
+        (
+            "published",
+            False,
+            [
+                datetime(2026, 1, 1),
+                datetime(2026, 1, 2),
+                datetime(2026, 1, 3),
+                datetime(2026, 1, 4),
+            ],
+        ),
+    ],
+)
+def test_concordance_match_review_sorts_public_scalar_columns(
+    tmp_path, sort_by: str, descending: bool, expected: list[object]
+) -> None:
+    path = _concordance_sort_artifact(tmp_path)
+
+    result = _read_projected_sort(path, sort_by, descending)
+
+    assert result[sort_by].to_list() == expected
+
+
+def test_concordance_match_review_accepts_null_scalar_values(tmp_path) -> None:
+    path = _concordance_sort_artifact(tmp_path)
+
+    result = _read_projected_sort(path, "day")
+
+    assert sorted(value for value in result["day"].to_list() if value is not None) == [
+        date(2026, 1, 2),
+        date(2026, 1, 3),
+        date(2026, 1, 4),
+    ]
+    assert result["day"].null_count() == 1
+
+
+@pytest.mark.parametrize(
+    "sort_by",
+    ["__wordflow_source_row_id", "nested_list", "nested_struct", "missing"],
+)
+def test_concordance_match_review_rejects_non_public_or_nested_sort_columns(
+    tmp_path, sort_by: str
+) -> None:
+    path = _concordance_sort_artifact(tmp_path)
 
     with pytest.raises(InvalidInputError, match="sort column"):
         _projected_artifact_page(
@@ -261,10 +407,72 @@ def test_projected_result_rejects_generated_sort_columns(tmp_path) -> None:
             "concordance_run_all",
             "matches",
             "text",
-            [],
+            [
+                "group",
+                "reviewed",
+                "published",
+                "day",
+                "nested_list",
+                "nested_struct",
+            ],
+            CONCORDANCE_SORT_ANALYSIS_COLUMNS,
             1,
             10,
-            "CONC_start_idx",
+            sort_by,
+            False,
+        )
+
+
+def test_concordance_match_review_uses_only_requested_sort_key(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _concordance_sort_artifact(tmp_path)
+    sort_calls: list[object] = []
+    original_sort = pl.LazyFrame.sort
+
+    def recording_sort(self, by, *more_by, **options):
+        sort_calls.append(by)
+        return original_sort(self, by, *more_by, **options)
+
+    monkeypatch.setattr(pl.LazyFrame, "sort", recording_sort)
+
+    _read_projected_sort(path, "CONC_l1")
+
+    assert sort_calls == ["CONC_l1"]
+
+
+def test_concordance_match_review_preserves_default_source_and_offset_order(
+    tmp_path,
+) -> None:
+    path = _concordance_sort_artifact(tmp_path)
+
+    result = _read_projected_sort(path, None)
+
+    assert result["__wordflow_source_row_id"].to_list() == [0, 1, 2, 3]
+    assert result["CONC_start_idx"].to_list() == [0, 10, 20, 30]
+
+
+def test_quotation_match_review_still_rejects_generated_sort_columns(tmp_path) -> None:
+    path = tmp_path / "quotation.parquet"
+    pl.DataFrame(
+        {
+            "__wordflow_source_row_id": [0],
+            "text": ["hello"],
+            "quotation": [[{"quote": "hello", "quote_row_idx": 0}]],
+        }
+    ).write_parquet(path)
+
+    with pytest.raises(InvalidInputError, match="sort column"):
+        _projected_artifact_page(
+            path,
+            "quotation_run_all",
+            "matches",
+            "text",
+            [],
+            ["QUOTE_quote", "QUOTE_quote_row_idx"],
+            1,
+            10,
+            "QUOTE_quote",
             False,
         )
 
