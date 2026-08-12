@@ -16,7 +16,7 @@ from ..domain.workspace import Node, Workspace
 
 from ..infrastructure.storage.data_loading import (
     DataFileLoadError,
-    load_data_file,
+    materialize_data_file,
     normalize_dtypes,
 )
 from ..shared.errors import (
@@ -431,9 +431,13 @@ class NodeService:
 def _load_dataframe(
     path: Path, sheet_name: str | None
 ) -> tuple[pl.DataFrame, list[dict[str, str]]]:
-    data = load_data_file(path, sheet_name=sheet_name)
-    if isinstance(data, pl.LazyFrame):
-        data = data.collect()
+    """Fully infer and materialize one source before canonical normalization.
+
+    Called by ``NodeService._create_from_file_admitted`` at its worker-thread
+    I/O boundary. Inference establishes the source schema; only subsequent
+    canonical casts belong in the returned normalization change log.
+    """
+    data = materialize_data_file(path, sheet_name=sheet_name)
     frame, changes = normalize_dtypes(data)
     return frame, changes
 

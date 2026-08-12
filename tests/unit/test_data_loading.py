@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import stat
 import struct
+import json
 import zipfile
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import polars as pl
@@ -15,7 +17,131 @@ from ldaca_wordflow.infrastructure.storage.data_loading import (
     LOADABLE_FILE_TYPES,
     detect_file_type,
     load_data_file,
+    load_data_file_preview,
+    materialize_data_file,
+    normalize_dtypes,
 )
+
+
+def _write_row_oriented_fixture(
+    path: Path,
+    extension: str,
+    rows: Sequence[Mapping[str, object]],
+) -> None:
+    """Write equivalent records in each row-oriented loader syntax."""
+    if extension in {"csv", "tsv"}:
+        separator = "," if extension == "csv" else "\t"
+        header = separator.join(rows[0])
+        body = [separator.join(str(value) for value in row.values()) for row in rows]
+        path.write_text("\n".join([header, *body, ""]), encoding="utf-8")
+    elif extension == "json":
+        path.write_text(json.dumps(rows), encoding="utf-8")
+    else:
+        path.write_text(
+            "\n".join(json.dumps(row) for row in rows) + "\n",
+            encoding="utf-8",
+        )
+
+
+@pytest.mark.parametrize("extension", ["csv", "tsv", "json", "jsonl", "ndjson"])
+def test_authoritative_row_loaders_infer_from_the_complete_file(
+    tmp_path: Path,
+    extension: str,
+) -> None:
+    """A value after row 100 widens the authoritative column without data loss."""
+    path = tmp_path / f"late-mixed.{extension}"
+    rows = [{"value": value} for value in range(101)] + [{"value": "late text"}]
+    _write_row_oriented_fixture(path, extension, rows)
+
+    loaded = materialize_data_file(path)
+    normalized, changes = normalize_dtypes(loaded)
+
+    assert normalized.schema == {"value": pl.String}
+    assert normalized.height == 102
+    assert normalized["value"].to_list() == [
+        *(str(value) for value in range(101)),
+        "late text",
+    ]
+    assert changes == []
+
+
+@pytest.mark.parametrize("extension", ["csv", "tsv", "json", "jsonl", "ndjson"])
+def test_authoritative_row_loaders_keep_homogeneous_numbers_numeric(
+    tmp_path: Path,
+    extension: str,
+) -> None:
+    path = tmp_path / f"numeric.{extension}"
+    _write_row_oriented_fixture(
+        path,
+        extension,
+        [{"first": value, "second": value + 1} for value in range(102)],
+    )
+
+    loaded = materialize_data_file(path)
+
+    assert loaded.schema == {"first": pl.Int64, "second": pl.Int64}
+
+
+def test_authoritative_inference_resolves_multiple_late_mixed_columns(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "multiple.csv"
+    rows: list[dict[str, int | str]] = [
+        {"first": value, "second": value} for value in range(101)
+    ]
+    rows.append({"first": "late first", "second": "late second"})
+    _write_row_oriented_fixture(path, "csv", rows)
+
+    loaded = materialize_data_file(path)
+
+    assert loaded.schema == {"first": pl.String, "second": pl.String}
+    assert loaded.tail(1).to_dicts() == [
+        {"first": "late first", "second": "late second"}
+    ]
+
+
+@pytest.mark.parametrize("extension", ["csv", "tsv"])
+def test_delimited_preview_loader_preserves_raw_lexemes(
+    tmp_path: Path,
+    extension: str,
+) -> None:
+    path = tmp_path / f"raw.{extension}"
+    _write_row_oriented_fixture(
+        path,
+        extension,
+        [{"identifier": "001", "value": "1"}, {"identifier": "002", "value": "2"}],
+    )
+
+    loaded = load_data_file_preview(path)
+    frame = loaded.collect() if isinstance(loaded, pl.LazyFrame) else loaded
+
+    assert frame.schema == {"identifier": pl.String, "value": pl.String}
+    assert frame.to_dicts() == [
+        {"identifier": "001", "value": "1"},
+        {"identifier": "002", "value": "2"},
+    ]
+
+
+@pytest.mark.parametrize(
+    ("filename", "content"),
+    [
+        ("invalid-utf8.csv", b"value\nvalid\n\xff\n"),
+        ("malformed.csv", b"first,second\n1,2,3\n"),
+        ("malformed.json", b'[{"value": 1},'),
+        ("malformed.jsonl", b'{"value": 1}\n{"value":\n'),
+        ("malformed.ndjson", b'{"value": 1}\n{"value":\n'),
+    ],
+)
+def test_authoritative_materialization_wraps_deferred_parser_failures(
+    tmp_path: Path,
+    filename: str,
+    content: bytes,
+) -> None:
+    path = tmp_path / filename
+    path.write_bytes(content)
+
+    with pytest.raises(DataFileLoadError):
+        materialize_data_file(path)
 
 
 @pytest.mark.parametrize(

@@ -130,6 +130,102 @@ def test_source_node_resource_schema_and_removed_rows_route(tmp_path: Path) -> N
         assert deleted.content == b""
 
 
+def test_source_creation_persists_full_file_inference_without_normalization_notice(
+    files_test_client: TestClient,
+    tmp_path: Path,
+) -> None:
+    """Source creation fully infers, stages, and reopens the authoritative frame."""
+    rows = [f"{value},{value:03d}" for value in range(101)]
+    content = ("value,identifier\n" + "\n".join([*rows, "late text,101"]) + "\n").encode()
+    uploaded = files_test_client.post(
+        "/api/user-files/uploads",
+        params={"path": "late-mixed.csv"},
+        content=content,
+        headers={"Content-Type": "application/octet-stream"},
+    )
+    assert uploaded.status_code == 201
+    workspace = files_test_client.post(
+        "/api/workspaces",
+        json={"name": "Full inference"},
+    )
+    workspace_id = workspace.json()["id"]
+    assert (
+        files_test_client.put(f"/api/workspaces/{workspace_id}/open").status_code
+        == 200
+    )
+
+    created = files_test_client.post(
+        f"/api/workspaces/{workspace_id}/nodes",
+        json={"kind": "file", "file_path": "late-mixed.csv"},
+    )
+
+    assert created.status_code == 201, created.text
+    resource = created.json()
+    assert resource["dtype_normalization"] is None
+    node_id = resource["id"]
+    staged = tmp_path / "workspaces" / workspace_id / "data" / f"{node_id}.parquet"
+    persisted = pl.read_parquet(staged)
+    assert persisted.schema == {"value": pl.String, "identifier": pl.Int64}
+    assert persisted.height == 102
+    assert persisted.row(0, named=True) == {"value": "0", "identifier": 0}
+    assert persisted.row(-1, named=True) == {
+        "value": "late text",
+        "identifier": 101,
+    }
+
+    assert files_test_client.delete(
+        f"/api/workspaces/{workspace_id}/open"
+    ).status_code == 204
+    assert files_test_client.put(
+        f"/api/workspaces/{workspace_id}/open"
+    ).status_code == 200
+    reopened_schema = files_test_client.get(
+        f"/api/workspaces/{workspace_id}/nodes/{node_id}/schema"
+    )
+    assert reopened_schema.status_code == 200
+    assert pl.read_ipc_stream(BytesIO(reopened_schema.content)).schema == persisted.schema
+
+
+def test_source_creation_returns_invalid_input_for_parser_failures(
+    files_test_client: TestClient,
+) -> None:
+    """Eager and deferred row-parser defects share the safe API contract."""
+    workspace = files_test_client.post(
+        "/api/workspaces",
+        json={"name": "Invalid sources"},
+    )
+    workspace_id = workspace.json()["id"]
+    assert (
+        files_test_client.put(f"/api/workspaces/{workspace_id}/open").status_code
+        == 200
+    )
+    malformed = {
+        "invalid-utf8.csv": b"value\nvalid\n\xff\n",
+        "malformed.csv": b"first,second\n1,2,3\n",
+        "malformed.json": b'[{"value": 1},',
+        "malformed.jsonl": b'{"value": 1}\n{"value":\n',
+        "malformed.ndjson": b'{"value": 1}\n{"value":\n',
+    }
+
+    for filename, content in malformed.items():
+        uploaded = files_test_client.post(
+            "/api/user-files/uploads",
+            params={"path": filename},
+            content=content,
+            headers={"Content-Type": "application/octet-stream"},
+        )
+        assert uploaded.status_code == 201
+
+        created = files_test_client.post(
+            f"/api/workspaces/{workspace_id}/nodes",
+            json={"kind": "file", "file_path": filename},
+        )
+
+        assert created.status_code == 400, created.text
+        assert created.json()["code"] == "invalid_input"
+        assert created.json()["message"] == "User file could not be loaded"
+
+
 def test_derived_nodes_share_one_creation_contract_and_preview_is_read_only(
     tmp_path: Path,
 ) -> None:
