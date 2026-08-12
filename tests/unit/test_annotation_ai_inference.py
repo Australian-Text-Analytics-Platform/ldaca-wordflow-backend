@@ -15,6 +15,7 @@ from ldaca_wordflow.infrastructure.providers.annotation_ai import (
     AnnotationContextLimitError,
     AnnotationResponseError,
     InferenceConfig,
+    _completion_error,
     _complete_openai,
     _complete_google,
     align_labels,
@@ -25,6 +26,45 @@ from ldaca_wordflow.infrastructure.providers.annotation_ai import (
     list_models,
     resolve_provider_wire,
 )
+
+
+class _ProviderStatusError(Exception):
+    def __init__(self, status_code: int, message: str = "private response body") -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+@pytest.mark.parametrize(
+    ("error", "code", "retryable"),
+    [
+        (_ProviderStatusError(401), "annotation_provider_authentication_failed", False),
+        (_ProviderStatusError(403), "annotation_provider_access_denied", False),
+        (_ProviderStatusError(429), "annotation_provider_rate_limited", True),
+        (_ProviderStatusError(422), "annotation_provider_request_rejected", False),
+        (_ProviderStatusError(503), "annotation_provider_unavailable", True),
+        (TimeoutError("private endpoint"), "annotation_provider_unavailable", True),
+        (RuntimeError("private unknown"), "annotation_provider_failed", False),
+    ],
+)
+def test_provider_sdk_errors_have_stable_safe_categories(
+    error: Exception,
+    code: str,
+    retryable: bool,
+) -> None:
+    classified = _completion_error(error, "fallback")
+
+    assert classified.code == code
+    assert classified.retryable is retryable
+    assert "private" not in classified.safe_message
+
+
+def test_provider_context_errors_are_classified_before_http_status() -> None:
+    error = _ProviderStatusError(400, "maximum context length exceeded: private")
+
+    classified = _completion_error(error, "fallback")
+
+    assert classified.code == "annotation_provider_context_limit"
+    assert classified.retryable is False
 
 
 def _inference_config() -> InferenceConfig:
@@ -438,6 +478,7 @@ async def test_annotate_all_uses_twenty_row_batches_with_ten_in_flight(
     )
 
     assert outcome.labels == texts
+    assert outcome.failed_rows == [False] * len(texts)
     assert outcome.failed_batch_count == 0
     assert sorted(chunk_sizes) == [1, *([20] * 10)]
     assert max_active == 10
@@ -477,6 +518,7 @@ async def test_annotate_all_splits_only_batches_rejected_by_the_context_limit(
     )
 
     assert outcome.labels == texts
+    assert outcome.failed_rows == [False] * len(texts)
     assert outcome.failed_batch_count == 0
     assert sorted(attempted_sizes) == [25, 25, 25, 25, 50, 50, 100]
 
@@ -515,11 +557,12 @@ async def test_annotate_all_splits_batches_with_exhausted_invalid_responses(
     )
 
     assert outcome.labels == texts
+    assert outcome.failed_rows == [False] * len(texts)
     assert outcome.failed_batch_count == 0
     assert sorted(attempted_sizes) == [25, 25, 25, 25, 50, 50, 100]
 
 
-async def test_annotate_all_keeps_successful_batches_and_reports_failed_rows(
+async def test_annotate_all_treats_provider_wide_failures_as_fatal(
     monkeypatch,
 ):
     progress: list[tuple[int, int, int]] = []
@@ -536,7 +579,11 @@ async def test_annotate_all_keeps_successful_batches_and_reports_failed_rows(
         _examples,
     ):
         if texts[0] == "20":
-            raise AnnotationAiError("provider unavailable")
+            raise AnnotationAiError(
+                "provider unavailable",
+                code="annotation_provider_unavailable",
+                retryable=True,
+            )
         return list(texts)
 
     monkeypatch.setattr(
@@ -544,20 +591,54 @@ async def test_annotate_all_keeps_successful_batches_and_reports_failed_rows(
         fake_annotate_batch,
     )
 
-    outcome = await annotate_all(
-        _run_all_request(),
-        "key",
-        [str(index) for index in range(45)],
-        progress_callback=lambda completed, total, failed: progress.append(
-            (completed, total, failed)
-        ),
+    with pytest.raises(AnnotationAiError) as exc_info:
+        await annotate_all(
+            _run_all_request(),
+            "key",
+            [str(index) for index in range(45)],
+            progress_callback=lambda completed, total, failed: progress.append(
+                (completed, total, failed)
+            ),
+        )
+
+    assert exc_info.value.code == "annotation_provider_unavailable"
+
+
+@pytest.mark.parametrize(
+    "failure_type",
+    [AnnotationContextLimitError, AnnotationResponseError],
+)
+async def test_annotate_all_marks_only_irreducible_row_local_failures(
+    monkeypatch,
+    failure_type,
+):
+    async def fake_annotate_batch(
+        _wire,
+        _model,
+        _api_key,
+        _instruction,
+        _classes,
+        texts,
+        _config,
+        _max_retries,
+        _examples,
+    ):
+        if "bad" in texts:
+            raise failure_type("private provider detail")
+        return [None for _text in texts]
+
+    monkeypatch.setattr(
+        "ldaca_wordflow.infrastructure.providers.annotation_ai._annotate_batch",
+        fake_annotate_batch,
     )
 
-    assert outcome.labels == [
-        *[str(index) for index in range(20)],
-        *([None] * 20),
-        *[str(index) for index in range(40, 45)],
-    ]
+    outcome = await annotate_all(
+        _run_all_request(batch_size=3),
+        "key",
+        ["good", "bad", "also-good"],
+    )
+
+    assert outcome.labels == [None, None, None]
+    assert outcome.failed_rows == [False, True, False]
     assert outcome.failed_batch_count == 1
-    assert outcome.failed_row_count == 20
-    assert progress[-1] == (45, 45, 1)
+    assert outcome.failed_row_count == 1

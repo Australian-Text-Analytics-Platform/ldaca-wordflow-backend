@@ -14,7 +14,7 @@ from ldaca_wordflow.infrastructure.storage.layout import (
 from ldaca_wordflow.domain.annotation import AnnotationProviderSnapshot
 from ldaca_wordflow.models.provider_credentials import (
     AnnotationProviderConfigurationCreate,
-    AnnotationProviderConfigurationRename,
+    AnnotationProviderConfigurationUpdate,
 )
 from ldaca_wordflow.services.provider_credentials import ProviderCredentialStore
 from ldaca_wordflow.services.sessions import SINGLE_USER
@@ -24,7 +24,6 @@ from ldaca_wordflow.shared.errors import (
     NotFoundError,
     ProviderCredentialMissingError,
     ProviderCredentialsCorruptError,
-    ResourceConflictError,
 )
 
 
@@ -79,7 +78,7 @@ async def test_create_configuration_returns_safe_ordered_metadata_and_schema_two
 
 
 @pytest.mark.anyio
-async def test_duplicate_names_are_allowed_but_duplicate_identities_are_rejected(
+async def test_keyless_and_duplicate_configurations_are_allowed(
     tmp_path: Path,
 ) -> None:
     store, _settings = _store(tmp_path)
@@ -95,25 +94,24 @@ async def test_duplicate_names_are_allowed_but_duplicate_identities_are_rejected
         AnnotationProviderConfigurationCreate(
             name="OpenRouter",
             provider="openrouter",
-            api_key="organisation-key",
+            api_key="personal-key",
+        )
+    )
+    keyless = await store.create_annotation_provider(
+        AnnotationProviderConfigurationCreate(
+            name="OpenAI without key",
+            provider="openai",
         )
     )
 
     assert first.name == second.name
     assert first.id != second.id
-    with pytest.raises(ResourceConflictError, match="already configured"):
-        await store.create_annotation_provider(
-            AnnotationProviderConfigurationCreate(
-                name="Duplicate identity",
-                provider="openrouter",
-                api_key="personal-key",
-            )
-        )
-    assert (await store.summary()).annotation_providers == [first, second]
+    assert keyless.has_api_key is False
+    assert (await store.summary()).annotation_providers == [first, second, keyless]
 
 
 @pytest.mark.anyio
-async def test_rename_delete_and_clear_preserve_collection_semantics(
+async def test_update_delete_and_clear_preserve_collection_semantics(
     tmp_path: Path,
 ) -> None:
     store, _settings = _store(tmp_path)
@@ -132,18 +130,39 @@ async def test_rename_delete_and_clear_preserve_collection_semantics(
         )
     )
 
-    renamed = await store.rename_annotation_provider(
+    updated = await store.update_annotation_provider(
         second.id,
-        AnnotationProviderConfigurationRename(name="First"),
+        AnnotationProviderConfigurationUpdate(
+            name="First",
+            api_key="replacement-key",
+        ),
     )
 
-    assert renamed.name == "First"
+    assert updated.model_dump(mode="json") == {
+        "id": str(second.id),
+        "name": "First",
+        "provider": "openrouter",
+        "base_url": None,
+        "has_api_key": True,
+    }
     assert [item.id for item in (await store.summary()).annotation_providers or []] == [
         first.id,
         second.id,
     ]
+    snapshot = AnnotationProviderSnapshot(
+        provider_configuration_id=second.id,
+        provider="openrouter",
+    )
+    assert await store.resolve_annotation_provider(snapshot) == "replacement-key"
+    cleared = await store.update_annotation_provider(
+        second.id,
+        AnnotationProviderConfigurationUpdate(api_key=None),
+    )
+    assert cleared.has_api_key is False
+    with pytest.raises(ProviderCredentialMissingError):
+        await store.resolve_annotation_provider(snapshot)
     await store.delete_annotation_provider(first.id)
-    assert (await store.summary()).annotation_providers == [renamed]
+    assert (await store.summary()).annotation_providers == [cleared]
     with pytest.raises(NotFoundError):
         await store.delete_annotation_provider(first.id)
 
@@ -176,7 +195,7 @@ def test_single_user_api_creates_an_annotation_provider_configuration(
     assert "api-secret" not in str(summary)
 
 
-def test_annotation_provider_configuration_api_renames_deletes_and_clears(
+def test_annotation_provider_configuration_api_updates_deletes_and_clears(
     files_test_client,
 ) -> None:
     first = files_test_client.post(
@@ -192,12 +211,20 @@ def test_annotation_provider_configuration_api_renames_deletes_and_clears(
         },
     ).json()
 
-    renamed = files_test_client.patch(
+    updated = files_test_client.patch(
         f"/api/provider-credentials/annotation-providers/{second['id']}",
-        json={"name": "First"},
+        json={"name": "First", "api_key": "replacement-key"},
     )
-    assert renamed.status_code == 200
-    assert renamed.json()["name"] == "First"
+    assert updated.status_code == 200
+    assert updated.json()["name"] == "First"
+    assert updated.json()["has_api_key"] is True
+    assert "replacement-key" not in updated.text
+    cleared = files_test_client.patch(
+        f"/api/provider-credentials/annotation-providers/{second['id']}",
+        json={"api_key": None},
+    )
+    assert cleared.status_code == 200
+    assert cleared.json()["has_api_key"] is False
     assert (
         files_test_client.delete(
             f"/api/provider-credentials/annotation-providers/{first['id']}"
@@ -225,6 +252,52 @@ def test_multi_user_api_denies_annotation_provider_configuration_writes(
     assert multi_user_test_client.get("/api/provider-credentials").json()[
         "annotation_providers"
     ] is None
+
+    update = multi_user_test_client.patch(
+        "/api/provider-credentials/annotation-providers/"
+        "74a93227-c081-4db9-af2e-ad357b62278d",
+        json={"name": "Renamed"},
+    )
+    assert update.status_code == 403
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"name": None},
+        {"name": ""},
+        {"api_key": ""},
+        {"provider": "openai"},
+        {"base_url": "https://example.test/v1"},
+        {"unexpected": True},
+    ],
+)
+def test_annotation_provider_update_rejects_invalid_patch_shapes(
+    files_test_client,
+    payload: dict[str, object],
+) -> None:
+    created = files_test_client.post(
+        "/api/provider-credentials/annotation-providers",
+        json={"name": "OpenAI", "provider": "openai"},
+    ).json()
+
+    response = files_test_client.patch(
+        f"/api/provider-credentials/annotation-providers/{created['id']}",
+        json=payload,
+    )
+
+    assert response.status_code == 422
+
+
+def test_annotation_provider_update_returns_not_found(files_test_client) -> None:
+    response = files_test_client.patch(
+        "/api/provider-credentials/annotation-providers/"
+        "74a93227-c081-4db9-af2e-ad357b62278d",
+        json={"name": "Missing"},
+    )
+
+    assert response.status_code == 404
 
 
 @pytest.mark.anyio
@@ -340,7 +413,7 @@ async def test_old_credential_layouts_are_rejected_without_migration(
 
 
 @pytest.mark.anyio
-async def test_duplicate_stored_configuration_identity_is_rejected(
+async def test_duplicate_stored_configuration_identity_is_valid_schema_two(
     tmp_path: Path,
 ) -> None:
     store, settings = _store(tmp_path)
@@ -369,5 +442,6 @@ async def test_duplicate_stored_configuration_identity_is_rejected(
         encoding="utf-8",
     )
 
-    with pytest.raises(ProviderCredentialsCorruptError):
-        await store.summary()
+    summary = await store.summary()
+    assert summary.annotation_providers is not None
+    assert len(summary.annotation_providers) == 2

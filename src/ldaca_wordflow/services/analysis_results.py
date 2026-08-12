@@ -72,7 +72,7 @@ from ..shared.errors import (
     AnalysisResultUnavailableError,
     ArtifactGoneError,
     InvalidInputError,
-    BadGatewayError,
+    AnnotationProviderError,
     NodeNotFoundError,
 )
 from ..shared.json_data import JsonData
@@ -1120,7 +1120,7 @@ async def _query_annotation_snapshot(
             examples,
         )
     except AnnotationAiError as exc:
-        raise BadGatewayError("Annotation provider request failed") from exc
+        raise AnnotationProviderError(exc.code, exc.safe_message) from exc
     rows = cast(list[dict[str, JsonData]], page.to_dicts())
     return cast(
         dict[str, JsonData],

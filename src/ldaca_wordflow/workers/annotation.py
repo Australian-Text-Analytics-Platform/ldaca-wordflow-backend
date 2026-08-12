@@ -19,6 +19,7 @@ from ..domain.workspace import (
     AnnotationRunAllAnalysisRequest,
 )
 from ..infrastructure.providers.annotation_ai import (
+    AnnotationAiError,
     annotate_all,
 )
 from ..infrastructure.storage.durable_fs import atomic_output_path
@@ -90,24 +91,43 @@ def run_annotation_analysis(
                 f"Processed {completed_rows}/{total_rows} rows{suffix}",
             )
 
-        outcome = asyncio.run(
-            annotate_all(
-                request,
-                api_key,
-                texts,
-                examples=_load_examples(source_request, input_snapshot_dir),
-                progress_callback=report_batch_progress,
+        try:
+            outcome = asyncio.run(
+                annotate_all(
+                    request,
+                    api_key,
+                    texts,
+                    examples=_load_examples(source_request, input_snapshot_dir),
+                    progress_callback=report_batch_progress,
+                )
             )
-        )
-        if len(outcome.labels) != len(target_indices):
+        except AnnotationAiError as error:
+            logger.warning(
+                "Annotation provider failed configuration_id=%s code=%s",
+                source_request.provider_configuration_id,
+                error.code,
+                exc_info=error,
+            )
+            return {
+                "state": "failed",
+                "failure": {
+                    "code": error.code,
+                    "message": error.safe_message,
+                },
+            }
+        if len(outcome.labels) != len(target_indices) or len(
+            outcome.failed_rows
+        ) != len(target_indices):
             raise ValueError("Annotation provider returned a misaligned result")
-        labels = (
-            [None] * frame.height
-            if request.processing_mode == "reprocess_all"
-            else existing_labels
-        )
-        for index, label in zip(target_indices, outcome.labels, strict=True):
-            labels[index] = label
+        labels = list(existing_labels)
+        for index, label, failed in zip(
+            target_indices,
+            outcome.labels,
+            outcome.failed_rows,
+            strict=True,
+        ):
+            if not failed:
+                labels[index] = label
         annotation_dtype = frame.schema[source_request.annotation_column]
         annotation_values = pl.Series(
             name=source_request.annotation_column,

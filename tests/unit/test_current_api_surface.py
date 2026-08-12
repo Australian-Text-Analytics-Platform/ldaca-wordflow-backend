@@ -41,7 +41,7 @@ EXPECTED_OPERATIONS = {
     (
         "PATCH",
         "/api/provider-credentials/annotation-providers/{configuration_id}",
-        "rename_annotation_provider_configuration",
+        "update_annotation_provider_configuration",
     ),
     (
         "DELETE",
@@ -263,6 +263,14 @@ def test_transient_provider_secrets_are_write_only_and_absent_from_resources() -
     data_portal_patch = schemas["DataPortalCredentialPatch"]["properties"]
     assert set(data_portal_patch) == {"data_portal_api_token"}
     assert data_portal_patch["data_portal_api_token"]["anyOf"][0]["writeOnly"] is True
+
+    for schema_name in (
+        "AnnotationProviderConfigurationCreate",
+        "AnnotationProviderConfigurationUpdate",
+    ):
+        field = schemas[schema_name]["properties"]["api_key"]
+        assert field["anyOf"][0]["format"] == "password"
+        assert field["anyOf"][0]["writeOnly"] is True
 
     for schema_name, field_name in (
         ("AnnotationModelsRequest", "api_key"),
