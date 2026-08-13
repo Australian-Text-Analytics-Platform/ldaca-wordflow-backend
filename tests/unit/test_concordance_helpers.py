@@ -102,6 +102,45 @@ def test_compute_concordance_page_whole_word_ignores_partial_matches():
     assert result["data"][0][0]["CONC_matched_text"] == "alpha"
 
 
+def test_compute_concordance_page_ignores_punctuation_in_context_counts() -> None:
+    request = {
+        "search_word": "target",
+        "num_left_tokens": 2,
+        "num_right_tokens": 2,
+        "regex": False,
+        "case_sensitive": False,
+        "ignore_punctuation": True,
+    }
+    source = pl.DataFrame(
+        {"text": ["alpha one , , , target . . three omega"]}
+    ).lazy()
+
+    result = compute_concordance_page(
+        source,
+        "text",
+        request,
+        page=1,
+        page_size=5,
+        sort_by=None,
+        descending=False,
+    )
+
+    hit = result["data"][0][0]
+    assert (
+        hit["CONC_left_context"],
+        hit["CONC_l1"],
+        hit["CONC_right_context"],
+        hit["CONC_r1"],
+        hit["CONC_extraction"],
+    ) == (
+        "alpha one , , , ",
+        "one",
+        " . . three omega",
+        "three",
+        "alpha one , , , target . . three omega",
+    )
+
+
 def test_compute_concordance_page_rejects_an_unknown_sort_column() -> None:
     source = pl.DataFrame({"text": ["alpha"]}).lazy()
 

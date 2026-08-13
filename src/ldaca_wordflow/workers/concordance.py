@@ -188,6 +188,7 @@ def _build_concordance_occurrence_dataframe(
     source_row_ids: list[int],
     extra_columns_data: dict[str, list] | None,
     extra_columns_dtypes: dict[str, Any] | None = None,
+    ignore_punctuation: bool = False,
 ):
     """Compute flattened occurrence rows for one corpus. Returns (df, output_columns).
 
@@ -254,6 +255,7 @@ def _build_concordance_occurrence_dataframe(
                     num_right_tokens=num_right_tokens,
                     regex=use_regex,
                     case_sensitive=case_sensitive,
+                    remove_punct=ignore_punctuation,
                 ).alias("concordance"),
             ]
         )
@@ -265,7 +267,12 @@ def _build_concordance_occurrence_dataframe(
             ]
         )
         .filter(pl.col(CONC_MATCHED_TEXT_COLUMN).is_not_null())
-        .with_columns(concordance_extraction_expr("__concordance_doc__"))
+        .with_columns(
+            concordance_extraction_expr(
+                "__concordance_doc__",
+                contexts_include_separators=ignore_punctuation,
+            )
+        )
         .drop("__concordance_doc__")
     )
     return result, output_columns + list(CORE_CONCORDANCE_COLUMNS) + [
@@ -414,6 +421,7 @@ def run_concordance_run_all(
     regex: bool,
     whole_word: bool,
     case_sensitive: bool,
+    ignore_punctuation: bool = False,
     search_mode: str = "regex",
     tokenizer_model: str | None = None,
     token_cache_path: str | None = None,
@@ -482,6 +490,7 @@ def run_concordance_run_all(
                 regex=regex,
                 whole_word=whole_word,
                 case_sensitive=case_sensitive,
+                ignore_punctuation=ignore_punctuation,
                 include_document_column=True,
                 source_row_ids=source_row_ids,
                 extra_columns_data=extra_columns_data,

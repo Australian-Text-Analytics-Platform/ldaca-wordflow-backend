@@ -157,6 +157,7 @@ class ConcordanceAnalysisRequest(_StrictModel):
     regex: bool = False
     whole_word: bool = False
     case_sensitive: bool = False
+    ignore_punctuation: bool = False
     search_mode: Literal["regex", "tokens"] = "regex"
     node_tokenizer_models: dict[uuid.UUID, NonEmptyText] = Field(default_factory=dict)
 

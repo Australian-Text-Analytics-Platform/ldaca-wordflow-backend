@@ -432,6 +432,7 @@ class AnalysisExecutionPreparer:
                     "regex": source.regex,
                     "whole_word": source.whole_word,
                     "case_sensitive": source.case_sensitive,
+                    "ignore_punctuation": source.ignore_punctuation,
                     "search_mode": source.search_mode,
                     "tokenizer_model": source.node_tokenizer_models.get(
                         node_id

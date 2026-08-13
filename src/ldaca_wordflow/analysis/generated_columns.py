@@ -39,17 +39,20 @@ CONCORDANCE_DATA_BLOCK_CREATION_COLUMNS = CORE_CONCORDANCE_COLUMNS + (
 )
 
 
-def concordance_extraction_expr(document_column: str) -> pl.Expr:
+def concordance_extraction_expr(
+    document_column: str,
+    *,
+    contexts_include_separators: bool = False,
+) -> pl.Expr:
     """Polars expression that slices the raw KWIC window from ``document_column``.
 
     Goes from the start of ``CONC_left_context`` to the end of
     ``CONC_right_context`` so the extract preserves the original whitespace
     and punctuation between the context tokens and the matched span.
-    ``polars_text.concordance`` returns context strings token-bounded with no
-    surrounding whitespace, so we assume a single-character separator between
-    each context and the matched span — accurate for whitespace-tokenised
-    text, off by a small amount only when the separator is multi-char (e.g.
-    em-dashes or multiple spaces).
+    Legacy context strings are token-bounded with no surrounding whitespace,
+    so they require the historical single-character separator adjustment.
+    Offset-sliced contexts already include every separator adjacent to the
+    matched span and set ``contexts_include_separators=True``.
 
     Requires the input frame to carry ``CONC_left_context``,
     ``CONC_right_context``, ``CONC_start_idx``, ``CONC_end_idx``, and the
@@ -58,16 +61,20 @@ def concordance_extraction_expr(document_column: str) -> pl.Expr:
     """
     left_len = pl.col(CONC_LEFT_CONTEXT_COLUMN).fill_null("").str.len_chars()
     right_len = pl.col(CONC_RIGHT_CONTEXT_COLUMN).fill_null("").str.len_chars()
-    left_sep = (
-        pl.when(left_len > 0)
-        .then(pl.lit(1, dtype=pl.Int64))
-        .otherwise(pl.lit(0, dtype=pl.Int64))
-    )
-    right_sep = (
-        pl.when(right_len > 0)
-        .then(pl.lit(1, dtype=pl.Int64))
-        .otherwise(pl.lit(0, dtype=pl.Int64))
-    )
+    if contexts_include_separators:
+        left_sep = pl.lit(0, dtype=pl.Int64)
+        right_sep = pl.lit(0, dtype=pl.Int64)
+    else:
+        left_sep = (
+            pl.when(left_len > 0)
+            .then(pl.lit(1, dtype=pl.Int64))
+            .otherwise(pl.lit(0, dtype=pl.Int64))
+        )
+        right_sep = (
+            pl.when(right_len > 0)
+            .then(pl.lit(1, dtype=pl.Int64))
+            .otherwise(pl.lit(0, dtype=pl.Int64))
+        )
     window_start = pl.max_horizontal(
         pl.lit(0, dtype=pl.Int64),
         pl.col(CONC_START_IDX_COLUMN) - left_len - left_sep,
@@ -88,6 +95,7 @@ def compute_concordance_extraction_string(
     right_context: str | None,
     start_idx: int,
     end_idx: int,
+    contexts_include_separators: bool = False,
 ) -> str:
     """Python equivalent of ``concordance_extraction_expr`` for one hit.
 
@@ -98,8 +106,8 @@ def compute_concordance_extraction_string(
     """
     left = left_context or ""
     right = right_context or ""
-    left_sep = 1 if left else 0
-    right_sep = 1 if right else 0
+    left_sep = 0 if contexts_include_separators else int(bool(left))
+    right_sep = 0 if contexts_include_separators else int(bool(right))
     window_start = max(0, int(start_idx) - len(left) - left_sep)
     window_end = int(end_idx) + len(right) + right_sep
     return (document_text or "")[window_start:window_end]

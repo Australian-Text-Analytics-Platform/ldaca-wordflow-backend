@@ -112,6 +112,7 @@ def build_concordance_lazyframe(
         num_right_tokens=request["num_right_tokens"],
         regex=use_regex,
         case_sensitive=request["case_sensitive"],
+        remove_punct=bool(request.get("ignore_punctuation", False)),
     )
     return node_data.select([pl.all(), expr.alias("concordance")])
 
@@ -139,6 +140,7 @@ def _project_concordance_hit(
     raw_hit: dict[str, Any],
     *,
     document_text: Optional[str] = None,
+    contexts_include_separators: bool = False,
 ) -> dict[str, Any]:
     """Project one raw concordance struct into canonical response columns.
 
@@ -163,6 +165,7 @@ def _project_concordance_hit(
             right_context=raw_hit.get("right_context"),
             start_idx=int(start_idx),
             end_idx=int(end_idx),
+            contexts_include_separators=contexts_include_separators,
         )
     return projected
 
@@ -200,6 +203,7 @@ def _serialize_grouped_concordance_rows(
     *,
     node_label: Optional[str] = None,
     text_column: Optional[str] = None,
+    contexts_include_separators: bool = False,
 ) -> tuple[list[list[dict[str, Any]]], list[str]]:
     """Serialize collected concordance rows into grouped per-document hit lists.
 
@@ -241,7 +245,11 @@ def _serialize_grouped_concordance_rows(
                 continue
             projected_hit = {
                 **base_row,
-                **_project_concordance_hit(raw_hit, document_text=document_text),
+                **_project_concordance_hit(
+                    raw_hit,
+                    document_text=document_text,
+                    contexts_include_separators=contexts_include_separators,
+                ),
             }
             if node_label:
                 projected_hit["__source_node"] = node_label
@@ -298,6 +306,9 @@ def compute_concordance_page(
         result_df,
         node_label=node_label,
         text_column=column,
+        contexts_include_separators=bool(
+            request.get("ignore_punctuation", False)
+        ),
     )
 
     total_source_pages = (

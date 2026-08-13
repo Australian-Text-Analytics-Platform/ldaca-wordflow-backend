@@ -47,6 +47,14 @@ def _concordance() -> ConcordanceAnalysisRequest:
     )
 
 
+def test_concordance_ignore_punctuation_defaults_false_and_persists_true() -> None:
+    legacy = _concordance()
+    enabled = legacy.model_copy(update={"ignore_punctuation": True})
+
+    assert legacy.ignore_punctuation is False
+    assert enabled.model_dump(mode="json")["ignore_punctuation"] is True
+
+
 def _analysis(
     request: AnalysisRequest,
     *,

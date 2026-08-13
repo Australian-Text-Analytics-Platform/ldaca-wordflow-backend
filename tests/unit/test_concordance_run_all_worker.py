@@ -116,3 +116,47 @@ def test_concordance_run_all_retains_extraction_in_canonical_result(
     assert restored_df.get_column("concordance").to_list()[0][0][
         "CONC_extraction"
     ] == "alpha beta"
+
+
+def test_concordance_run_all_ignores_punctuation_but_preserves_raw_context(
+    tmp_path, worker_snapshot
+):
+    result = run_concordance_run_all(
+        artifact_dir=str(tmp_path),
+        input_snapshot_dir=str(
+            worker_snapshot(
+                node_id="11111111-1111-4111-8111-111111111111",
+                columns={
+                    "document": [
+                        "alpha one , , , target . . three omega",
+                        "one target . three",
+                    ]
+                },
+            )
+        ),
+        parent_node_id="11111111-1111-4111-8111-111111111111",
+        document_column="document",
+        search_word="target",
+        num_left_tokens=2,
+        num_right_tokens=2,
+        regex=False,
+        whole_word=False,
+        case_sensitive=False,
+        ignore_punctuation=True,
+    )
+
+    restored_df = pl.read_parquet(tmp_path / result["source"]["table"]["artifact"])
+    first_hit = restored_df.get_column("concordance").to_list()[0][0]
+    assert (
+        first_hit["CONC_l1"],
+        first_hit["CONC_r1"],
+        first_hit["CONC_extraction"],
+        first_hit["CONC_l1_freq"],
+        first_hit["CONC_r1_freq"],
+    ) == (
+        "one",
+        "three",
+        "alpha one , , , target . . three omega",
+        2,
+        2,
+    )
