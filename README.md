@@ -1,7 +1,12 @@
-# LDaCA Wordflow Backend
+# LDaCA Wordflow Backend (archived)
 
-FastAPI service for LDaCA Wordflow. The package can run the API by itself or
-serve the bundled production frontend from the same process.
+This standalone source repository is archived. The backend now lives in the
+[`backend/` directory of the LDaCA Wordflow monorepo](https://github.com/Australian-Text-Analytics-Platform/ldaca-wordflow/tree/main/backend),
+which is authoritative for source, CI, issues, and releases.
+
+Existing commits, tags, and releases remain here as historical records. Open
+new issues and pull requests in the
+[Wordflow monorepo](https://github.com/Australian-Text-Analytics-Platform/ldaca-wordflow).
 
 ## Quick start
 
@@ -37,9 +42,10 @@ JupyterHub, the launcher derives the proxy `root_path` from
 
 ## Development
 
-- Backend architecture: [`../docs/architecture/backend/overview.md`](../docs/architecture/backend/overview.md)
-- HTTP endpoint inventory: [`../docs/reference/backend-api.md`](../docs/reference/backend-api.md)
-- Settings reference: [`../docs/reference/backend-settings.md`](../docs/reference/backend-settings.md)
+- Backend source: [`backend/`](https://github.com/Australian-Text-Analytics-Platform/ldaca-wordflow/tree/main/backend)
+- Backend architecture: [`docs/architecture/backend/overview.md`](https://github.com/Australian-Text-Analytics-Platform/ldaca-wordflow/blob/main/docs/architecture/backend/overview.md)
+- HTTP endpoint inventory: [`docs/reference/backend-api.md`](https://github.com/Australian-Text-Analytics-Platform/ldaca-wordflow/blob/main/docs/reference/backend-api.md)
+- Settings reference: [`docs/reference/backend-settings.md`](https://github.com/Australian-Text-Analytics-Platform/ldaca-wordflow/blob/main/docs/reference/backend-settings.md)
 - Lint: `uv run ruff check .`
 - Type check: `uv run ty check`
 - Tests: `uv run pytest -q`
